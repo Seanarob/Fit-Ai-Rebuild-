@@ -27,6 +27,9 @@ jobs:
       - name: Login to Supabase
         run: supabase login --token "${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}"
 
+      - name: Link Supabase project
+        run: supabase link --project-ref "${{ env.SUPABASE_PROJECT_REF }}"
+
       - name: Run migrations
         run: supabase db push
 
