@@ -32,6 +32,3 @@ jobs:
 
       - name: Run migrations
         run: supabase db push
-
-      - name: Deploy Edge functions
-        run: supabase functions deploy
