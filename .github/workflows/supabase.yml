@@ -15,8 +15,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Supabase CLI
-        run: npm install -g supabase
+      - name: Install Supabase CLI via release
+        run: |
+          CLI_VERSION="1.99.0"
+          curl -sL "https://github.com/supabase/cli/releases/download/v${CLI_VERSION}/supabase_${CLI_VERSION}_linux_amd64.tar.gz" | tar xz
+          sudo mv supabase /usr/local/bin/
 
       - name: Verify Supabase CLI
         run: supabase --version
