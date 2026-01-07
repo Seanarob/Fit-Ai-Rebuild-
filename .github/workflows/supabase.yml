@@ -17,8 +17,8 @@ jobs:
 
       - name: Install Supabase CLI via release
         run: |
-          CLI_VERSION="1.99.0"
-          curl -sL "https://github.com/supabase/cli/releases/download/v${CLI_VERSION}/supabase_${CLI_VERSION}_linux_amd64.tar.gz" | tar xz
+          curl -sL https://github.com/supabase/cli/releases/latest/download/supabase_linux_amd64.tar.gz -o supabase.tar.gz
+          tar -xzf supabase.tar.gz
           sudo mv supabase /usr/local/bin/
 
       - name: Verify Supabase CLI
