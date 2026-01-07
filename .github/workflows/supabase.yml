@@ -15,10 +15,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Supabase CLI
-        uses: supabase/cli-action@v1
-        with:
-          version: latest
+      - name: Install Supabase CLI
+        run: npm install -g supabase
+
+      - name: Verify Supabase CLI
+        run: supabase --version
 
       - name: Login to Supabase
         run: supabase login --token "${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}"
