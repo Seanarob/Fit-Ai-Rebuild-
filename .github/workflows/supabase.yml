@@ -1,0 +1,30 @@
+name: Supabase Deploy
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    name: Deploy migrations & functions
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_PROJECT_REF: yrgpsnksfhvwemuqpgox
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Supabase CLI
+        uses: supabase/cli-action@v1
+        with:
+          version: latest
+
+      - name: Login to Supabase
+        run: supabase login --token "${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}"
+
+      - name: Run migrations
+        run: supabase db push --project-ref "${{ env.SUPABASE_PROJECT_REF }}"
+
+      - name: Deploy Edge functions
+        run: supabase functions deploy --project-ref "${{ env.SUPABASE_PROJECT_REF }}" --no-verify
