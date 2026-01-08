@@ -1,0 +1,14 @@
+# backend/pyproject.toml
+[project]
+name = "fitai-backend"
+version = "0.1.0"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "pydantic>=2.0",
+    "openai==0.28.1",
+    "supabase>=2.0.0,<3.0.0",
+]
+
+[tool.poetry.scripts]
+start = "uvicorn backend.app.main:app --reload"
