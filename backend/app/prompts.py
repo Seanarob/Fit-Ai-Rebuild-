@@ -1,3 +1,4 @@
+import json
 import os
 from datetime import datetime
 
@@ -39,11 +40,21 @@ def run_prompt(name: str, user_id=None, inputs=None):
     }
     log_job(job_payload)
     try:
+        input_payload = inputs or {}
+        user_content: list[dict] | str
+        photo_urls = input_payload.get("photo_urls") if isinstance(input_payload, dict) else None
+        if photo_urls:
+            user_content = [{"type": "text", "text": json.dumps(input_payload)}]
+            user_content.extend(
+                {"type": "image_url", "image_url": {"url": url}} for url in photo_urls if url
+            )
+        else:
+            user_content = json.dumps(input_payload)
         response = openai.ChatCompletion.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": prompt["template"]},
-                {"role": "user", "content": inputs or "{}"},
+                {"role": "user", "content": user_content},
             ],
         )
         output = response.choices[0].message.content
