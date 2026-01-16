@@ -97,6 +97,12 @@ struct NutritionAPIService {
             throw OnboardingAPIError.invalidResponse
         }
 
+#if DEBUG
+        if let body = String(data: data, encoding: .utf8) {
+            print("Nutrition search response:", body)
+        }
+#endif
+
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         let payload = try decoder.decode(NutritionSearchResponse.self, from: data)
