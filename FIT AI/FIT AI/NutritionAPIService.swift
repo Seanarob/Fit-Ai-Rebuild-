@@ -27,6 +27,13 @@ struct NutritionSearchResponse: Decodable {
     let results: [FoodItem]
 }
 
+struct MealPhotoScanResult {
+    let food: FoodItem?
+    let photoUrl: String?
+    let query: String?
+    let message: String?
+}
+
 struct MacroTargets {
     let calories: Double
     let protein: Double
@@ -70,6 +77,12 @@ struct NutritionAPIService {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 15
         config.timeoutIntervalForResource = 30
+        if let anonKey = SupabaseConfig.anonKey {
+            config.httpAdditionalHeaders = [
+                "apikey": anonKey,
+                "Authorization": "Bearer \(anonKey)",
+            ]
+        }
         return URLSession(configuration: config)
     }
 
@@ -152,7 +165,7 @@ struct NutritionAPIService {
         return try decoder.decode(FoodItem.self, from: data)
     }
 
-    func scanMealPhoto(userId: String, mealType: String, photoUrl: String) async throws -> String {
+    func scanMealPhoto(userId: String, mealType: String, photoUrl: String) async throws -> MealPhotoScanResult {
         let url = BackendConfig.baseURL.appendingPathComponent("scan/meal-photo")
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -170,17 +183,10 @@ struct NutritionAPIService {
             throw OnboardingAPIError.invalidResponse
         }
 
-        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        if let result = json?["result"] as? String {
-            return result
-        }
-        if let result = json?["ai_result"] as? String {
-            return result
-        }
-        return json?.description ?? "Scan complete."
+        return try parseMealScanResponse(data: data)
     }
 
-    func scanMealPhoto(userId: String, mealType: String, imageData: Data) async throws -> String {
+    func scanMealPhoto(userId: String, mealType: String, imageData: Data) async throws -> MealPhotoScanResult {
         let url = BackendConfig.baseURL.appendingPathComponent("scan/meal-photo")
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -207,14 +213,7 @@ struct NutritionAPIService {
             throw OnboardingAPIError.invalidResponse
         }
 
-        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        if let result = json?["result"] as? String {
-            return result
-        }
-        if let result = json?["ai_result"] as? String {
-            return result
-        }
-        return json?.description ?? "Scan complete."
+        return try parseMealScanResponse(data: data)
     }
 
     func fetchDailyLogs(userId: String, date: Date = Date()) async throws -> [NutritionLogEntry] {
@@ -274,6 +273,75 @@ struct NutritionAPIService {
         }
     }
 
+    func fetchFavorites(userId: String) async throws -> [FoodItem] {
+        let url = BackendConfig.baseURL.appendingPathComponent("nutrition/favorites")
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        components?.queryItems = [
+            URLQueryItem(name: "user_id", value: userId),
+            URLQueryItem(name: "limit", value: "100"),
+        ]
+        guard let finalURL = components?.url else {
+            throw OnboardingAPIError.invalidResponse
+        }
+
+        let (data, response) = try await session.data(from: finalURL)
+        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            throw OnboardingAPIError.invalidResponse
+        }
+
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let favorites = json?["favorites"] as? [[String: Any]] ?? []
+        let favoritesData = try JSONSerialization.data(withJSONObject: favorites, options: [])
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode([FoodItem].self, from: favoritesData)
+    }
+
+    func saveFavorite(userId: String, food: FoodItem) async throws {
+        let url = BackendConfig.baseURL.appendingPathComponent("nutrition/favorites")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        var foodPayload: [String: Any] = [
+            "id": food.id,
+            "source": food.source,
+            "name": food.name,
+            "protein": food.protein,
+            "carbs": food.carbs,
+            "fats": food.fats,
+            "calories": food.calories,
+        ]
+        if let serving = food.serving {
+            foodPayload["serving"] = serving
+        }
+        if let fdcId = food.fdcId {
+            foodPayload["fdc_id"] = fdcId
+        }
+
+        var metadata: [String: Any] = ["source": food.source]
+        if food.source == "fatsecret" {
+            metadata["food_id"] = food.id
+        }
+        if let fdcId = food.fdcId {
+            metadata["fdc_id"] = fdcId
+        }
+        metadata["external_id"] = food.id
+        foodPayload["metadata"] = metadata
+
+        let payload: [String: Any] = [
+            "user_id": userId,
+            "food": foodPayload,
+        ]
+
+        request.httpBody = try JSONSerialization.data(withJSONObject: payload, options: [])
+
+        let (_, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            throw OnboardingAPIError.invalidResponse
+        }
+    }
+
     func fetchActiveMealPlan(userId: String) async throws -> MealPlanSnapshot? {
         let url = BackendConfig.baseURL.appendingPathComponent("mealplan/active")
         var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
@@ -314,6 +382,25 @@ struct NutritionAPIService {
         return await MainActor.run {
             MealPlanSnapshotBuilder.snapshot(from: json)
         }
+    }
+}
+
+private extension NutritionAPIService {
+    func parseMealScanResponse(data: Data) throws -> MealPhotoScanResult {
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let photoUrl = json?["photo_url"] as? String
+        let query = json?["query"] as? String
+        let message = (json?["message"] as? String) ?? (json?["ai_result"] as? String) ?? (json?["result"] as? String)
+
+        if let match = json?["match"] as? [String: Any] {
+            let matchData = try JSONSerialization.data(withJSONObject: match, options: [])
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            let food = try decoder.decode(FoodItem.self, from: matchData)
+            return MealPhotoScanResult(food: food, photoUrl: photoUrl, query: query, message: message)
+        }
+
+        return MealPhotoScanResult(food: nil, photoUrl: photoUrl, query: query, message: message ?? "Scan complete.")
     }
 }
 

@@ -4,6 +4,7 @@ enum SupabaseConfig {
     enum Key: String {
         case url = "SUPABASE_URL"
         case anonKey = "SUPABASE_ANON_KEY"
+        case redirectURL = "SUPABASE_REDIRECT_URL"
     }
 
     private static let values: [String: String]? = {
@@ -39,5 +40,12 @@ enum SupabaseConfig {
 
     static var anonKey: String? {
         value(for: .anonKey)
+    }
+
+    static var redirectURL: URL? {
+        guard let raw = value(for: .redirectURL) else {
+            return nil
+        }
+        return URL(string: raw)
     }
 }

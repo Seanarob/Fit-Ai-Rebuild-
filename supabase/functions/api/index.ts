@@ -32,6 +32,23 @@ class HttpError extends Error {
 
 const urlNamespaceUuid = "6ba7b811-9dad-11d1-80b4-00c04fd430c8";
 
+const weeklyCheckinTemplate = `You are a blunt but constructive strength coach. Give the user a straight-take check-in based on the inputs and any progress photos. No fluff, no emojis, no sugar-coating. Be specific and practical.
+
+Return ONLY valid JSON with these keys:
+- improvements: array of short strings (3-6 items)
+- needs_work: array of short strings (3-6 items)
+- photo_notes: array of short strings about visible changes (empty if no photos)
+- photo_focus: array of focus areas (3-5 items if photos exist)
+- targets: array of actionable next-week focus points (3-6 items)
+- summary: a direct trainer-style paragraph, 120-220 words, similar in tone to a coach giving honest feedback
+- macro_delta: object { calories, protein, carbs, fats } as integers (use 0s if no change)
+- new_macros: object { calories, protein, carbs, fats } or null
+- update_macros: boolean
+- cardio_recommendation: short string or null
+- cardio_plan: array of strings (sessions or plan) or empty array
+
+If the user is already lean with visible abs, acknowledge it. Call out gaps (chest thickness, lat width, rear delts, etc.) when appropriate. Keep the summary in a tough-love coach voice.`;
+
 function jsonResponse(payload: unknown, status = 200) {
   return new Response(JSON.stringify(payload), {
     status,
@@ -90,6 +107,24 @@ async function normalizeUserId(userId?: string | null) {
   return await uuidV5(`fitai:${userId}`);
 }
 
+async function resolveUserId(userId?: string | null) {
+  const normalized = await normalizeUserId(userId);
+  if (!normalized) throw new HttpError(400, "user_id is required");
+  return normalized;
+}
+
+async function ensureUserExists(userId: string) {
+  const { data: existing } = await supabase.from("users").select("id").eq("id", userId).limit(1);
+  if (!existing || existing.length === 0) {
+    await supabase.from("users").insert({
+      id: userId,
+      email: `user-${userId}@placeholder.local`,
+      hashed_password: "placeholder",
+      role: "user",
+    });
+  }
+}
+
 async function sha256Hex(value: string) {
   const data = new TextEncoder().encode(value);
   const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", data));
@@ -98,6 +133,53 @@ async function sha256Hex(value: string) {
 
 function todayIso() {
   return new Date().toISOString().slice(0, 10);
+}
+
+function cleanPhotoUrl(value: unknown) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length ? trimmed : null;
+}
+
+function extractPhotoUrls(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const urls: string[] = [];
+  for (const item of value) {
+    if (typeof item === "string") {
+      const cleaned = cleanPhotoUrl(item);
+      if (cleaned) urls.push(cleaned);
+      continue;
+    }
+    if (item && typeof item === "object") {
+      const cleaned = cleanPhotoUrl((item as Record<string, unknown>).url);
+      if (cleaned) urls.push(cleaned);
+    }
+  }
+  return urls;
+}
+
+function extractStartingPhotoUrls(value: unknown): string[] {
+  if (!value || typeof value !== "object") return [];
+  const record = value as Record<string, unknown>;
+  const urls: string[] = [];
+  for (const key of ["front", "side", "back"]) {
+    const entry = record[key];
+    if (!entry || typeof entry !== "object") continue;
+    const cleaned = cleanPhotoUrl((entry as Record<string, unknown>).url);
+    if (cleaned) urls.push(cleaned);
+  }
+  return urls;
+}
+
+function dedupeUrls(urls: string[]) {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const url of urls) {
+    if (seen.has(url)) continue;
+    seen.add(url);
+    result.push(url);
+  }
+  return result;
 }
 
 async function parseJson<T = Record<string, unknown>>(req: Request): Promise<T> {
@@ -128,6 +210,7 @@ async function runPrompt(name: string, userId: string | null, inputs: Record<str
   }
 
   const prompt = promptRows[0];
+  const systemTemplate = name === "weekly_checkin_analysis" ? weeklyCheckinTemplate : prompt.template;
   const jobPayload = {
     user_id: userId,
     prompt_id: prompt.id,
@@ -141,12 +224,14 @@ async function runPrompt(name: string, userId: string | null, inputs: Record<str
   const jobId = jobRows && jobRows[0] ? jobRows[0].id : null;
 
   const key = ensureEnv(openaiApiKey, "OPENAI_API_KEY");
-  const photoUrls = Array.isArray(inputs.photo_urls) ? inputs.photo_urls : [];
+  const photoUrls = extractPhotoUrls(inputs.photo_urls);
+  const comparisonPhotoUrls = extractPhotoUrls(inputs.comparison_photo_urls);
+  const allPhotoUrls = dedupeUrls([...photoUrls, ...comparisonPhotoUrls]);
 
-  const userContent = photoUrls.length
+  const userContent = allPhotoUrls.length
     ? [
         { type: "text", text: JSON.stringify(inputs) },
-        ...photoUrls.filter(Boolean).map((url) => ({ type: "image_url", image_url: { url } })),
+        ...allPhotoUrls.map((url) => ({ type: "image_url", image_url: { url } })),
       ]
     : JSON.stringify(inputs);
 
@@ -159,7 +244,7 @@ async function runPrompt(name: string, userId: string | null, inputs: Record<str
     body: JSON.stringify({
       model: "gpt-4o-mini",
       messages: [
-        { role: "system", content: prompt.template },
+        { role: "system", content: systemTemplate },
         { role: "user", content: userContent },
       ],
     }),
@@ -178,6 +263,122 @@ async function runPrompt(name: string, userId: string | null, inputs: Record<str
     await supabase.from("ai_jobs").update({ status: "completed", output }).eq("id", jobId);
   }
   return output;
+}
+
+async function getPreviousCheckinPhotoUrls(userId: string, checkinDate: string) {
+  if (!checkinDate) return [];
+  const { data } = await supabase
+    .from("weekly_checkins")
+    .select("photos,date")
+    .eq("user_id", userId)
+    .lt("date", checkinDate)
+    .order("date", { ascending: false })
+    .limit(1);
+  const photos = data && data[0] ? data[0].photos : [];
+  return extractPhotoUrls(photos);
+}
+
+async function getStartingPhotoUrls(userId: string) {
+  const { data: profiles } = await supabase
+    .from("profiles")
+    .select("preferences")
+    .eq("user_id", userId)
+    .limit(1);
+  const preferences = profiles && profiles[0] ? profiles[0].preferences : null;
+  const startingFromPreferences = extractStartingPhotoUrls(
+    preferences && typeof preferences === "object"
+      ? (preferences as Record<string, unknown>).starting_photos
+      : null,
+  );
+  if (startingFromPreferences.length) return startingFromPreferences;
+
+  const { data: photos } = await supabase
+    .from("progress_photos")
+    .select("url")
+    .eq("user_id", userId)
+    .eq("category", "starting")
+    .limit(3);
+  return extractPhotoUrls(photos);
+}
+
+async function getComparisonPhotoData(
+  userId: string,
+  checkinDate: string,
+  currentPhotoUrls: string[],
+) {
+  const previous = await getPreviousCheckinPhotoUrls(userId, checkinDate);
+  if (previous.length) {
+    return {
+      urls: previous.filter((url) => !currentPhotoUrls.includes(url)),
+      source: "previous_checkin",
+    };
+  }
+  const starting = await getStartingPhotoUrls(userId);
+  if (starting.length) {
+    return {
+      urls: starting.filter((url) => !currentPhotoUrls.includes(url)),
+      source: "starting_photos",
+    };
+  }
+  return { urls: [], source: null };
+}
+
+async function getChatProfile(userId: string) {
+  const { data } = await supabase
+    .from("profiles")
+    .select("age,goal,macros,preferences,height_cm,weight_kg,units,full_name")
+    .eq("user_id", userId)
+    .limit(1);
+  return data && data[0] ? data[0] : null;
+}
+
+async function getChatLatestCheckin(userId: string) {
+  const { data } = await supabase
+    .from("weekly_checkins")
+    .select("date,weight,adherence,ai_summary,macro_update,cardio_update,notes")
+    .eq("user_id", userId)
+    .order("date", { ascending: false })
+    .limit(1);
+  return data && data[0] ? data[0] : null;
+}
+
+async function getChatRecentWorkouts(userId: string) {
+  const { data: sessions } = await supabase
+    .from("workout_sessions")
+    .select("id,template_id,status,duration_seconds,created_at,completed_at")
+    .eq("user_id", userId)
+    .order("created_at", { ascending: false })
+    .limit(5);
+  const sessionIds = (sessions ?? []).map((session) => session.id).filter(Boolean);
+  let logs: Record<string, unknown>[] = [];
+  if (sessionIds.length) {
+    const { data } = await supabase
+      .from("exercise_logs")
+      .select("session_id,exercise_name,sets,reps,weight,duration_minutes,notes,created_at")
+      .in("session_id", sessionIds)
+      .order("created_at", { ascending: false })
+      .limit(30);
+    logs = data ?? [];
+  }
+  return { sessions: sessions ?? [], logs };
+}
+
+async function getChatRecentMessages(threadId: string, limit = 12) {
+  const { data } = await supabase
+    .from("chat_messages")
+    .select("role,content")
+    .eq("thread_id", threadId)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  return (data ?? []).reverse();
+}
+
+async function touchChatThread(threadId: string) {
+  const now = new Date().toISOString();
+  await supabase
+    .from("chat_threads")
+    .update({ updated_at: now, last_message_at: now })
+    .eq("id", threadId);
 }
 
 let fatsecretToken: { token: string; expiresAt: number } | null = null;
@@ -230,13 +431,84 @@ async function fatsecretRequest(path: string, params: Record<string, string | nu
   if (!response.ok) {
     throw new HttpError(500, `FatSecret request failed: ${JSON.stringify(payload)}`);
   }
-  console.log("fatsecret_response", path, JSON.stringify(payload).slice(0, 2000));
   return payload;
 }
 
 function toNumber(value: unknown) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function cleanFoodQuery(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  const cleaned = trimmed
+    .replace(/[\r\n]/g, " ")
+    .replace(/[^\w\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) return "";
+  const words = cleaned.split(" ").filter(Boolean);
+  if (words.length > 6) {
+    return words.slice(0, 6).join(" ");
+  }
+  return cleaned;
+}
+
+async function detectFoodQueryFromPhoto(photoUrl: string) {
+  const key = ensureEnv(openaiApiKey, "OPENAI_API_KEY");
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${key}`,
+    },
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content:
+            "You label food photos for nutrition search. Return a short food name (2-6 words). No punctuation, no extra text.",
+        },
+        {
+          role: "user",
+          content: [{ type: "image_url", image_url: { url: photoUrl } }],
+        },
+      ],
+    }),
+  });
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new HttpError(500, `OpenAI request failed: ${JSON.stringify(payload)}`);
+  }
+  const content = payload.choices?.[0]?.message?.content ?? "";
+  return cleanFoodQuery(content);
+}
+
+function normalizeFatsecretFood(detail: Record<string, unknown>, fallbackId?: string) {
+  const servings = (detail as Record<string, unknown>).servings;
+  const servingEntry = (servings as Record<string, unknown> | undefined)?.serving;
+  const serving = Array.isArray(servingEntry) ? servingEntry[0] : servingEntry ?? {};
+  const metricAmount = (serving as Record<string, unknown>).metric_serving_amount;
+  const metricUnit = (serving as Record<string, unknown>).metric_serving_unit;
+  const servingText =
+    metricAmount && metricUnit
+      ? `${metricAmount} ${metricUnit}`
+      : ((serving as Record<string, unknown>).serving_description as string | undefined) ?? "1 serving";
+  const foodId = String((detail as Record<string, unknown>).food_id ?? fallbackId ?? "");
+  return {
+    id: foodId,
+    source: "fatsecret",
+    name: ((detail as Record<string, unknown>).food_name ?? "Food").toString().toLowerCase().replace(/\b\w/g, (c: string) => c.toUpperCase()),
+    serving: servingText,
+    protein: toNumber((serving as Record<string, unknown>).protein),
+    carbs: toNumber((serving as Record<string, unknown>).carbohydrate),
+    fats: toNumber((serving as Record<string, unknown>).fat),
+    calories: toNumber((serving as Record<string, unknown>).calories),
+    metadata: { food_id: foodId, brand: (detail as Record<string, unknown>).brand_name ?? null },
+    food_id: foodId,
+  };
 }
 
 function parseIntSafe(value?: string | null) {
@@ -297,6 +569,120 @@ function normalizeAiMacros(rawOutput: string) {
   };
 }
 
+type MacroValues = {
+  calories: number;
+  protein: number;
+  carbs: number;
+  fats: number;
+};
+
+function toOptionalNumber(value: unknown) {
+  if (value === null || value === undefined) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseBoolean(value: unknown) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["true", "yes", "1"].includes(normalized)) return true;
+    if (["false", "no", "0"].includes(normalized)) return false;
+  }
+  return null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function normalizeMacroValues(raw: unknown): MacroValues | null {
+  if (!isRecord(raw)) return null;
+  const calories = toOptionalNumber(raw.calories);
+  const protein = toOptionalNumber(raw.protein);
+  const carbs = toOptionalNumber(raw.carbs);
+  const fats = toOptionalNumber(raw.fats);
+  if (calories === null || protein === null || carbs === null || fats === null) {
+    return null;
+  }
+  return {
+    calories: Math.round(calories),
+    protein: Math.round(protein),
+    carbs: Math.round(carbs),
+    fats: Math.round(fats),
+  };
+}
+
+function normalizeMacroDelta(raw: unknown): MacroValues {
+  if (!isRecord(raw)) {
+    return { calories: 0, protein: 0, carbs: 0, fats: 0 };
+  }
+  return {
+    calories: Math.round(toOptionalNumber(raw.calories) ?? 0),
+    protein: Math.round(toOptionalNumber(raw.protein) ?? 0),
+    carbs: Math.round(toOptionalNumber(raw.carbs) ?? 0),
+    fats: Math.round(toOptionalNumber(raw.fats) ?? 0),
+  };
+}
+
+function hasNonZeroDelta(delta: MacroValues) {
+  return Object.values(delta).some((value) => value !== 0);
+}
+
+function applyMacroDelta(current: MacroValues, delta: MacroValues): MacroValues {
+  const updated = {
+    calories: Math.max(0, current.calories + delta.calories),
+    protein: Math.max(0, current.protein + delta.protein),
+    carbs: Math.max(0, current.carbs + delta.carbs),
+    fats: Math.max(0, current.fats + delta.fats),
+  };
+  if (updated.calories < 1200) {
+    updated.calories = 1200;
+  }
+  return updated;
+}
+
+function stripJsonFence(text: string) {
+  if (!text.startsWith("```")) return text;
+  return text
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+}
+
+function parseAiJsonOutput(rawOutput: string) {
+  if (!rawOutput) return null;
+  let text = rawOutput.trim();
+  if (!text) return null;
+  text = stripJsonFence(text);
+  try {
+    const parsed = JSON.parse(text);
+    if (isRecord(parsed)) return parsed;
+  } catch {
+    // fall through to best-effort parse
+  }
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start !== -1 && end > start) {
+    try {
+      const parsed = JSON.parse(text.slice(start, end + 1));
+      if (isRecord(parsed)) return parsed;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function pickMacroCandidate(parsed: Record<string, unknown> | null, keys: string[]) {
+  if (!parsed) return null;
+  for (const key of keys) {
+    const value = parsed[key];
+    if (isRecord(value)) return value;
+  }
+  return null;
+}
+
 function buildMacroPromptInputs(profile: Record<string, unknown>) {
   const preferences = (profile.preferences as Record<string, unknown>) ?? {};
   return {
@@ -312,6 +698,22 @@ function buildMacroPromptInputs(profile: Record<string, unknown>) {
 function hasRequiredMacroInputs(inputs: Record<string, unknown>) {
   const required = ["age", "gender", "height_cm", "weight_kg", "goal", "training_days"];
   return required.every((key) => inputs[key] !== null && inputs[key] !== undefined);
+}
+
+function parseMealPlanOutput(raw: string, macroTargets: Record<string, unknown> | null) {
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (parsed && typeof parsed === "object") {
+      return parsed;
+    }
+  } catch {
+    // ignore parse errors
+  }
+  return {
+    meals: [],
+    totals: macroTargets ?? {},
+    notes: raw,
+  };
 }
 
 serve(async (req) => {
@@ -387,7 +789,19 @@ serve(async (req) => {
           hashed_password: hashed,
           role: "user",
         });
-        if (error) throw new HttpError(500, error.message);
+        if (error) {
+          const message = error.message.toLowerCase();
+          if (message.includes("users_email_key") || message.includes("duplicate key")) {
+            const { data } = await supabase.from("users").select("id").eq("email", email).limit(1);
+            if (data && data.length > 0) {
+              userId = data[0].id;
+            } else {
+              throw new HttpError(500, error.message);
+            }
+          } else {
+            throw new HttpError(500, error.message);
+          }
+        }
       }
 
       const onboardingData = { ...payload };
@@ -395,13 +809,32 @@ serve(async (req) => {
       delete onboardingData.email;
       delete onboardingData.password;
 
-      const { error: onboardingError } = await supabase.from("onboarding_states").insert({
-        user_id: userId,
-        step_index: 5,
-        data: onboardingData,
-        is_complete: true,
-      });
-      if (onboardingError) throw new HttpError(500, onboardingError.message);
+      const { data: existingOnboarding, error: onboardingLookupError } = await supabase
+        .from("onboarding_states")
+        .select("id")
+        .eq("user_id", userId)
+        .limit(1);
+      if (onboardingLookupError) throw new HttpError(500, onboardingLookupError.message);
+
+      if (existingOnboarding && existingOnboarding.length > 0) {
+        const { error: onboardingUpdateError } = await supabase
+          .from("onboarding_states")
+          .update({
+            step_index: 5,
+            data: onboardingData,
+            is_complete: true,
+          })
+          .eq("user_id", userId);
+        if (onboardingUpdateError) throw new HttpError(500, onboardingUpdateError.message);
+      } else {
+        const { error: onboardingInsertError } = await supabase.from("onboarding_states").insert({
+          user_id: userId,
+          step_index: 5,
+          data: onboardingData,
+          is_complete: true,
+        });
+        if (onboardingInsertError) throw new HttpError(500, onboardingInsertError.message);
+      }
 
       const profilePayload = {
         user_id: userId,
@@ -410,21 +843,17 @@ serve(async (req) => {
         height_cm: heightCm(payload.height_feet as string, payload.height_inches as string),
         weight_kg: weightKg(payload.weight_lbs as string),
         goal: payload.goal,
-        macros: {
-          protein: payload.macro_protein,
-          carbs: payload.macro_carbs,
-          fats: payload.macro_fats,
-          calories: payload.macro_calories,
-        },
+        macros: {},
         preferences: {
-          training_days: payload.training_days,
-          gym_access: payload.gym_access ?? "full_gym",
-          equipment: payload.equipment ?? [],
-          experience: payload.experience,
+          training_level: payload.training_level,
+          workout_days_per_week: payload.workout_days_per_week ?? 0,
+          workout_duration_minutes: payload.workout_duration_minutes ?? 0,
+          equipment: payload.equipment ?? "gym",
+          food_allergies: payload.food_allergies ?? "",
+          food_dislikes: payload.food_dislikes ?? "",
+          diet_style: payload.diet_style ?? "",
           checkin_day: payload.checkin_day,
-          gender: payload.gender,
-          has_injury: payload.has_injury ?? false,
-          injury_notes: payload.injury_notes ?? "",
+          sex: payload.sex,
         },
       };
 
@@ -432,11 +861,6 @@ serve(async (req) => {
         .from("profiles")
         .upsert(profilePayload, { onConflict: "user_id" });
       if (profileError) throw new HttpError(500, profileError.message);
-
-      if (payload.wants_to_coach || payload.coach_interest) {
-        const interestEnum = payload.wants_to_coach ? "coach" : "hire";
-        await supabase.from("coach_interest").insert({ user_id: userId, interest_enum: interestEnum });
-      }
 
       return jsonResponse({ user_id: userId, workout_plan: "" });
     }
@@ -566,6 +990,123 @@ serve(async (req) => {
       }
     }
 
+    if (segments[0] === "chat") {
+      if (method === "POST" && segments[1] === "thread") {
+        const payload = await parseJson<{ user_id?: string; title?: string }>(req);
+        if (!payload.user_id) throw new HttpError(400, "user_id is required");
+        const { data, error } = await supabase
+          .from("chat_threads")
+          .insert({ user_id: payload.user_id, title: payload.title ?? null })
+          .select()
+          .limit(1);
+        if (error) throw new HttpError(500, error.message);
+        return jsonResponse({ thread: data?.[0] });
+      }
+
+      if (method === "GET" && segments[1] === "threads") {
+        const userId = url.searchParams.get("user_id");
+        if (!userId) throw new HttpError(400, "user_id is required");
+        const { data, error } = await supabase
+          .from("chat_threads")
+          .select("*")
+          .eq("user_id", userId)
+          .order("last_message_at", { ascending: false, nullsFirst: false });
+        if (error) throw new HttpError(500, error.message);
+        return jsonResponse({ threads: data ?? [] });
+      }
+
+      if (method === "GET" && segments[1] === "thread" && segments[2]) {
+        const userId = url.searchParams.get("user_id");
+        if (!userId) throw new HttpError(400, "user_id is required");
+        const threadId = segments[2];
+        const { data: threads, error: threadError } = await supabase
+          .from("chat_threads")
+          .select("*")
+          .eq("id", threadId)
+          .eq("user_id", userId)
+          .limit(1);
+        if (threadError) throw new HttpError(500, threadError.message);
+        if (!threads || threads.length === 0) throw new HttpError(404, "Thread not found");
+        const { data: messages, error: messageError } = await supabase
+          .from("chat_messages")
+          .select("id,role,content,created_at")
+          .eq("thread_id", threadId)
+          .order("created_at", { ascending: true });
+        if (messageError) throw new HttpError(500, messageError.message);
+        return jsonResponse({ thread: threads[0], messages: messages ?? [], summary: null });
+      }
+
+      if (method === "POST" && segments[1] === "message") {
+        const payload = await parseJson<{ user_id?: string; thread_id?: string; content?: string; stream?: boolean }>(req);
+        const userId = payload.user_id ?? "";
+        const threadId = payload.thread_id ?? "";
+        const content = payload.content?.trim() ?? "";
+        const stream = payload.stream ?? true;
+        if (!userId || !threadId || !content) throw new HttpError(400, "user_id, thread_id, and content are required");
+
+        const { data: threadRows, error: threadError } = await supabase
+          .from("chat_threads")
+          .select("id")
+          .eq("id", threadId)
+          .eq("user_id", userId)
+          .limit(1);
+        if (threadError) throw new HttpError(500, threadError.message);
+        if (!threadRows || threadRows.length === 0) throw new HttpError(404, "Thread not found");
+
+        const { error: insertUserError } = await supabase.from("chat_messages").insert({
+          thread_id: threadId,
+          user_id: userId,
+          role: "user",
+          content,
+        });
+        if (insertUserError) throw new HttpError(500, insertUserError.message);
+        await touchChatThread(threadId);
+
+        const profile = await getChatProfile(userId);
+        if (!profile) throw new HttpError(404, "Profile not found");
+        const latestCheckin = await getChatLatestCheckin(userId);
+        const recentWorkouts = await getChatRecentWorkouts(userId);
+        const history = await getChatRecentMessages(threadId, 12);
+        const promptInputs = {
+          message: content,
+          history,
+          profile,
+          macros: profile.macros ?? null,
+          latest_checkin: latestCheckin,
+          recent_workouts: recentWorkouts,
+        };
+
+        const assistantText = await runPrompt("coach_chat", userId, promptInputs);
+
+        const { error: insertAssistantError } = await supabase.from("chat_messages").insert({
+          thread_id: threadId,
+          user_id: userId,
+          role: "assistant",
+          content: assistantText,
+          model: "gpt-4o-mini",
+        });
+        if (insertAssistantError) throw new HttpError(500, insertAssistantError.message);
+        await touchChatThread(threadId);
+
+        if (stream) {
+          const encoder = new TextEncoder();
+          const streamBody = new ReadableStream({
+            start(controller) {
+              controller.enqueue(encoder.encode(`data: ${assistantText}\n\n`));
+              controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+              controller.close();
+            },
+          });
+          return new Response(streamBody, {
+            status: 200,
+            headers: { "content-type": "text/event-stream", ...corsHeaders },
+          });
+        }
+
+        return jsonResponse({ reply: assistantText });
+      }
+    }
+
     if (segments[0] === "payments") {
       if (method === "POST" && segments[1] === "record") {
         const payload = await parseJson<Record<string, unknown>>(req);
@@ -629,12 +1170,6 @@ serve(async (req) => {
           duration_minutes: payload.duration_minutes,
         };
         const result = await runPrompt("workout_generation", userId, promptInput as Record<string, unknown>);
-        await supabase.from("workout_templates").insert({
-          user_id: userId,
-          title: "AI Generated Workout",
-          mode: "ai",
-          metadata: { raw: result, input: promptInput },
-        });
         return jsonResponse({ template: result });
       }
 
@@ -934,14 +1469,20 @@ serve(async (req) => {
       if (segments[1] === "sessions" && segments[3] === "log" && method === "POST") {
         const sessionId = segments[2];
         const payload = await parseJson<Record<string, unknown>>(req);
+        const durationMinutes = toNumber(payload.duration_minutes);
+        const hasDuration = durationMinutes > 0;
+        const sets = hasDuration ? 0 : toNumber(payload.sets ?? 1);
+        const reps = hasDuration ? 0 : toNumber(payload.reps ?? 0);
+        const weight = hasDuration ? 0 : toNumber(payload.weight ?? 0);
         const { data: rows, error } = await supabase
           .from("exercise_logs")
           .insert({
             session_id: sessionId,
             exercise_name: payload.exercise_name,
-            sets: payload.sets ?? 1,
-            reps: payload.reps ?? 0,
-            weight: payload.weight ?? 0,
+            sets,
+            reps,
+            weight,
+            duration_minutes: hasDuration ? durationMinutes : 0,
             notes: payload.notes ?? null,
           })
           .select();
@@ -1088,7 +1629,7 @@ serve(async (req) => {
     if (segments[0] === "nutrition") {
       if (method === "GET" && segments[1] === "search") {
         const query = url.searchParams.get("query") ?? "";
-        const userId = url.searchParams.get("user_id");
+        const userId = await normalizeUserId(url.searchParams.get("user_id"));
         const { data, error } = await supabase
           .from("food_items")
           .select("*")
@@ -1096,6 +1637,7 @@ serve(async (req) => {
           .limit(20);
         if (error) throw new HttpError(500, error.message);
         if (userId) {
+          await ensureUserExists(userId);
           await supabase.from("search_history").insert({ user_id: userId, query, source: "search" });
         }
         return jsonResponse({ query, results: data ?? [] });
@@ -1104,7 +1646,7 @@ serve(async (req) => {
       if (method === "GET" && segments[1] === "usda" && segments[2] === "search") {
         ensureEnv(usdaApiKey, "USDA_API_KEY");
         const query = url.searchParams.get("query") ?? "";
-        const userId = url.searchParams.get("user_id");
+        const userId = await normalizeUserId(url.searchParams.get("user_id"));
         const response = await fetch(`https://api.nal.usda.gov/fdc/v1/foods/search?${new URLSearchParams({
           api_key: usdaApiKey,
           query,
@@ -1155,6 +1697,7 @@ serve(async (req) => {
           results.push(normalized);
         }
         if (userId) {
+          await ensureUserExists(userId);
           await supabase.from("search_history").insert({ user_id: userId, query, source: "usda" });
         }
         return jsonResponse({ query, results });
@@ -1162,7 +1705,7 @@ serve(async (req) => {
 
       if (method === "GET" && segments[1] === "usda" && segments[2] === "food" && segments[3]) {
         ensureEnv(usdaApiKey, "USDA_API_KEY");
-        const userId = url.searchParams.get("user_id");
+        const userId = await normalizeUserId(url.searchParams.get("user_id"));
         const response = await fetch(`https://api.nal.usda.gov/fdc/v1/food/${segments[3]}?${new URLSearchParams({ api_key: usdaApiKey })}`);
         const payload = await response.json();
         const nutrients = payload.foodNutrients ?? [];
@@ -1202,6 +1745,7 @@ serve(async (req) => {
           // ignore duplicates
         }
         if (userId) {
+          await ensureUserExists(userId);
           await supabase.from("search_history").insert({ user_id: userId, query: segments[3], source: "usda" });
         }
         return jsonResponse(normalized);
@@ -1209,12 +1753,57 @@ serve(async (req) => {
 
       if (method === "GET" && segments[1] === "fatsecret" && segments[2] === "search") {
         const query = url.searchParams.get("query") ?? "";
-        const userId = url.searchParams.get("user_id");
-        const payload = await fatsecretRequest("/foods/search/v3", {
-          search_expression: query,
-          max_results: 20,
-          page_number: 0,
-        });
+        const userId = await normalizeUserId(url.searchParams.get("user_id"));
+        let payload: Record<string, unknown> = {};
+        try {
+          payload = await fatsecretRequest("/foods/search/v3", {
+            search_expression: query,
+            max_results: 20,
+            page_number: 0,
+          });
+        } catch (error) {
+          if (usdaApiKey) {
+            const response = await fetch(`https://api.nal.usda.gov/fdc/v1/foods/search?${new URLSearchParams({
+              api_key: usdaApiKey,
+              query,
+              pageSize: "20",
+            })}`);
+            const usdaPayload = await response.json();
+            const foods = usdaPayload.foods ?? [];
+            const results: Record<string, unknown>[] = [];
+            for (const food of foods) {
+              const nutrients = food.foodNutrients ?? [];
+              const nutrientValue = (names: string[]) => {
+                for (const nutrient of nutrients) {
+                  const name = (nutrient.nutrientName ?? nutrient.nutrient?.name ?? "").toLowerCase();
+                  if (names.some((match) => name.includes(match))) {
+                    const value = nutrient.value ?? nutrient.amount ?? 0;
+                    return toNumber(value);
+                  }
+                }
+                return 0;
+              };
+              results.push({
+                id: String(food.fdcId ?? ""),
+                source: "usda",
+                name: (food.description ?? "Food").toString().toLowerCase().replace(/\b\w/g, (c: string) => c.toUpperCase()),
+                serving: food.servingSize && food.servingSizeUnit ? `${food.servingSize} ${food.servingSizeUnit}` : "100 g",
+                protein: nutrientValue(["protein"]),
+                carbs: nutrientValue(["carbohydrate"]),
+                fats: nutrientValue(["total lipid", "fat"]),
+                calories: nutrientValue(["energy"]),
+                metadata: { fdc_id: String(food.fdcId ?? ""), source: "usda" },
+                fdc_id: String(food.fdcId ?? ""),
+              });
+            }
+            if (userId) {
+              await ensureUserExists(userId);
+              await supabase.from("search_history").insert({ user_id: userId, query, source: "usda" });
+            }
+            return jsonResponse({ query, results });
+          }
+          throw error;
+        }
         const foodsPayload = payload.foods_search?.results?.food ?? payload.foods?.food ?? [];
         const list = Array.isArray(foodsPayload) ? foodsPayload : [foodsPayload];
         const results: Record<string, unknown>[] = [];
@@ -1257,6 +1846,7 @@ serve(async (req) => {
           }
         }
         if (userId) {
+          await ensureUserExists(userId);
           await supabase.from("search_history").insert({ user_id: userId, query, source: "fatsecret" });
         }
         return jsonResponse({ query, results });
@@ -1264,7 +1854,7 @@ serve(async (req) => {
 
       if (method === "GET" && segments[1] === "fatsecret" && segments[2] === "barcode") {
         const barcode = url.searchParams.get("barcode") ?? "";
-        const userId = url.searchParams.get("user_id");
+        const userId = await normalizeUserId(url.searchParams.get("user_id"));
         const payload = await fatsecretRequest("/food/barcode/v3", { barcode });
         const foodId = payload.food_id ?? payload.food?.food_id;
         if (!foodId) throw new HttpError(404, "No food found for barcode.");
@@ -1288,6 +1878,7 @@ serve(async (req) => {
           food_id: String(detail.food_id ?? foodId),
         };
         if (userId) {
+          await ensureUserExists(userId);
           await supabase.from("search_history").insert({ user_id: userId, query: barcode, source: "fatsecret_barcode" });
         }
         return jsonResponse(normalized);
@@ -1318,11 +1909,12 @@ serve(async (req) => {
       }
 
       if (method === "POST" && segments[1] === "log") {
-        const userId = url.searchParams.get("user_id") ?? "";
+        const userId = await resolveUserId(url.searchParams.get("user_id"));
         const mealType = url.searchParams.get("meal_type") ?? "";
         const photoUrl = url.searchParams.get("photo_url");
         const logDate = url.searchParams.get("log_date") ?? todayIso();
         if (!userId || !mealType) throw new HttpError(400, "user_id and meal_type are required");
+        await ensureUserExists(userId);
         const aiOutput = await runPrompt("meal_photo_parse", userId, {
           meal_type: mealType,
           photo_url: photoUrl,
@@ -1338,8 +1930,7 @@ serve(async (req) => {
       }
 
       if (method === "GET" && segments[1] === "logs") {
-        const userId = url.searchParams.get("user_id");
-        if (!userId) throw new HttpError(400, "user_id is required");
+        const userId = await resolveUserId(url.searchParams.get("user_id"));
         const logDate = url.searchParams.get("log_date") ?? todayIso();
         const { data, error } = await supabase
           .from("nutrition_logs")
@@ -1352,6 +1943,8 @@ serve(async (req) => {
 
       if (method === "POST" && segments[1] === "logs" && segments[2] === "manual") {
         const payload = await parseJson<Record<string, unknown>>(req);
+        const userId = await resolveUserId(payload.user_id as string | undefined);
+        await ensureUserExists(userId);
         const item = payload.item as Record<string, unknown>;
         const logDate = (payload.log_date as string | undefined) ?? todayIso();
         const totals = {
@@ -1361,7 +1954,7 @@ serve(async (req) => {
           fats: item.fats ?? 0,
         };
         await supabase.from("nutrition_logs").insert({
-          user_id: payload.user_id,
+          user_id: userId,
           date: logDate,
           meal_type: payload.meal_type,
           items: [
@@ -1384,33 +1977,157 @@ serve(async (req) => {
       if (segments[1] === "favorites") {
         if (method === "POST") {
           const payload = await parseJson<Record<string, unknown>>(req);
-          const { data, error } = await supabase.from("nutrition_favorites").insert(payload).select();
-          if (error) throw new HttpError(500, error.message);
-          return jsonResponse({ status: "saved", favorite: data?.[0] ?? payload });
-        }
-        if (method === "GET") {
-          const userId = url.searchParams.get("user_id");
-          const limit = Number(url.searchParams.get("limit") ?? 50);
-          if (!userId) throw new HttpError(400, "user_id is required");
-          const { data, error } = await supabase
+          const userId = await resolveUserId(payload.user_id as string | undefined);
+          await ensureUserExists(userId);
+
+          let foodItemId = payload.food_item_id as string | undefined;
+          const food = (payload.food as Record<string, unknown> | undefined) ?? payload;
+
+          const source = (food.source as string | undefined) ?? "manual";
+          const name = (food.name as string | undefined) ?? "Saved Food";
+          const serving = (food.serving as string | undefined) ?? null;
+          const protein = toNumber(food.protein);
+          const carbs = toNumber(food.carbs);
+          const fats = toNumber(food.fats);
+          const calories = toNumber(food.calories);
+
+          const rawMetadata = (food.metadata as Record<string, unknown> | undefined) ?? {};
+          const externalId = (food.id as string | undefined) ?? (rawMetadata.external_id as string | undefined);
+          const fdcId = (food.fdc_id as string | undefined) ?? (food.fdcId as string | undefined) ?? (rawMetadata.fdc_id as string | undefined);
+          const foodId = (food.food_id as string | undefined) ?? (rawMetadata.food_id as string | undefined) ?? (source === "fatsecret" ? externalId : undefined);
+
+          const metadata: Record<string, unknown> = { ...rawMetadata, source };
+          if (foodId) metadata.food_id = String(foodId);
+          if (fdcId) metadata.fdc_id = String(fdcId);
+          if (externalId) metadata.external_id = String(externalId);
+
+          if (!foodItemId) {
+            const lookupColumn = foodId ? "metadata->>food_id" : fdcId ? "metadata->>fdc_id" : null;
+            const lookupValue = foodId ?? fdcId ?? null;
+            if (lookupColumn && lookupValue) {
+              const { data: existingFood } = await supabase
+                .from("food_items")
+                .select("id")
+                .eq(lookupColumn, String(lookupValue))
+                .limit(1);
+              foodItemId = existingFood?.[0]?.id as string | undefined;
+            }
+          }
+
+          if (!foodItemId) {
+            const { data: insertedFood, error: insertError } = await supabase
+              .from("food_items")
+              .insert({
+                source,
+                name,
+                serving,
+                protein,
+                carbs,
+                fats,
+                calories,
+                metadata,
+              })
+              .select("id")
+              .limit(1);
+            if (insertError) throw new HttpError(500, insertError.message);
+            foodItemId = insertedFood?.[0]?.id as string | undefined;
+          }
+
+          if (!foodItemId) throw new HttpError(500, "Unable to resolve food item.");
+
+          const { data: existingFavorite } = await supabase
             .from("nutrition_favorites")
             .select("*")
             .eq("user_id", userId)
+            .eq("food_item_id", foodItemId)
+            .limit(1);
+          if (existingFavorite && existingFavorite.length > 0) {
+            return jsonResponse({ status: "saved", favorite: existingFavorite[0] });
+          }
+
+          const { data, error } = await supabase
+            .from("nutrition_favorites")
+            .insert({ user_id: userId, food_item_id: foodItemId })
+            .select();
+          if (error) throw new HttpError(500, error.message);
+          return jsonResponse({ status: "saved", favorite: data?.[0] ?? { user_id: userId, food_item_id: foodItemId } });
+        }
+        if (method === "GET") {
+          const userId = await resolveUserId(url.searchParams.get("user_id"));
+          const limit = Number(url.searchParams.get("limit") ?? 50);
+          const { data, error } = await supabase
+            .from("nutrition_favorites")
+            .select("id, created_at, food_item:food_items(*)")
+            .eq("user_id", userId)
+            .order("created_at", { ascending: false })
             .limit(limit);
           if (error) throw new HttpError(500, error.message);
-          return jsonResponse({ user_id: userId, favorites: data ?? [] });
+          const favorites = (data ?? [])
+            .map((entry) => (entry as Record<string, unknown>).food_item)
+            .filter((item) => item);
+          return jsonResponse({ user_id: userId, favorites });
         }
+      }
+    }
+
+    if (segments[0] === "mealplan") {
+      if (method === "GET" && segments[1] === "active") {
+        const userId = await resolveUserId(url.searchParams.get("user_id"));
+        const { data, error } = await supabase
+          .from("meal_plans")
+          .select("*")
+          .eq("user_id", userId)
+          .order("created_at", { ascending: false })
+          .limit(1);
+        if (error) throw new HttpError(500, error.message);
+        const plan = data?.[0]?.meal_map ?? null;
+        const summary = plan && typeof plan === "object" ? (plan as Record<string, unknown>).notes ?? null : null;
+        return jsonResponse({ meal_plan: plan, summary });
+      }
+
+      if (method === "POST" && segments[1] === "generate") {
+        const payload = await parseJson<Record<string, unknown>>(req);
+        const userId = await resolveUserId(payload.user_id as string | undefined);
+        const macroTargets = payload.macro_targets as Record<string, unknown> | undefined;
+        if (!macroTargets) throw new HttpError(400, "user_id and macro_targets are required");
+        await ensureUserExists(userId);
+        const profile = (
+          await supabase
+            .from("profiles")
+            .select("preferences,goal,full_name")
+            .eq("user_id", userId)
+            .limit(1)
+        ).data?.[0] ?? null;
+
+        const aiOutput = await runPrompt("meal_plan_generation", userId, {
+          macro_targets: macroTargets,
+          preferences: profile?.preferences ?? {},
+          goal: profile?.goal ?? null,
+          name: profile?.full_name ?? null,
+        });
+
+        const plan = parseMealPlanOutput(aiOutput, macroTargets);
+        await supabase.from("meal_plans").insert({
+          user_id: userId,
+          range_start: todayIso(),
+          range_end: todayIso(),
+          meal_map: plan,
+        });
+
+        const summary = (plan as Record<string, unknown>).notes ?? null;
+        return jsonResponse({ meal_plan: plan, summary });
       }
     }
 
     if (segments[0] === "scan" && segments[1] === "meal-photo" && method === "POST") {
       const form = await req.formData();
-      const userId = form.get("user_id")?.toString() ?? "";
+      const userId = await resolveUserId(form.get("user_id")?.toString() ?? "");
       const mealType = form.get("meal_type")?.toString() ?? "";
       const photo = form.get("photo");
-      if (!userId || !mealType || !(photo instanceof File)) {
+      if (!mealType || !(photo instanceof File)) {
         throw new HttpError(400, "Photo, user_id, and meal_type are required.");
       }
+      await ensureUserExists(userId);
       const bytes = new Uint8Array(await photo.arrayBuffer());
       const filename = `${crypto.randomUUID().replace(/-/g, "")}.jpg`;
       const path = `${userId}/${todayIso()}/${filename}`;
@@ -1419,31 +2136,95 @@ serve(async (req) => {
         .upload(path, bytes, { contentType: photo.type || "image/jpeg" });
       if (uploadError) throw new HttpError(500, uploadError.message);
       const { data: publicUrl } = supabase.storage.from(mealPhotoBucket).getPublicUrl(path);
-      const aiOutput = await runPrompt("meal_photo_parse", userId, {
-        meal_type: mealType,
-        photo_url: publicUrl.publicUrl,
-      });
-      await supabase.from("nutrition_logs").insert({
-        user_id: userId,
-        date: todayIso(),
-        meal_type: mealType,
-        items: [{ raw: aiOutput, photo_url: publicUrl.publicUrl }],
-        totals: { calories: 0, protein: 0, carbs: 0, fats: 0 },
-      });
-      return jsonResponse({ status: "logged", ai_result: aiOutput, photo_url: publicUrl.publicUrl });
+      let query = "";
+      try {
+        query = await detectFoodQueryFromPhoto(publicUrl.publicUrl);
+      } catch {
+        query = "";
+      }
+      if (!query) {
+        query = "meal";
+      }
+
+      let match: Record<string, unknown> | null = null;
+      try {
+        const payload = await fatsecretRequest("/foods/search/v3", {
+          search_expression: query,
+          max_results: 5,
+          page_number: 0,
+        });
+        const foodsPayload = payload.foods_search?.results?.food ?? payload.foods?.food ?? [];
+        const list = Array.isArray(foodsPayload) ? foodsPayload : [foodsPayload];
+        const best = list[0] ?? null;
+        if (best) {
+          const foodId = String(best.food_id ?? "");
+          const detailPayload = await fatsecretRequest("/food/v5", { food_id: foodId });
+          match = normalizeFatsecretFood(detailPayload.food ?? {}, foodId);
+        }
+        await supabase.from("search_history").insert({ user_id: userId, query, source: "photo_scan" });
+      } catch (error) {
+        if (usdaApiKey) {
+          const response = await fetch(`https://api.nal.usda.gov/fdc/v1/foods/search?${new URLSearchParams({
+            api_key: usdaApiKey,
+            query,
+            pageSize: "1",
+          })}`);
+          const payload = await response.json();
+          const food = payload.foods?.[0];
+          if (food) {
+            const nutrients = food.foodNutrients ?? [];
+            const nutrientValue = (names: string[]) => {
+              for (const nutrient of nutrients) {
+                const name = (nutrient.nutrientName ?? nutrient.nutrient?.name ?? "").toLowerCase();
+                if (names.some((match) => name.includes(match))) {
+                  const value = nutrient.value ?? nutrient.amount ?? 0;
+                  return toNumber(value);
+                }
+              }
+              return 0;
+            };
+            match = {
+              id: String(food.fdcId ?? ""),
+              source: "usda",
+              name: (food.description ?? "Food").toString().toLowerCase().replace(/\b\w/g, (c: string) => c.toUpperCase()),
+              serving: food.servingSize && food.servingSizeUnit ? `${food.servingSize} ${food.servingSizeUnit}` : "100 g",
+              protein: nutrientValue(["protein"]),
+              carbs: nutrientValue(["carbohydrate"]),
+              fats: nutrientValue(["total lipid", "fat"]),
+              calories: nutrientValue(["energy"]),
+              metadata: { fdc_id: String(food.fdcId ?? ""), source: "usda" },
+              fdc_id: String(food.fdcId ?? ""),
+            };
+          }
+          await supabase.from("search_history").insert({ user_id: userId, query, source: "photo_scan_usda" });
+        } else {
+          throw error;
+        }
+      }
+
+      if (!match) {
+        return jsonResponse({
+          status: "scanned",
+          photo_url: publicUrl.publicUrl,
+          query,
+          message: "No match found. Try another photo.",
+        });
+      }
+      return jsonResponse({ status: "scanned", photo_url: publicUrl.publicUrl, query, match });
     }
 
     if (segments[0] === "progress") {
       if (segments[1] === "photos" && method === "POST") {
         const form = await req.formData();
-        const userId = form.get("user_id")?.toString() ?? "";
+        const userId = await resolveUserId(form.get("user_id")?.toString() ?? "");
         const photo = form.get("photo");
         const photoType = form.get("photo_type")?.toString() ?? null;
         const photoCategory = form.get("photo_category")?.toString() ?? null;
         const checkinDate = form.get("checkin_date")?.toString() ?? todayIso();
-        if (!userId || !(photo instanceof File)) {
+        if (!(photo instanceof File)) {
           throw new HttpError(400, "Photo and user_id are required.");
         }
+        await ensureUserExists(userId);
         const bytes = new Uint8Array(await photo.arrayBuffer());
         const filename = `${crypto.randomUUID().replace(/-/g, "")}.jpg`;
         const path = `${userId}/${checkinDate}/${filename}`;
@@ -1452,13 +2233,15 @@ serve(async (req) => {
           .upload(path, bytes, { contentType: photo.type || "image/jpeg" });
         if (uploadError) throw new HttpError(500, uploadError.message);
         const { data: publicUrl } = supabase.storage.from(progressPhotoBucket).getPublicUrl(path);
-        await supabase.from("progress_photos").insert({
+        const tags = [photoCategory ? `category:${photoCategory}` : null, checkinDate ? `date:${checkinDate}` : null]
+          .filter(Boolean) as string[];
+        const { error: insertError } = await supabase.from("progress_photos").insert({
           user_id: userId,
-          date: checkinDate,
           url: publicUrl.publicUrl,
-          type: photoType,
-          category: photoCategory,
+          photo_type: photoType ?? "checkin",
+          tags: tags.length ? tags : null,
         });
+        if (insertError) throw new HttpError(500, insertError.message);
         return jsonResponse({
           status: "uploaded",
           photo_url: publicUrl.publicUrl,
@@ -1469,8 +2252,7 @@ serve(async (req) => {
       }
 
       if (segments[1] === "photos" && method === "GET") {
-        const userId = url.searchParams.get("user_id");
-        if (!userId) throw new HttpError(400, "user_id is required");
+        const userId = await resolveUserId(url.searchParams.get("user_id"));
         const category = url.searchParams.get("category");
         const photoType = url.searchParams.get("photo_type");
         const startDate = url.searchParams.get("start_date");
@@ -1478,19 +2260,27 @@ serve(async (req) => {
         const limit = Number(url.searchParams.get("limit") ?? 60);
 
         let query = supabase.from("progress_photos").select("*").eq("user_id", userId);
-        if (category) query = query.eq("category", category);
-        if (photoType) query = query.eq("type", photoType);
-        if (startDate) query = query.gte("date", startDate);
-        if (endDate) query = query.lte("date", endDate);
-        const { data, error } = await query.order("date", { ascending: false }).limit(limit);
+        if (category) query = query.contains("tags", [`category:${category}`]);
+        if (photoType) query = query.eq("photo_type", photoType);
+        if (startDate) query = query.gte("created_at", startDate);
+        if (endDate) query = query.lte("created_at", endDate);
+        const { data, error } = await query.order("created_at", { ascending: false }).limit(limit);
         if (error) throw new HttpError(500, error.message);
-        return jsonResponse({ photos: data ?? [] });
+        const photos = (data ?? []).map((row) => {
+          const tags = Array.isArray(row.tags) ? row.tags : [];
+          const categoryTag = tags.find((tag) => typeof tag === "string" && tag.startsWith("category:"));
+          return {
+            ...row,
+            category: categoryTag ? categoryTag.replace("category:", "") : null,
+            type: row.photo_type ?? null,
+          };
+        });
+        return jsonResponse({ photos });
       }
 
       if (segments[1] === "macro-adherence" && method === "GET") {
-        const userId = url.searchParams.get("user_id");
+        const userId = await resolveUserId(url.searchParams.get("user_id"));
         const rangeDays = Number(url.searchParams.get("range_days") ?? 30);
-        if (!userId) throw new HttpError(400, "user_id is required");
         const endDate = new Date();
         const startDate = new Date(endDate);
         startDate.setDate(endDate.getDate() - Math.max(rangeDays - 1, 0));
@@ -1539,8 +2329,7 @@ serve(async (req) => {
 
     if (segments[0] === "checkins") {
       if (method === "GET" && segments.length === 1) {
-        const userId = url.searchParams.get("user_id");
-        if (!userId) throw new HttpError(400, "user_id is required");
+        const userId = await resolveUserId(url.searchParams.get("user_id"));
         const limit = Number(url.searchParams.get("limit") ?? 12);
         const startDate = url.searchParams.get("start_date");
         const endDate = url.searchParams.get("end_date");
@@ -1553,26 +2342,144 @@ serve(async (req) => {
       }
 
       if (method === "POST" && segments.length === 1) {
-        const userId = url.searchParams.get("user_id");
-        if (!userId) throw new HttpError(400, "user_id is required");
+        const userId = await resolveUserId(url.searchParams.get("user_id"));
         const checkinDate = url.searchParams.get("checkin_date") ?? todayIso();
         const payload = await parseJson<Record<string, unknown>>(req);
         const adherence = payload.adherence as Record<string, unknown> | undefined;
         if (!adherence) throw new HttpError(400, "adherence is required");
-        const photoUrls = Array.isArray(payload.photo_urls) ? payload.photo_urls : [];
-        const promptInput = { adherence, photo_urls: photoUrls };
+        await ensureUserExists(userId);
+        let currentPhotoUrls = dedupeUrls(extractPhotoUrls(payload.photo_urls));
+        if (currentPhotoUrls.length === 0) {
+          const { data: photos } = await supabase
+            .from("progress_photos")
+            .select("url,tags,created_at")
+            .eq("user_id", userId)
+            .contains("tags", [`date:${checkinDate}`])
+            .order("created_at", { ascending: false });
+          currentPhotoUrls = (photos ?? [])
+            .map((row) => row.url)
+            .filter((urlValue) => typeof urlValue === "string") as string[];
+        }
+        const comparison = await getComparisonPhotoData(userId, checkinDate, currentPhotoUrls);
+        const profile = await getChatProfile(userId);
+        const currentMacros = normalizeMacroValues(profile?.macros);
+        const promptInput: Record<string, unknown> = {
+          adherence,
+          photo_urls: currentPhotoUrls,
+        };
+        if (comparison.urls.length) {
+          promptInput.comparison_photo_urls = comparison.urls;
+          if (comparison.source) {
+            promptInput.comparison_source = comparison.source;
+          }
+        } else {
+          promptInput.comparison_source = "none";
+        }
+        if (profile?.goal) {
+          promptInput.goal = profile.goal;
+        }
+        if (currentMacros) {
+          promptInput.current_macros = currentMacros;
+          promptInput.macro_targets = currentMacros;
+        }
         const aiOutput = await runPrompt("weekly_checkin_analysis", userId, promptInput);
-        await supabase.from("weekly_checkins").insert({
+        const parsedOutput = parseAiJsonOutput(aiOutput);
+        const macroUpdatePayload = isRecord(parsedOutput?.macro_update) ? parsedOutput?.macro_update : null;
+        const macroDelta = normalizeMacroDelta(
+          macroUpdatePayload?.delta ?? parsedOutput?.macro_delta ?? parsedOutput?.macroDelta,
+        );
+        const hasDelta = hasNonZeroDelta(macroDelta);
+        const newMacroCandidate = pickMacroCandidate(parsedOutput, [
+          "new_macros",
+          "next_week_macros",
+          "macro_targets",
+          "macros",
+        ]);
+        const macroUpdateCandidate =
+          pickMacroCandidate(macroUpdatePayload, ["new_macros", "macros"]) ?? newMacroCandidate;
+        const updateMacrosFlag =
+          parseBoolean(
+            parsedOutput?.update_macros ??
+              parsedOutput?.updateMacros ??
+              macroUpdatePayload?.suggested ??
+              macroUpdatePayload?.update,
+          ) ?? false;
+        const updatedMacros =
+          normalizeMacroValues(macroUpdateCandidate) ??
+          (hasDelta && currentMacros ? applyMacroDelta(currentMacros, macroDelta) : null);
+        const macroSuggested = updateMacrosFlag || hasDelta || Boolean(updatedMacros);
+
+        const cardioUpdateSource =
+          parsedOutput?.cardio_update ??
+          parsedOutput?.cardioUpdate ??
+          parsedOutput?.cardio_recommendation ??
+          parsedOutput?.cardioRecommendation ??
+          parsedOutput?.cardio;
+        let cardioSuggested = false;
+        let cardioRecommendation: string | null = null;
+        let cardioPlan: string[] | null = null;
+        if (typeof cardioUpdateSource === "string") {
+          const trimmed = cardioUpdateSource.trim();
+          if (trimmed) {
+            cardioRecommendation = trimmed;
+            cardioSuggested = true;
+          }
+        } else if (Array.isArray(cardioUpdateSource)) {
+          cardioPlan = cardioUpdateSource.filter((item) => typeof item === "string") as string[];
+          if (cardioPlan.length) {
+            cardioSuggested = true;
+          }
+        } else if (isRecord(cardioUpdateSource)) {
+          const recommendation =
+            cardioUpdateSource.recommendation ??
+            cardioUpdateSource.summary ??
+            cardioUpdateSource.change ??
+            cardioUpdateSource.notes;
+          if (typeof recommendation === "string" && recommendation.trim()) {
+            cardioRecommendation = recommendation.trim();
+          }
+          const plan = cardioUpdateSource.plan ?? cardioUpdateSource.weekly_plan ?? cardioUpdateSource.sessions;
+          if (Array.isArray(plan)) {
+            const cleaned = plan.filter((item) => typeof item === "string") as string[];
+            if (cleaned.length) {
+              cardioPlan = cleaned;
+            }
+          }
+          const suggestedFlag = parseBoolean(
+            cardioUpdateSource.suggested ?? cardioUpdateSource.recommended ?? cardioUpdateSource.update,
+          );
+          if (suggestedFlag !== null) {
+            cardioSuggested = suggestedFlag;
+          }
+        }
+        if (cardioRecommendation || (cardioPlan && cardioPlan.length)) {
+          cardioSuggested = true;
+        }
+        const summaryMeta = {
+          comparison_source: comparison.source ?? "none",
+          photo_count: currentPhotoUrls.length,
+        };
+        const { data: inserted, error: insertError } = await supabase.from("weekly_checkins").insert({
           user_id: userId,
           date: checkinDate,
           weight: adherence.current_weight ?? null,
           adherence,
-          photos: photoUrls.map((url) => ({ url })),
-          ai_summary: { raw: aiOutput },
-          macro_update: { suggested: true },
-          cardio_update: { suggested: true },
-        });
-        return jsonResponse({ status: "complete", ai_result: aiOutput });
+          photos: currentPhotoUrls.map((url) => ({ url })),
+          ai_summary: { raw: aiOutput, parsed: parsedOutput ?? null, meta: summaryMeta },
+          macro_update: {
+            suggested: macroSuggested,
+            delta: macroDelta,
+            applied: false,
+            new_macros: updatedMacros,
+          },
+          cardio_update: {
+            suggested: cardioSuggested,
+            recommendation: cardioRecommendation,
+            plan: cardioPlan,
+          },
+        }).select().single();
+        if (insertError) throw new HttpError(500, insertError.message);
+        return jsonResponse({ status: "complete", ai_result: aiOutput, checkin: inserted });
       }
     }
 

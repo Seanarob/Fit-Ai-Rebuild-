@@ -1,1 +1,1 @@
-from . import auth, workouts, nutrition, ai, checkins, onboarding, profiles, coach, payments, exercises, users
+from . import auth, workouts, nutrition, ai, checkins, onboarding, profiles, coach, payments, exercises, users, scan, progress, chat

@@ -1,0 +1,593 @@
+```markdown
+# FitAI PRD (Product Requirements Document)
+
+Version: 1.0  
+Owner: Sean Robinson  
+Platform: iOS (Expo React Native)  
+Backend: FastAPI + MongoDB  
+Repo: Monorepo with /frontend and /backend  
+Goal: Rebuild from scratch without losing planned features
+
+---
+
+## 1. Product Summary
+
+FitAI is an AI-powered fitness coach app with two user types:
+
+Normal users
+- Onboarding
+- Workouts (generate, save, build, track)
+- Nutrition tracking (protein, carbs, fats, calories)
+- Food search + photo scan
+- Progress photos
+- Weekly check-ins with photo scan + macro adjustments
+- Premium AI features via subscription
+
+Coach users
+- Separate signup flow
+- Instant access to coach features
+- Coach profile and marketplace presence
+- Paid coaching checkout via Stripe
+
+---
+
+## 2. Problem
+
+Users quit fitness apps because setup is slow, tracking feels annoying, and progress is hard to see.
+
+Coaches waste time on repetitive programming, check-ins, and macro updates.
+
+---
+
+## 3. Goals
+
+- Get a new user from install to first logged workout in under 10 minutes
+- Make weekly check-ins feel automatic: weight + photos + adherence → updated macros and targets
+- Make nutrition logging fast: search, scan, confirm, log
+- Support paid premium AI and paid coaching with clean Stripe flows
+
+---
+
+## 4. Non-Goals (V1)
+
+- Wearable integrations (Apple Health, Whoop, Garmin)
+- Full coach CRM (messaging, docs, deep periodization tooling)
+- Advanced barcode scanning beyond Open Food Facts search + manual entry
+
+---
+
+## 5. Target Users
+
+Normal user
+- Wants fast plans, simple tracking, clear progress
+
+Coach user
+- Wants instant access, profile listing, and a clean way to get paid
+
+---
+
+## 6. Core Features and Requirements
+
+### 6.1 Auth and Accounts
+
+Requirements
+- Email/password signup + login
+- Secure token handling (access + refresh)
+- Role-based gating (normal vs coach)
+- Account settings: profile, units, preferences, subscription status
+
+Acceptance criteria
+- Login persists across app restarts
+- Token refresh works without repeated logins
+- Coach screens stay locked for normal users
+
+---
+
+### 6.2 Onboarding (12 Steps)
+
+Collect
+- Name, age, height, weight
+- Goal: cut, bulk, maintain
+- Training days per week
+- Equipment access
+- Injuries
+- Experience level
+- Check-in day selection
+- Starting progress photos upload (front, side, back)
+- Macro goals (protein, carbs, fats, calories) and preferences
+
+Requirements
+- Save onboarding state after every step
+- Allow resume after app close
+- Validate required fields
+- Store starting photos as a tagged set
+
+Acceptance criteria
+- User exits mid-onboarding and resumes at the same step
+- Starting photos appear in Progress gallery
+
+---
+
+### 6.3 Home Dashboard
+
+Cards (stacked, scroll layout)
+- Today’s Training
+- Nutrition Snapshot
+- Progress Summary
+- Optional: Coaching Hub promo
+
+Requirements
+- Data comes from workouts, nutrition logs, check-ins
+- Fast load time (target under 2 seconds on normal connection)
+
+Acceptance criteria
+- Dashboard updates after logging workout or meal without restarting the app
+
+---
+
+### 6.4 Workout Tab (Single Tab with Swap Control)
+
+Single Workout tab with a top control that switches between modes:
+- Generate
+- Saved
+- Create
+(Include On-demand flow inside Create)
+
+Generate mode
+- User selects muscle groups
+- Optional: workout type selector (strength, hypertrophy, power, full body)
+- Optional: equipment selector
+- AI generates workout: exercises, sets, reps, rest, notes
+- User saves or starts
+
+Saved mode
+- List saved workouts
+- Open, edit, duplicate, delete
+- Start workout
+- Search bar
+
+Create mode (build from scratch)
+- Name workout
+- Add exercises manually (search + pick)
+- Configure sets, reps, rest, notes
+- On-demand flow: user picks a starting exercise and app builds the rest around it
+- Sticky save button at bottom
+
+Workout session screen
+- Log sets/reps/weight
+- Rest timer after set completion
+- Workout history
+- PR tracking
+- Finish workout flow
+
+Voice memo workout input
+- Tap mic to record like a voice memo
+- Backend transcribes audio and converts into structured workout entries
+- User reviews and confirms before saving/logging
+
+Acceptance criteria
+- Switching modes does not wipe user state
+- Voice memo creates a draft workout log the user can edit, then confirm
+- Rest timer works smoothly and reliably
+
+---
+
+### 6.5 Nutrition
+
+Manual logging
+- Food search using Open Food Facts
+- Add servings
+- Track protein, carbs, fats, calories
+- Save favorites and recents
+
+AI food scanning
+- User uploads a meal photo
+- Backend returns detected items + estimated macros
+- User confirms or edits, then logs
+
+Meal plan generator
+- Generate meal plan based on goals and preferences
+- Allow regeneration
+- Produce daily targets and meals
+
+Grocery list generator
+- Convert meal plan into a grocery list with quantities
+
+Acceptance criteria
+- Search logging: user can log a meal fast (target under 30 seconds for common foods)
+- Photo scan never logs without confirmation
+- Totals update instantly after logging
+
+---
+
+### 6.6 Progress
+
+Progress photos gallery
+- Grid view with filters (date range, type)
+- Photo types: starting, check-in, misc
+
+Weekly check-in
+- Weight input
+- Photo upload
+- Adherence questions (workouts hit, calories hit, sleep, steps, mood)
+- AI analyzes photos and trends, then outputs macro and cardio updates
+- Results shown in a clean card with next-week targets
+
+Charts
+- Weight trend chart with range toggles (week, month, 3 month)
+- Macro adherence chart (logged vs target)
+
+Acceptance criteria
+- Weekly check-in produces clear macro/cardio updates tied to recent data
+- Check-in photos show in gallery under the correct date
+
+---
+
+### 6.7 Coach Flow
+
+Coach signup
+- Separate signup flow from normal users
+- Minimal setup
+- Instant access to coach dashboard basics
+
+Coach features (V1 basics)
+- Coach profile: bio, specialties, pricing, availability
+- Discover listing entry
+- Purchase flow for users to hire coach
+
+Acceptance criteria
+- Coach reaches coach dashboard without normal-user onboarding steps
+- User can purchase coaching and gets confirmation inside app
+
+---
+
+### 6.8 Payments (Stripe)
+
+Subscription
+- Premium AI features behind subscription
+- Stripe checkout flow
+- Webhooks sync subscription state
+
+Coaching purchase
+- Stripe checkout for hiring coaches
+- Webhooks sync purchase state
+
+Acceptance criteria
+- Subscription status updates in-app shortly after Stripe event (target within 60 seconds)
+- Premium AI features are locked for non-subscribed users
+
+---
+
+## 7. AI Features (Server-side Prompt Templates)
+
+All prompts stored server-side with versioning.
+
+AI jobs
+- Workout generation (muscle groups + constraints)
+- Voice transcription to structured workout entries
+- Meal photo parsing to items + macros
+- Weekly check-in analysis using weight trend, adherence, and photos
+- Macro and cardio adjustment recommendations
+
+Quality rules
+- AI outputs save as draft until user approves
+- All AI outputs are editable before logging/saving
+- Log prompt version and response metadata for debugging
+
+---
+
+## 8. Data Model (High Level)
+
+User
+- id, role, profile, goals, macros, preferences, subscription, createdAt
+
+OnboardingState
+- userId, stepIndex, payload, completed
+
+WorkoutTemplate
+- id, userId, title, exercises[]
+
+WorkoutSession
+- id, userId, templateId optional, exercises[], logs[], PRs, timestamps
+
+Exercise
+- id, name, muscleGroups, equipment, metadata
+
+NutritionLog
+- id, userId, date, items[], totals
+
+FoodItem
+- source (OFF or custom), name, serving, macros
+
+ProgressPhoto
+- id, userId, date, type, url
+
+CheckIn
+- id, userId, date, weight, adherenceAnswers, photos[], aiSummary, macroUpdate, cardioUpdate
+
+CoachProfile
+- id, userId, pricing, bio, specialties
+
+PaymentRecord
+- id, userId, type, status, stripeIds, timestamps
+
+---
+
+## 9. API (Backend Endpoints)
+
+Auth
+- POST /auth/register
+- POST /auth/login
+- POST /auth/refresh
+- POST /auth/logout
+
+Onboarding
+- GET /onboarding/state
+- PUT /onboarding/state
+- POST /onboarding/complete
+
+Workouts
+- GET /workouts/templates
+- POST /workouts/templates
+- PUT /workouts/templates/{id}
+- DELETE /workouts/templates/{id}
+- POST /workouts/generate
+- POST /workouts/sessions
+- PUT /workouts/sessions/{id}
+- GET /workouts/history
+
+Voice
+- POST /voice/transcribe
+- POST /voice/parse-workout
+
+Nutrition
+- GET /nutrition/search?query=
+- POST /nutrition/log
+- GET /nutrition/day?date=
+
+Photo scan
+- POST /scan/meal-photo
+- POST /scan/checkin-photos
+
+Progress and Check-ins
+- POST /progress/photos
+- GET /progress/photos
+- POST /checkins
+- GET /checkins
+
+Coach
+- POST /coach/profile
+- GET /coach/profile/{id}
+- GET /coach/discover
+
+Payments
+- POST /payments/create-subscription-checkout
+- POST /payments/create-coach-checkout
+- POST /payments/webhook
+
+---
+
+## 10. UI and Design System (Dark Mode + Lime Accents)
+
+### 10.1 Design goal
+The app must feel like an iOS fitness coach dashboard.
+Dark mode only. Clean cards. Lime accents. Smooth motion. No clutter.
+
+### 10.2 Global style system
+- Theme: dark only
+- Background: near-black with a slight blue tint
+- Cards: slightly lighter than background, soft border, subtle shadow
+- Accent: lime green for primary actions, active states, progress rings, key numbers, active tab
+- Text: high contrast, clear hierarchy, big numbers and short labels
+- Rounded corners: large radius across cards and buttons, pill feel for buttons
+- Spacing: generous padding in cards, consistent gaps between sections
+- Buttons: primary lime filled, secondary dark with border, destructive red
+- Inputs: dark fields, subtle borders, lime focus state
+- Icons: thin, consistent stroke weight
+- Animations: fast and smooth for card press, tab transitions, progress updates, rest timer, nothing flashy
+
+### 10.3 Navigation
+Bottom tab bar with 4 tabs
+- Home
+- Workout
+- Nutrition
+- Progress
+
+Tab bar matches dark theme. Active tab uses lime icon and label.
+Each tab uses a scroll layout with stacked cards.
+
+### 10.4 Home screen layout
+Header
+- Greeting using user first name (example: “Good morning, Sean”)
+- Settings icon on the right
+
+Card 1: Today’s Training
+- Title: Today’s Training
+- Subtitle: split label (example: Push Day)
+- Show first 2 exercises preview
+- Primary CTA: Start Workout
+- Secondary action: Swap
+
+Card 2: Nutrition Snapshot
+- Calories remaining, protein, carbs, fats
+- Simple horizontal progress bars or ring meters with lime fill
+- CTAs: Log Meal, Scan Food
+
+Card 3: Progress Summary
+- Weight trend mini chart
+- Last PR highlight
+- Streak count
+
+Optional Card 4: Coaching Hub promo
+- Coach marketplace teaser
+- CTA: Find a Coach
+
+### 10.5 Workout tab layout
+Top segmented control switches between
+- Generate
+- Saved
+- Create
+
+Generate
+- Muscle group chips/toggles
+- Workout type picker (strength, hypertrophy, power, full body)
+- Optional equipment selector
+- Big CTA: Generate Workout
+- Output as exercise cards with sets x reps, rest, and swap-exercise button
+
+Saved
+- Saved workouts as cards
+- Shows name, muscle groups, last performed date
+- Actions: Start, Edit, Delete
+- Search bar at top
+
+Create
+- Name workout
+- Add exercises manually (search + pick)
+- Sets, reps, rest, notes per exercise
+- On-demand flow: pick a starting exercise, app builds the rest around it
+- Sticky Save button at bottom
+
+Workout session screen
+- Top: workout name + elapsed time
+- Log sets/reps/weight
+- Rest timer as modal or bottom drawer
+- Big Finish Workout button
+- Subtle PR celebration animation
+
+### 10.6 Nutrition tab layout
+- Top: today’s macros (protein, carbs, fats) + calories
+- Quick actions: Log, Scan, Favorites
+- Meals (Breakfast, Lunch, Dinner, Snacks) as cards
+- Scan result screen: photo preview, detected items, macro breakdown, confirm/edit before saving
+
+### 10.7 Progress tab layout
+- Progress photos grid gallery
+- Weight chart with toggles (week, month, 3 month)
+- Weekly check-in card: weight input, photo upload, notes
+- Results: updated macros and next-week targets in a clean results card
+
+### 10.8 UI rules to protect the vibe
+- Use cards everywhere, avoid long plain lists
+- Copy stays short: titles, numbers, one line max
+- Lime only for key actions, key metrics, active states
+- No bright backgrounds, no loud gradients
+- Micro-interactions: press states, loading skeletons, smooth transitions
+- Consistent alignment and spacing, no clutter
+
+### 10.9 Reusable components required
+- Card
+- StatRow
+- ProgressBar
+- PrimaryButton
+- SegmentedControl
+- ExerciseCard
+- ChartCard
+- PhotoGrid
+
+### 10.10 UI acceptance criteria
+- Every screen matches the same padding, card style, button style, input style, icon style
+- Active tab and primary CTAs always use lime
+- No main screens rely on default unstyled lists
+- Workouts, nutrition, and progress all render as stacked cards
+- Animations feel smooth and quick, never flashy
+
+---
+
+## 11. Non-Functional Requirements
+
+Security
+- Hash passwords
+- JWT access + refresh
+- Secure storage on device
+- Server-side validation
+
+Rate limiting
+- Auth endpoints
+- AI endpoints (scan, generate, transcribe)
+
+Observability
+- Request logs
+- Error logging
+- AI job logs with prompt version
+
+Performance targets
+- Dashboard load under 2 seconds on normal connection
+- Scan results under 10 seconds on average
+
+Reliability
+- Save drafts locally for workouts and nutrition logs if offline
+- Sync on reconnect
+
+Privacy
+- User photo storage with access control by user
+- No cross-user photo access
+
+---
+
+## 12. MVP Scope (What ships first)
+
+- Auth + onboarding with progress photo upload
+- Home dashboard with cards wired to real data
+- Workout tab: Generate, Saved, Create
+- Workout session logging + rest timer + history + PRs
+- Nutrition: Open Food Facts search + manual logging + macros
+- AI food scan with confirm/edit
+- Progress photo gallery
+- Weekly check-in: weight + photos + adherence + basic AI macro update
+- Stripe subscription paywall for premium AI
+
+---
+
+## 13. Build Order (So nothing breaks later)
+
+1) Auth + onboarding  
+2) Home dashboard wiring  
+3) Workout tab modes + session logging + rest timer + PRs  
+4) Voice memo transcription + parsing flow  
+5) Nutrition search + manual logging + daily totals  
+6) Food photo scan confirm/edit logging  
+7) Progress gallery + charts  
+8) Weekly check-in with photo scan + macro updates  
+9) Coach flow + coach profiles + marketplace listing  
+10) Stripe subscription + coaching checkout + webhooks  
+
+---
+
+## 14. Success Metrics
+
+- Activation: users who log a workout within 24 hours (target 35%+)
+- Week 1 retention (target 25%+)
+- Weekly check-in completion rate (target 40%+)
+- Nutrition logging frequency: days per week with at least 1 logged meal (target 4)
+- Subscription conversion (target 3% to 8%)
+- Coach purchase conversion: view profile → purchase (target 1% to 3%)
+
+---
+
+## 15. Risks and Mitigations
+
+AI output mistakes
+- Mitigation: draft first, confirm/edit before save, collect feedback
+
+Photo scan latency
+- Mitigation: progress UI, timeouts, fallback to manual editing
+
+Open Food Facts gaps
+- Mitigation: custom foods + recents + favorites
+
+Stripe webhook sync issues
+- Mitigation: idempotent webhook handling, retries, audit records
+
+---
+
+## 16. Deliverables
+
+- Full repo scaffold: /frontend (Expo RN + TypeScript), /backend (FastAPI + MongoDB)
+- Setup scripts, env examples, README with exact run commands
+- API contract docs and DB schema docs
+- Server-side prompt templates with versioning
+- Seed data for exercises and on-demand templates
+- Minimal functional UI for each major screen
+- iOS simulator run instructions
+```

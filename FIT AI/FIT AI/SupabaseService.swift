@@ -1,32 +1,19 @@
+import Combine
 import Foundation
+import GoTrue
 import Supabase
 
 enum SupabaseError: LocalizedError {
     case missingConfiguration
+    case missingRedirectURL
 
     var errorDescription: String? {
         switch self {
         case .missingConfiguration:
             return "Supabase is not configured. Update Supabase.plist with your project URL and anon key."
+        case .missingRedirectURL:
+            return "Supabase redirect URL is missing. Add SUPABASE_REDIRECT_URL to Supabase.plist."
         }
-    }
-}
-
-struct SupabaseProfile: Decodable, Identifiable {
-    let id: String
-    let fullName: String?
-    let username: String?
-    let email: String?
-    let role: String?
-    let createdAt: String?
-
-    enum CodingKeys: String, CodingKey {
-        case id
-        case fullName = "full_name"
-        case username
-        case email
-        case role
-        case createdAt = "created_at"
     }
 }
 
@@ -44,15 +31,7 @@ final class SupabaseService {
             return
         }
 
-        let options = SupabaseClientOptions(
-            db: .init(decoder: PostgrestClient.Configuration.jsonDecoder)
-        )
-
-        client = SupabaseClient(
-            supabaseURL: url,
-            supabaseKey: key,
-            options: options
-        )
+        client = SupabaseClient(supabaseURL: url, supabaseKey: key)
     }
 
     private func requireClient() throws -> SupabaseClient {
@@ -64,18 +43,39 @@ final class SupabaseService {
 
     func fetchProfiles(limit: Int = 25) async throws -> [SupabaseProfile] {
         let client = try requireClient()
-        var query = client.from("profiles").select()
-        query = query.order("created_at", ascending: false)
-        if limit > 0 {
-            query = query.limit(limit)
-        }
-        let response: PostgrestResponse<[SupabaseProfile]> = try await query.execute()
-        return response.value
+        let response: PostgrestResponse<Data> = try await client.database
+            .from("profiles")
+            .select()
+            .order("created_at", ascending: false)
+            .limit(limit)
+            .execute()
+        let data = response.data
+        let profiles = try await Task.detached {
+            try JSONDecoder().decode([SupabaseProfile].self, from: data)
+        }.value
+        return profiles
     }
 
-    func signIn(email: String, password: String) async throws -> AuthResponse {
+    func signIn(email: String, password: String) async throws -> Session {
         let client = try requireClient()
         return try await client.auth.signIn(email: email, password: password)
+    }
+
+    func googleSignInURL() async throws -> URL {
+        let client = try requireClient()
+        guard let redirectURL = SupabaseConfig.redirectURL else {
+            throw SupabaseError.missingRedirectURL
+        }
+        return try await client.auth.getOAuthSignInURL(provider: .google, redirectTo: redirectURL)
+    }
+
+    func handleAuthCallback(url: URL) async throws -> Session {
+        let client = try requireClient()
+        return try await client.auth.session(from: url)
+    }
+    
+    func getUserId(from session: Session) -> String {
+        return session.user.id.uuidString
     }
 }
 
@@ -99,14 +99,14 @@ final class SupabaseViewModel: ObservableObject {
             return
         }
         await perform {
-            let response = try await SupabaseService.shared.signIn(email: email, password: password)
-            let user = response.session?.user ?? response.user
+            let session = try await SupabaseService.shared.signIn(email: email, password: password)
+            let user = session.user
             let emailDisplay = user.email ?? user.id.uuidString
             statusMessage = "Signed in as \(emailDisplay)"
         }
     }
 
-    private func perform(operation: @Sendable () async throws -> Void) async {
+    private func perform(operation: () async throws -> Void) async {
         isLoading = true
         defer { isLoading = false }
 

@@ -1,9 +1,9 @@
 from uuid import uuid4
+import hashlib
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
-from ..prompts import run_prompt
 from ..supabase_client import get_supabase
 
 router = APIRouter()
@@ -11,27 +11,23 @@ router = APIRouter()
 
 class OnboardingRequest(BaseModel):
     user_id: str | None = None
+    email: str | None = None
+    password: str | None = None
     full_name: str
     age: str
-    gender: str
+    sex: str
     height_feet: str
     height_inches: str
     weight_lbs: str
     goal: str
-    training_days: int
-    gym_access: str = "full_gym"
-    equipment: list[str] = Field(default_factory=list)
-    experience: str
+    training_level: str
+    workout_days_per_week: int
+    workout_duration_minutes: int
+    equipment: str
+    food_allergies: str = ""
+    food_dislikes: str = ""
+    diet_style: str = ""
     checkin_day: str
-    has_injury: bool = False
-    injury_notes: str = ""
-    macro_protein: str
-    macro_carbs: str
-    macro_fats: str
-    macro_calories: str
-    photos_pending: bool = True
-    coach_interest: bool = False
-    wants_to_coach: bool = False
 
 
 class OnboardingResponse(BaseModel):
@@ -74,20 +70,54 @@ def _weight_kg(pounds: str | None) -> float | None:
     return round(pounds_value * 0.45359237, 2)
 
 
-def _effective_equipment(payload: OnboardingRequest) -> list[str]:
-    if payload.gym_access == "home_gym":
-        return payload.equipment or ["bodyweight"]
-    if payload.gym_access == "calisthenics":
-        return ["bodyweight"]
-    return ["full gym"]
+def _hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+
+def _resolve_user_id(payload: OnboardingRequest, supabase) -> str:
+    email = (payload.email or "").strip().lower()
+    if payload.user_id:
+        existing = (
+            supabase.table("users")
+            .select("id")
+            .eq("id", payload.user_id)
+            .limit(1)
+            .execute()
+        )
+        if existing.data:
+            return payload.user_id
+    if email:
+        existing_by_email = (
+            supabase.table("users")
+            .select("id")
+            .eq("email", email)
+            .limit(1)
+            .execute()
+        )
+        if existing_by_email.data:
+            return existing_by_email.data[0]["id"]
+    if not email:
+        raise HTTPException(status_code=400, detail="Email is required.")
+
+    user_id = payload.user_id or str(uuid4())
+    password = payload.password or str(uuid4())
+    supabase.table("users").insert(
+        {
+            "id": user_id,
+            "email": email,
+            "hashed_password": _hash_password(password),
+            "role": "user",
+        }
+    ).execute()
+    return user_id
 
 
 @router.post("/", response_model=OnboardingResponse)
 async def submit_onboarding(payload: OnboardingRequest):
     supabase = get_supabase()
-    user_id = payload.user_id or str(uuid4())
+    user_id = _resolve_user_id(payload, supabase)
 
-    payload_dict = payload.dict(by_alias=True, exclude={"user_id"})
+    payload_dict = payload.dict(by_alias=True, exclude={"user_id", "email", "password"})
 
     try:
         supabase.table("onboarding_states").insert(
@@ -106,21 +136,16 @@ async def submit_onboarding(payload: OnboardingRequest):
             "height_cm": _height_cm(payload.height_feet, payload.height_inches),
             "weight_kg": _weight_kg(payload.weight_lbs),
             "goal": payload.goal,
-            "macros": {
-                "protein": payload.macro_protein,
-                "carbs": payload.macro_carbs,
-                "fats": payload.macro_fats,
-                "calories": payload.macro_calories,
-            },
             "preferences": {
-                "training_days": payload.training_days,
-                "gym_access": payload.gym_access,
+                "training_level": payload.training_level,
+                "workout_days_per_week": payload.workout_days_per_week,
+                "workout_duration_minutes": payload.workout_duration_minutes,
                 "equipment": payload.equipment,
-                "experience": payload.experience,
+                "food_allergies": payload.food_allergies,
+                "food_dislikes": payload.food_dislikes,
+                "diet_style": payload.diet_style,
                 "checkin_day": payload.checkin_day,
-                "gender": payload.gender,
-                "has_injury": payload.has_injury,
-                "injury_notes": payload.injury_notes,
+                "sex": payload.sex,
             },
         }
 
@@ -128,39 +153,6 @@ async def submit_onboarding(payload: OnboardingRequest):
             profile_payload, on_conflict="user_id"
         ).execute()
 
-        if payload.wants_to_coach or payload.coach_interest:
-            interest_enum = "coach" if payload.wants_to_coach else "hire"
-            supabase.table("coach_interest").insert(
-                {"user_id": user_id, "interest_enum": interest_enum}
-            ).execute()
-
-        resolved_equipment = _effective_equipment(payload)
-        prompt_inputs = {
-            "muscle_groups": ["full body"],
-            "workout_type": payload.goal,
-            "equipment": resolved_equipment,
-            "experience": payload.experience,
-            "goal": payload.goal,
-            "gym_access": payload.gym_access,
-        }
-
-        workout_plan = run_prompt(
-            "workout_generation", user_id=user_id, inputs=prompt_inputs
-        )
-
-        supabase.table("workout_templates").insert(
-            {
-                "user_id": user_id,
-                "title": "Starter plan",
-                "description": "Plan generated during onboarding",
-                "mode": "auto",
-                "metadata": {
-                    "summary": workout_plan,
-                    "form": payload_dict,
-                },
-            }
-        ).execute()
-
-        return {"user_id": user_id, "workout_plan": workout_plan}
+        return {"user_id": user_id, "workout_plan": ""}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))

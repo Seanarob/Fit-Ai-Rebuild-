@@ -1,4 +1,7 @@
+from pathlib import Path
+
 from fastapi import FastAPI
+from dotenv import load_dotenv
 
 from .routers import (
     auth,
@@ -12,8 +15,12 @@ from .routers import (
     payments,
     exercises,
     users,
+    scan,
+    progress,
+    chat,
 )
 
+load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env")
 app = FastAPI(title="FitAI Backend")
 
 app.include_router(auth.router, prefix="/auth", tags=["auth"])
@@ -27,3 +34,6 @@ app.include_router(coach.router, prefix="/coach", tags=["coach"])
 app.include_router(payments.router, prefix="/payments", tags=["payments"])
 app.include_router(exercises.router, prefix="/exercises", tags=["exercises"])
 app.include_router(users.router, prefix="/users", tags=["users"])
+app.include_router(scan.router, prefix="/scan", tags=["scan"])
+app.include_router(progress.router, prefix="/progress", tags=["progress"])
+app.include_router(chat.router, prefix="/chat", tags=["chat"])

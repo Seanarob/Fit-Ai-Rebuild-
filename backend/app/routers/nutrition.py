@@ -1,8 +1,11 @@
 from datetime import date
+import hashlib
 import json
 import os
+import uuid
 from urllib.parse import urlencode
 from urllib.request import urlopen
+from uuid import UUID
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -13,6 +16,38 @@ from ..fatsecret_client import fatsecret_request
 
 router = APIRouter()
 USDA_BASE_URL = "https://api.nal.usda.gov/fdc/v1"
+
+
+def _normalize_user_id(user_id: str | None) -> str | None:
+    if not user_id:
+        return None
+    try:
+        return str(UUID(user_id))
+    except ValueError:
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, f"fitai:{user_id}"))
+
+
+def _ensure_user_record(supabase, user_id: str | None) -> str | None:
+    normalized = _normalize_user_id(user_id)
+    if not normalized:
+        return None
+    existing = (
+        supabase.table("users").select("id").eq("id", normalized).limit(1).execute().data
+    )
+    if existing:
+        return normalized
+
+    email = f"user-{normalized}@fitai.local"
+    hashed_password = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    supabase.table("users").insert(
+        {
+            "id": normalized,
+            "email": email,
+            "hashed_password": hashed_password,
+            "role": "user",
+        }
+    ).execute()
+    return normalized
 
 
 @router.get("/search")
@@ -26,9 +61,10 @@ async def search_food(query: str, user_id: str | None = None):
         .execute()
         .data
     )
-    if user_id:
+    normalized_user_id = _normalize_user_id(user_id) if user_id else None
+    if normalized_user_id:
         supabase.table("search_history").insert(
-            {"user_id": user_id, "query": query, "source": "search"}
+            {"user_id": normalized_user_id, "query": query, "source": "search"}
         ).execute()
     return {"query": query, "results": result}
 
@@ -298,6 +334,12 @@ async def fatsecret_food_detail(food_id: str, user_id: str | None = None):
         supabase.table("food_items").insert(row).execute()
     except Exception:
         pass
+    if user_id:
+        normalized_user_id = _normalize_user_id(user_id)
+        if normalized_user_id:
+            supabase.table("search_history").insert(
+                {"user_id": normalized_user_id, "query": normalized["name"], "source": "fatsecret_detail"}
+            ).execute()
     return normalized
 
 
@@ -306,13 +348,16 @@ async def log_nutrition(
     user_id: str, meal_type: str, photo_url: str | None = None, log_date: str | None = None
 ):
     supabase = get_supabase()
+    normalized_user_id = _ensure_user_record(supabase, user_id)
     prompt_input = {"meal_type": meal_type, "photo_url": photo_url}
     date_value = log_date or date.today().isoformat()
     try:
-        ai_output = run_prompt("meal_photo_parse", user_id=user_id, inputs=prompt_input)
+        ai_output = run_prompt(
+            "meal_photo_parse", user_id=normalized_user_id, inputs=prompt_input
+        )
         supabase.table("nutrition_logs").insert(
             {
-                "user_id": user_id,
+                "user_id": normalized_user_id,
                 "date": date_value,
                 "meal_type": meal_type,
                 "items": [{"raw": ai_output}],
@@ -331,7 +376,7 @@ class FavoriteRequest(BaseModel):
 
 class ManualNutritionItem(BaseModel):
     name: str
-    portion_value: float = Field(..., gt=0)
+    portion_value: float = Field(0, ge=0)
     portion_unit: str
     calories: float
     protein: float
@@ -351,10 +396,13 @@ class ManualNutritionLog(BaseModel):
 async def fetch_logs(user_id: str, log_date: str | None = None):
     supabase = get_supabase()
     date_value = log_date or date.today().isoformat()
+    normalized_user_id = _normalize_user_id(user_id)
+    if not normalized_user_id:
+        raise HTTPException(status_code=400, detail="Invalid user id.")
     result = (
         supabase.table("nutrition_logs")
         .select("*")
-        .eq("user_id", user_id)
+        .eq("user_id", normalized_user_id)
         .eq("date", date_value)
         .execute()
         .data
@@ -365,6 +413,7 @@ async def fetch_logs(user_id: str, log_date: str | None = None):
 @router.post("/logs/manual")
 async def log_manual_item(payload: ManualNutritionLog):
     supabase = get_supabase()
+    normalized_user_id = _ensure_user_record(supabase, payload.user_id)
     date_value = payload.log_date or date.today().isoformat()
     item = payload.item
     totals = {
@@ -376,7 +425,7 @@ async def log_manual_item(payload: ManualNutritionLog):
     try:
         supabase.table("nutrition_logs").insert(
             {
-                "user_id": payload.user_id,
+                "user_id": normalized_user_id,
                 "date": date_value,
                 "meal_type": payload.meal_type,
                 "items": [
@@ -403,7 +452,12 @@ async def log_manual_item(payload: ManualNutritionLog):
 async def add_favorite(payload: FavoriteRequest):
     supabase = get_supabase()
     try:
-        supabase.table("nutrition_favorites").insert(payload.dict()).execute()
+        normalized_user_id = _normalize_user_id(payload.user_id)
+        if not normalized_user_id:
+            raise HTTPException(status_code=400, detail="Invalid user id.")
+        payload_dict = payload.dict()
+        payload_dict["user_id"] = normalized_user_id
+        supabase.table("nutrition_favorites").insert(payload_dict).execute()
         return {"status": "saved"}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
@@ -412,10 +466,13 @@ async def add_favorite(payload: FavoriteRequest):
 @router.get("/favorites")
 async def list_favorites(user_id: str, limit: int = 50):
     supabase = get_supabase()
+    normalized_user_id = _normalize_user_id(user_id)
+    if not normalized_user_id:
+        raise HTTPException(status_code=400, detail="Invalid user id.")
     result = (
         supabase.table("nutrition_favorites")
         .select("*")
-        .eq("user_id", user_id)
+        .eq("user_id", normalized_user_id)
         .limit(limit)
         .execute()
         .data

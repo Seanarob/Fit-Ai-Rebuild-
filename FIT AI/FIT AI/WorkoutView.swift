@@ -958,6 +958,21 @@ struct WorkoutView: View {
     private struct GeneratedWorkoutPayload: Decodable {
         let title: String?
         let exercises: [GeneratedExercise]?
+        
+        init(title: String?, exercises: [GeneratedExercise]?) {
+            self.title = title
+            self.exercises = exercises
+        }
+        
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            title = try container.decodeIfPresent(String.self, forKey: .title)
+            exercises = try container.decodeIfPresent([GeneratedExercise].self, forKey: .exercises)
+        }
+        
+        enum CodingKeys: String, CodingKey {
+            case title, exercises
+        }
     }
 
     private struct GeneratedExercise: Decodable {
