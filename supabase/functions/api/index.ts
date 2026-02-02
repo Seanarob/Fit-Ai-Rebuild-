@@ -22,6 +22,44 @@ const corsHeaders = {
   "access-control-allow-headers": "authorization, x-client-info, apikey, content-type",
 };
 
+const MAX_COACH_WORDS = 18;
+const workoutKeywords = ["workout", "routine", "session"];
+const workoutActions = ["build", "create", "make", "generate", "design", "plan"];
+const muscleKeywords: Record<string, string> = {
+  glute: "glutes",
+  glutes: "glutes",
+  booty: "glutes",
+  hamstring: "hamstrings",
+  hamstrings: "hamstrings",
+  quad: "quads",
+  quads: "quads",
+  leg: "legs",
+  legs: "legs",
+  calf: "calves",
+  calves: "calves",
+  chest: "chest",
+  pec: "chest",
+  pecs: "chest",
+  back: "back",
+  lat: "back",
+  lats: "back",
+  shoulder: "shoulders",
+  shoulders: "shoulders",
+  delt: "shoulders",
+  delts: "shoulders",
+  biceps: "biceps",
+  triceps: "triceps",
+  arms: "arms",
+  core: "core",
+  abs: "core",
+  upper: "upper body",
+  lower: "lower body",
+  push: "push",
+  pull: "pull",
+  "full body": "full body",
+  hiit: "hiit",
+};
+
 class HttpError extends Error {
   status: number;
   constructor(status: number, message: string) {
@@ -129,6 +167,174 @@ async function sha256Hex(value: string) {
   const data = new TextEncoder().encode(value);
   const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", data));
   return Array.from(hash).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function trimCoachReply(value: string, maxWords = MAX_COACH_WORDS) {
+  const cleaned = value.replace(/\s+/g, " ").trim();
+  if (!cleaned) return cleaned;
+  const sentences = cleaned.split(/(?<=[.!?])\s+/);
+  let trimmed = sentences.slice(0, 2).join(" ");
+  const words = trimmed.split(" ");
+  if (words.length > maxWords) {
+    trimmed = words.slice(0, maxWords).join(" ").replace(/[.,!?]+$/, "");
+  }
+  return trimmed;
+}
+
+function isWorkoutRequest(text: string) {
+  const lowered = text.toLowerCase();
+  const hasWorkout = workoutKeywords.some((keyword) => lowered.includes(keyword));
+  const hasAction = workoutActions.some((action) => lowered.includes(action));
+  const hasMuscle = Object.keys(muscleKeywords).some((keyword) => lowered.includes(keyword));
+  if ((hasWorkout && hasAction) || (hasWorkout && hasMuscle) || (hasAction && hasMuscle)) {
+    return true;
+  }
+  return false;
+}
+
+function parseWorkoutRequest(text: string) {
+  const lowered = text.toLowerCase();
+  let durationMinutes = 45;
+  const durationMatch = lowered.match(/(\d{2,3})\s*(min|mins|minute|minutes)/);
+  if (durationMatch) {
+    const parsed = Number(durationMatch[1]);
+    if (!Number.isNaN(parsed)) {
+      durationMinutes = Math.min(120, Math.max(10, parsed));
+    }
+  }
+
+  const muscleGroups: string[] = [];
+  Object.entries(muscleKeywords).forEach(([keyword, group]) => {
+    if (lowered.includes(keyword) && !muscleGroups.includes(group)) {
+      muscleGroups.push(group);
+    }
+  });
+
+  if (muscleGroups.length === 0) {
+    muscleGroups.push("full body");
+  }
+
+  const focus = text.trim() || "custom workout";
+  return { focus, muscleGroups, durationMinutes };
+}
+
+function parseJsonOutput(rawOutput: string) {
+  let text = (rawOutput ?? "").trim();
+  if (!text) throw new HttpError(500, "AI output empty");
+
+  if (text.startsWith("```")) {
+    text = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+  }
+
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // continue to substring parsing
+  }
+
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start >= 0 && end > start) {
+    try {
+      const parsed = JSON.parse(text.slice(start, end + 1));
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      // fall through
+    }
+  }
+
+  throw new HttpError(500, "AI output did not contain valid JSON.");
+}
+
+function normalizeReps(value: unknown) {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.round(value);
+  if (typeof value === "string") {
+    const cleaned = value.split("-")[0]?.trim();
+    const parsed = Number.parseInt(cleaned ?? "", 10);
+    if (!Number.isNaN(parsed)) return parsed;
+  }
+  return 10;
+}
+
+async function createCoachWorkout(
+  userId: string,
+  focus: string,
+  muscleGroups: string[],
+  durationMinutes: number,
+) {
+  const promptInput = {
+    muscle_groups: muscleGroups,
+    workout_type: focus,
+    duration_minutes: durationMinutes,
+  };
+
+  const result = await runPrompt("workout_generation", userId, promptInput);
+  const workoutData = parseJsonOutput(result);
+
+  const generatedTitle = (workoutData.title as string | undefined) ?? focus;
+  const title = `Coaches Pick: ${generatedTitle}`;
+
+  const { data: templateRows, error } = await supabase
+    .from("workout_templates")
+    .insert({
+      user_id: userId,
+      title,
+      description: `AI-generated ${focus}`,
+      mode: "coach",
+    })
+    .select();
+  if (error) throw new HttpError(500, error.message);
+  if (!templateRows || templateRows.length === 0) throw new HttpError(500, "Failed to create template");
+  const templateId = templateRows[0].id as string;
+
+  const exercises = Array.isArray(workoutData.exercises) ? workoutData.exercises : [];
+  if (exercises.length === 0) {
+    throw new HttpError(500, "Workout generation returned no exercises.");
+  }
+  for (let idx = 0; idx < exercises.length; idx += 1) {
+    const exercise = exercises[idx] as Record<string, unknown>;
+    const exerciseName = String(exercise.name ?? "Unknown Exercise");
+    const { data: existing } = await supabase
+      .from("exercises")
+      .select("id")
+      .eq("name", exerciseName)
+      .limit(1);
+    let exerciseId = existing?.[0]?.id;
+    if (!exerciseId) {
+      const { data: created } = await supabase
+        .from("exercises")
+        .insert({
+          name: exerciseName,
+          muscle_groups: muscleGroups,
+          equipment: [],
+        })
+        .select();
+      if (!created || created.length === 0) throw new HttpError(500, "Failed to create exercise");
+      exerciseId = created[0].id;
+    }
+
+    await supabase.from("workout_template_exercises").insert({
+      template_id: templateId,
+      exercise_id: exerciseId,
+      position: idx,
+      sets: exercise.sets ?? 3,
+      reps: normalizeReps(exercise.reps),
+      rest_seconds: exercise.rest_seconds ?? 60,
+      notes: exercise.notes ?? null,
+    });
+  }
+
+  return {
+    success: true,
+    template_id: templateId,
+    title,
+    exercise_count: exercises.length,
+  };
 }
 
 function todayIso() {
@@ -766,6 +972,20 @@ serve(async (req) => {
       }
     }
 
+    if (segments[0] === "onboarding" && method === "GET" && segments[1] === "state") {
+      const userId = url.searchParams.get("user_id");
+      if (!userId) throw new HttpError(400, "user_id is required.");
+      const { data, error } = await supabase
+        .from("onboarding_states")
+        .select("step_index,is_complete,data,updated_at")
+        .eq("user_id", userId)
+        .order("updated_at", { ascending: false })
+        .limit(1);
+      if (error) throw new HttpError(500, error.message);
+      if (!data || data.length === 0) throw new HttpError(404, "Onboarding state not found");
+      return jsonResponse({ state: data[0] });
+    }
+
     if (segments[0] === "onboarding" && method === "POST") {
       const payload = await parseJson<Record<string, unknown>>(req);
       const email = typeof payload.email === "string" ? payload.email.trim().toLowerCase() : "";
@@ -809,6 +1029,49 @@ serve(async (req) => {
       delete onboardingData.email;
       delete onboardingData.password;
 
+      const genderValue =
+        (typeof payload.gender === "string" && payload.gender) ||
+        (typeof payload.sex === "string" && payload.sex) ||
+        null;
+      const macroCandidates: Record<string, number | null> = {
+        calories: parseIntSafe(payload.macro_calories as string),
+        protein: parseIntSafe(payload.macro_protein as string),
+        carbs: parseIntSafe(payload.macro_carbs as string),
+        fats: parseIntSafe(payload.macro_fats as string),
+      };
+      const macros = Object.fromEntries(
+        Object.entries(macroCandidates).filter(([, value]) => typeof value === "number" && value > 0)
+      );
+      const preferences: Record<string, unknown> = {
+        training_level: payload.training_level,
+        workout_days_per_week: payload.workout_days_per_week,
+        workout_duration_minutes: payload.workout_duration_minutes,
+        equipment: payload.equipment,
+        food_allergies: payload.food_allergies,
+        food_dislikes: payload.food_dislikes,
+        diet_style: payload.diet_style,
+        checkin_day: payload.checkin_day,
+        gender: genderValue,
+        sex: genderValue,
+        activity_level: payload.activity_level,
+        goal_weight_lbs: payload.goal_weight_lbs,
+        target_date_timestamp: payload.target_date_timestamp,
+        birthday_timestamp: payload.birthday_timestamp,
+        special_considerations: payload.special_considerations_array ?? payload.special_considerations,
+        additional_notes: payload.additional_notes,
+        height_unit: payload.height_unit,
+      };
+      for (const key of Object.keys(preferences)) {
+        const value = preferences[key];
+        if (value === null || value === undefined) {
+          delete preferences[key];
+        } else if (typeof value === "string" && value.trim() === "") {
+          delete preferences[key];
+        } else if (Array.isArray(value) && value.length === 0) {
+          delete preferences[key];
+        }
+      }
+
       const { data: existingOnboarding, error: onboardingLookupError } = await supabase
         .from("onboarding_states")
         .select("id")
@@ -836,26 +1099,18 @@ serve(async (req) => {
         if (onboardingInsertError) throw new HttpError(500, onboardingInsertError.message);
       }
 
-      const profilePayload = {
+      const profilePayload: Record<string, unknown> = {
         user_id: userId,
         full_name: payload.full_name,
         age: parseIntSafe(payload.age as string),
         height_cm: heightCm(payload.height_feet as string, payload.height_inches as string),
         weight_kg: weightKg(payload.weight_lbs as string),
         goal: payload.goal,
-        macros: {},
-        preferences: {
-          training_level: payload.training_level,
-          workout_days_per_week: payload.workout_days_per_week ?? 0,
-          workout_duration_minutes: payload.workout_duration_minutes ?? 0,
-          equipment: payload.equipment ?? "gym",
-          food_allergies: payload.food_allergies ?? "",
-          food_dislikes: payload.food_dislikes ?? "",
-          diet_style: payload.diet_style ?? "",
-          checkin_day: payload.checkin_day,
-          sex: payload.sex,
-        },
+        preferences,
       };
+      if (Object.keys(macros).length > 0) {
+        profilePayload.macros = macros;
+      }
 
       const { error: profileError } = await supabase
         .from("profiles")
@@ -993,10 +1248,11 @@ serve(async (req) => {
     if (segments[0] === "chat") {
       if (method === "POST" && segments[1] === "thread") {
         const payload = await parseJson<{ user_id?: string; title?: string }>(req);
-        if (!payload.user_id) throw new HttpError(400, "user_id is required");
+        const userId = await resolveUserId(payload.user_id);
+        await ensureUserExists(userId);
         const { data, error } = await supabase
           .from("chat_threads")
-          .insert({ user_id: payload.user_id, title: payload.title ?? null })
+          .insert({ user_id: userId, title: payload.title ?? null })
           .select()
           .limit(1);
         if (error) throw new HttpError(500, error.message);
@@ -1004,8 +1260,7 @@ serve(async (req) => {
       }
 
       if (method === "GET" && segments[1] === "threads") {
-        const userId = url.searchParams.get("user_id");
-        if (!userId) throw new HttpError(400, "user_id is required");
+        const userId = await resolveUserId(url.searchParams.get("user_id"));
         const { data, error } = await supabase
           .from("chat_threads")
           .select("*")
@@ -1016,8 +1271,7 @@ serve(async (req) => {
       }
 
       if (method === "GET" && segments[1] === "thread" && segments[2]) {
-        const userId = url.searchParams.get("user_id");
-        if (!userId) throw new HttpError(400, "user_id is required");
+        const userId = await resolveUserId(url.searchParams.get("user_id"));
         const threadId = segments[2];
         const { data: threads, error: threadError } = await supabase
           .from("chat_threads")
@@ -1037,12 +1291,19 @@ serve(async (req) => {
       }
 
       if (method === "POST" && segments[1] === "message") {
-        const payload = await parseJson<{ user_id?: string; thread_id?: string; content?: string; stream?: boolean }>(req);
-        const userId = payload.user_id ?? "";
+        const payload = await parseJson<{
+          user_id?: string;
+          thread_id?: string;
+          content?: string;
+          stream?: boolean;
+          local_workout_snapshot?: Record<string, unknown> | null;
+        }>(req);
+        const userId = await resolveUserId(payload.user_id);
         const threadId = payload.thread_id ?? "";
         const content = payload.content?.trim() ?? "";
         const stream = payload.stream ?? true;
-        if (!userId || !threadId || !content) throw new HttpError(400, "user_id, thread_id, and content are required");
+        if (!threadId || !content) throw new HttpError(400, "user_id, thread_id, and content are required");
+        await ensureUserExists(userId);
 
         const { data: threadRows, error: threadError } = await supabase
           .from("chat_threads")
@@ -1062,21 +1323,95 @@ serve(async (req) => {
         if (insertUserError) throw new HttpError(500, insertUserError.message);
         await touchChatThread(threadId);
 
+        const workoutRequest = isWorkoutRequest(content);
+        if (workoutRequest) {
+          const { focus, muscleGroups, durationMinutes } = parseWorkoutRequest(content);
+
+          if (stream) {
+            const encoder = new TextEncoder();
+            const streamBody = new ReadableStream({
+              async start(controller) {
+                let assistantText = "One moment while I build your workout.";
+                controller.enqueue(encoder.encode(`data: ${assistantText}\n\n`));
+
+                let workoutResult: Record<string, unknown> | null = null;
+                let tail = " Workout failed. Tell me your goal and equipment.";
+                try {
+                  workoutResult = await createCoachWorkout(userId, focus, muscleGroups, durationMinutes);
+                  tail = " It's live in your workout view. Go check it out.";
+                } catch (error) {
+                  const message = error instanceof Error ? error.message : "Workout failed.";
+                  workoutResult = { success: false, error: message };
+                }
+
+                assistantText += tail;
+                controller.enqueue(encoder.encode(`data: ${tail}\n\n`));
+
+                const { error: insertAssistantError } = await supabase.from("chat_messages").insert({
+                  thread_id: threadId,
+                  user_id: userId,
+                  role: "assistant",
+                  content: assistantText,
+                  model: "gpt-4o-mini",
+                  metadata: workoutResult ? { workout_created: workoutResult } : null,
+                });
+                if (insertAssistantError) {
+                  controller.error(new Error(insertAssistantError.message));
+                  return;
+                }
+                await touchChatThread(threadId);
+
+                controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+                controller.close();
+              },
+            });
+
+            return new Response(streamBody, {
+              status: 200,
+              headers: { "content-type": "text/event-stream", ...corsHeaders },
+            });
+          }
+
+          let workoutResult: Record<string, unknown> | null = null;
+          let assistantText = "One moment while I build your workout. Workout failed. Tell me your goal and equipment.";
+          try {
+            workoutResult = await createCoachWorkout(userId, focus, muscleGroups, durationMinutes);
+            assistantText = "One moment while I build your workout. It's live in your workout view. Go check it out.";
+          } catch (error) {
+            const message = error instanceof Error ? error.message : "Workout failed.";
+            workoutResult = { success: false, error: message };
+          }
+          assistantText = trimCoachReply(assistantText);
+
+          const { error: insertAssistantError } = await supabase.from("chat_messages").insert({
+            thread_id: threadId,
+            user_id: userId,
+            role: "assistant",
+            content: assistantText,
+            model: "gpt-4o-mini",
+            metadata: workoutResult ? { workout_created: workoutResult } : null,
+          });
+          if (insertAssistantError) throw new HttpError(500, insertAssistantError.message);
+          await touchChatThread(threadId);
+          return jsonResponse({ reply: assistantText, workout_created: workoutResult });
+        }
+
         const profile = await getChatProfile(userId);
-        if (!profile) throw new HttpError(404, "Profile not found");
         const latestCheckin = await getChatLatestCheckin(userId);
         const recentWorkouts = await getChatRecentWorkouts(userId);
         const history = await getChatRecentMessages(threadId, 12);
         const promptInputs = {
           message: content,
           history,
-          profile,
-          macros: profile.macros ?? null,
+          profile: profile ?? {},
+          macros: profile?.macros ?? null,
           latest_checkin: latestCheckin,
           recent_workouts: recentWorkouts,
+          device_active_workout: payload.local_workout_snapshot ?? null,
         };
 
-        const assistantText = await runPrompt("coach_chat", userId, promptInputs);
+        const assistantTextRaw = await runPrompt("coach_chat", userId, promptInputs);
+        const assistantText = trimCoachReply(assistantTextRaw ?? "");
 
         const { error: insertAssistantError } = await supabase.from("chat_messages").insert({
           thread_id: threadId,
@@ -1466,6 +1801,24 @@ serve(async (req) => {
         return jsonResponse({ session_id: rows[0].id });
       }
 
+      if (segments[1] === "sessions" && segments[3] === "logs" && method === "GET") {
+        const sessionId = segments[2];
+        const { data: logs, error } = await supabase
+          .from("exercise_logs")
+          .select("id,exercise_name,sets,reps,weight,duration_minutes,notes,created_at")
+          .eq("session_id", sessionId)
+          .order("created_at", { ascending: true });
+        if (error) throw new HttpError(500, error.message);
+        const normalizedLogs = (logs ?? []).map((log) => ({
+          ...log,
+          sets: Number(log.sets ?? 0),
+          reps: Number(log.reps ?? 0),
+          weight: Number(log.weight ?? 0),
+          duration_minutes: Number(log.duration_minutes ?? 0),
+        }));
+        return jsonResponse({ session_id: sessionId, logs: normalizedLogs });
+      }
+
       if (segments[1] === "sessions" && segments[3] === "log" && method === "POST") {
         const sessionId = segments[2];
         const payload = await parseJson<Record<string, unknown>>(req);
@@ -1496,16 +1849,25 @@ serve(async (req) => {
         const payload = await parseJson<Record<string, unknown>>(req);
         const { data: sessions, error } = await supabase
           .from("workout_sessions")
-          .select("id,user_id")
+          .select("id,user_id,started_at")
           .eq("id", sessionId)
           .limit(1);
         if (error) throw new HttpError(500, error.message);
         if (!sessions || sessions.length === 0) throw new HttpError(404, "Session not found");
         const session = sessions[0];
 
+        const providedDuration = toNumber(payload.duration_seconds);
+        let durationSeconds = providedDuration > 0 ? providedDuration : 0;
+        if (durationSeconds === 0 && session.started_at) {
+          const startedAt = Date.parse(session.started_at);
+          if (!Number.isNaN(startedAt)) {
+            durationSeconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+          }
+        }
+
         await supabase.from("workout_sessions").update({
           status: payload.status ?? "completed",
-          duration_seconds: payload.duration_seconds ?? 0,
+          duration_seconds: durationSeconds,
           completed_at: new Date().toISOString(),
         }).eq("id", sessionId);
 
@@ -1551,7 +1913,7 @@ serve(async (req) => {
         return jsonResponse({
           session_id: sessionId,
           status: payload.status ?? "completed",
-          duration_seconds: payload.duration_seconds ?? 0,
+          duration_seconds: durationSeconds,
           prs: prUpdates,
         });
       }
