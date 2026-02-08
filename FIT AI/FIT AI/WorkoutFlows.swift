@@ -1,3 +1,4 @@
+import AVKit
 import Combine
 import Foundation
 import SwiftUI
@@ -27,6 +28,7 @@ struct WorkoutExerciseSession: Identifiable, Hashable {
     var name: String
     var sets: [WorkoutSetEntry]
     var restSeconds: Int
+    var warmupRestSeconds: Int = 60
     var notes: String = ""
     var unit: WeightUnit = .lb
     var recommendationPreference: ExerciseRecommendationPreference = .none
@@ -48,6 +50,11 @@ enum ExerciseRecommendationPreference: String, CaseIterable, Hashable {
     case moreOften
     case lessOften
     case avoid
+}
+
+private enum DragAxis {
+    case horizontal
+    case vertical
 }
 
 struct WorkoutSetEntry: Identifiable, Hashable {
@@ -99,7 +106,6 @@ extension CardioRecommendation {
 struct ExercisePickerModal: View {
     let title: String
     let subtitle: String
-    let onSearch: (String) async -> [ExerciseDefinition]
     let selectedNames: Set<String>
     let onAdd: (ExerciseDefinition) -> Void
     let onClose: () -> Void
@@ -109,18 +115,71 @@ struct ExercisePickerModal: View {
     @State private var selectedEquipment: Set<String> = []
     @State private var catalog: [ExerciseDefinition] = []
     @State private var isLoading = false
+    @State private var submitTask: Task<Void, Never>?
+    @State private var lastQuery = ""
+    @State private var isActive = true
+    private let localFallbackCatalog: [ExerciseDefinition] = [
+        ExerciseDefinition(name: "Bench Press", muscleGroups: ["chest"], equipment: ["Barbell"]),
+        ExerciseDefinition(name: "Incline Dumbbell Press", muscleGroups: ["chest"], equipment: ["Dumbbell"]),
+        ExerciseDefinition(name: "Push Up", muscleGroups: ["chest"], equipment: ["Bodyweight"]),
+        ExerciseDefinition(name: "Lat Pulldown", muscleGroups: ["back"], equipment: ["Cable"]),
+        ExerciseDefinition(name: "Seated Row", muscleGroups: ["back"], equipment: ["Cable"]),
+        ExerciseDefinition(name: "Overhead Press", muscleGroups: ["shoulders"], equipment: ["Barbell"]),
+        ExerciseDefinition(name: "Lateral Raise", muscleGroups: ["shoulders"], equipment: ["Dumbbell"]),
+        ExerciseDefinition(name: "Bicep Curl", muscleGroups: ["arms"], equipment: ["Dumbbell"]),
+        ExerciseDefinition(name: "Tricep Pushdown", muscleGroups: ["arms"], equipment: ["Cable"]),
+        ExerciseDefinition(name: "Back Squat", muscleGroups: ["legs"], equipment: ["Barbell"]),
+        ExerciseDefinition(name: "Leg Press", muscleGroups: ["legs"], equipment: ["Machine"]),
+        ExerciseDefinition(name: "Romanian Deadlift", muscleGroups: ["hamstrings"], equipment: ["Barbell"]),
+        ExerciseDefinition(name: "Hip Thrust", muscleGroups: ["glutes"], equipment: ["Barbell"]),
+        ExerciseDefinition(name: "Plank", muscleGroups: ["core"], equipment: ["Bodyweight"]),
+        ExerciseDefinition(name: "Hammer Strength Chest Press", muscleGroups: ["chest", "triceps", "shoulders"], equipment: ["Hammer Strength"]),
+        ExerciseDefinition(name: "Hammer Strength Iso-Lateral Chest Press", muscleGroups: ["chest", "triceps", "shoulders"], equipment: ["Hammer Strength"]),
+        ExerciseDefinition(name: "Hammer Strength Incline Chest Press", muscleGroups: ["upper chest", "triceps", "shoulders"], equipment: ["Hammer Strength"]),
+        ExerciseDefinition(name: "Hammer Strength Iso-Lateral Incline Press", muscleGroups: ["upper chest", "triceps", "shoulders"], equipment: ["Hammer Strength"]),
+        ExerciseDefinition(name: "Hammer Strength Decline Chest Press", muscleGroups: ["lower chest", "triceps", "shoulders"], equipment: ["Hammer Strength"]),
+        ExerciseDefinition(name: "Hammer Strength Chest Fly", muscleGroups: ["chest", "shoulders"], equipment: ["Hammer Strength"]),
+        ExerciseDefinition(name: "Hammer Strength Shoulder Press", muscleGroups: ["shoulders", "triceps"], equipment: ["Hammer Strength"]),
+        ExerciseDefinition(name: "Hammer Strength Iso-Lateral Shoulder Press", muscleGroups: ["shoulders", "triceps"], equipment: ["Hammer Strength"]),
+        ExerciseDefinition(name: "Hammer Strength High Shoulder Press", muscleGroups: ["front delts", "triceps"], equipment: ["Hammer Strength"]),
+        ExerciseDefinition(name: "Hammer Strength Lat Pulldown", muscleGroups: ["lats", "biceps", "upper back"], equipment: ["Hammer Strength"]),
+        ExerciseDefinition(name: "Hammer Strength Iso-Lateral Lat Pulldown", muscleGroups: ["lats", "biceps", "upper back"], equipment: ["Hammer Strength"]),
+        ExerciseDefinition(name: "Hammer Strength High Row", muscleGroups: ["upper back", "biceps"], equipment: ["Hammer Strength"]),
+        ExerciseDefinition(name: "Hammer Strength Low Row", muscleGroups: ["mid back", "biceps"], equipment: ["Hammer Strength"]),
+        ExerciseDefinition(name: "Hammer Strength Iso-Lateral Row", muscleGroups: ["mid back", "biceps"], equipment: ["Hammer Strength"]),
+        ExerciseDefinition(name: "Hammer Strength Seated Row", muscleGroups: ["mid back", "biceps"], equipment: ["Hammer Strength"]),
+        ExerciseDefinition(name: "Hammer Strength Assisted Pull-Up", muscleGroups: ["lats", "biceps"], equipment: ["Hammer Strength"]),
+        ExerciseDefinition(name: "Hammer Strength Assisted Dip", muscleGroups: ["triceps", "chest", "shoulders"], equipment: ["Hammer Strength"]),
+        ExerciseDefinition(name: "Hammer Strength Biceps Curl", muscleGroups: ["biceps", "forearms"], equipment: ["Hammer Strength"]),
+        ExerciseDefinition(name: "Hammer Strength Preacher Curl", muscleGroups: ["biceps", "forearms"], equipment: ["Hammer Strength"]),
+        ExerciseDefinition(name: "Hammer Strength Triceps Extension", muscleGroups: ["triceps", "shoulders"], equipment: ["Hammer Strength"]),
+        ExerciseDefinition(name: "Hammer Strength Seated Triceps Press", muscleGroups: ["triceps", "chest"], equipment: ["Hammer Strength"]),
+        ExerciseDefinition(name: "Hammer Strength Leg Press", muscleGroups: ["quads", "glutes", "hamstrings"], equipment: ["Hammer Strength"]),
+        ExerciseDefinition(name: "Hammer Strength Iso-Lateral Leg Press", muscleGroups: ["quads", "glutes", "hamstrings"], equipment: ["Hammer Strength"]),
+        ExerciseDefinition(name: "Hammer Strength Hack Squat", muscleGroups: ["quads", "glutes"], equipment: ["Hammer Strength"]),
+        ExerciseDefinition(name: "Hammer Strength Pendulum Squat", muscleGroups: ["quads", "glutes"], equipment: ["Hammer Strength"]),
+        ExerciseDefinition(name: "Hammer Strength V-Squat", muscleGroups: ["quads", "glutes"], equipment: ["Hammer Strength"]),
+        ExerciseDefinition(name: "Hammer Strength Leg Extension", muscleGroups: ["quads"], equipment: ["Hammer Strength"]),
+        ExerciseDefinition(name: "Hammer Strength Seated Leg Curl", muscleGroups: ["hamstrings", "glutes"], equipment: ["Hammer Strength"]),
+        ExerciseDefinition(name: "Hammer Strength Lying Leg Curl", muscleGroups: ["hamstrings", "glutes"], equipment: ["Hammer Strength"]),
+        ExerciseDefinition(name: "Hammer Strength Glute Drive", muscleGroups: ["glutes", "hamstrings"], equipment: ["Hammer Strength"]),
+        ExerciseDefinition(name: "Hammer Strength Hip Abduction", muscleGroups: ["glutes"], equipment: ["Hammer Strength"]),
+        ExerciseDefinition(name: "Hammer Strength Hip Adduction", muscleGroups: ["adductors"], equipment: ["Hammer Strength"]),
+        ExerciseDefinition(name: "Hammer Strength Standing Calf Raise", muscleGroups: ["calves"], equipment: ["Hammer Strength"]),
+        ExerciseDefinition(name: "Hammer Strength Ab Crunch", muscleGroups: ["abs"], equipment: ["Hammer Strength"]),
+        ExerciseDefinition(name: "Hammer Strength Rotary Torso", muscleGroups: ["obliques", "abs"], equipment: ["Hammer Strength"]),
+        ExerciseDefinition(name: "Hammer Strength Back Extension", muscleGroups: ["lower back", "glutes"], equipment: ["Hammer Strength"])
+    ]
 
     init(
         title: String = "Add Exercise",
         subtitle: String = "Search and filter to build your workout.",
-        onSearch: @escaping (String) async -> [ExerciseDefinition],
         selectedNames: Set<String>,
         onAdd: @escaping (ExerciseDefinition) -> Void,
         onClose: @escaping () -> Void
     ) {
         self.title = title
         self.subtitle = subtitle
-        self.onSearch = onSearch
         self.selectedNames = selectedNames
         self.onAdd = onAdd
         self.onClose = onClose
@@ -171,10 +230,15 @@ struct ExercisePickerModal: View {
             }
             .padding(.top, 12)
         }
-        .task(id: searchText) {
-            isLoading = true
-            catalog = await onSearch(searchText)
-            isLoading = false
+        .onAppear {
+            isActive = true
+            if catalog.isEmpty {
+                isLoading = false
+            }
+        }
+        .onDisappear {
+            isActive = false
+            submitTask?.cancel()
         }
     }
 
@@ -210,6 +274,16 @@ struct ExercisePickerModal: View {
             TextField("Search exercises", text: $searchText)
                 .foregroundColor(FitTheme.textPrimary)
                 .textInputAutocapitalization(.never)
+                .disableAutocorrection(true)
+                .submitLabel(.search)
+                .onSubmit {
+                    submitTask?.cancel()
+                    let snapshot = searchText
+                    submitTask = Task {
+                        await logSearchEvent("submit query=\"\(snapshot)\"")
+                        await performSearch(for: snapshot)
+                    }
+                }
         }
         .padding(12)
         .background(FitTheme.cardBackground)
@@ -226,7 +300,7 @@ struct ExercisePickerModal: View {
 
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 10) {
-                    ForEach(options, id: \.self) { option in
+                    ForEach(Array(options.enumerated()), id: \.offset) { _, option in
                         let isSelected = selections.wrappedValue.contains(option)
                         Button {
                             if isSelected {
@@ -269,6 +343,61 @@ struct ExercisePickerModal: View {
 
     private var equipment: [String] {
         Array(Set(catalog.flatMap { $0.equipment })).sorted()
+    }
+
+    @MainActor
+    private func performSearch(for query: String) async {
+        let safeQuery = String(query)
+        let trimmed = safeQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        await logSearchEvent("start query=\"\(trimmed)\"")
+        guard isActive else { return }
+        if trimmed.isEmpty {
+            catalog = localFallbackCatalog
+            isLoading = false
+            lastQuery = ""
+            await logSearchEvent("skip empty query")
+            return
+        }
+        if !trimmed.isEmpty {
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+        guard !Task.isCancelled else { return }
+        isLoading = true
+        lastQuery = trimmed
+        let start = Date()
+        let results = await fetchRemoteExercises(query: trimmed)
+        guard !Task.isCancelled else { return }
+        guard isActive else { return }
+        let fallbackMatches = filterFallbackCatalog(query: trimmed)
+        let combined = results.isEmpty ? fallbackMatches : results
+        catalog = Array(combined.prefix(60))
+        isLoading = false
+        let elapsed = Date().timeIntervalSince(start)
+        let elapsedText = String(format: "%.2f", elapsed)
+        await logSearchEvent("done query=\"\(trimmed)\" results=\(results.count) elapsed=\(elapsedText)s")
+    }
+
+    private func fetchRemoteExercises(query: String) async -> [ExerciseDefinition] {
+        do {
+            return try await WorkoutAPIService.shared.searchExercises(query: query)
+        } catch {
+            return []
+        }
+    }
+
+    private func filterFallbackCatalog(query: String) -> [ExerciseDefinition] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !trimmed.isEmpty else { return localFallbackCatalog }
+        return localFallbackCatalog.filter { $0.name.lowercased().contains(trimmed) }
+    }
+
+    private func logSearchEvent(_ message: String) async {
+        #if DEBUG
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        print("[ExerciseSearch] \(stamp) \(message)")
+        #else
+        _ = message
+        #endif
     }
 }
 
@@ -314,6 +443,8 @@ struct WorkoutTemplateActionsSheet: View {
     let onEdit: () -> Void
     let onDuplicate: () -> Void
     let onDelete: () -> Void
+    
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         ZStack {
@@ -321,14 +452,16 @@ struct WorkoutTemplateActionsSheet: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 16) {
+                // Drag indicator
                 Capsule()
-                    .fill(FitTheme.cardHighlight)
+                    .fill(FitTheme.cardStroke)
                     .frame(width: 48, height: 5)
                     .padding(.top, 12)
 
+                // Header
                 VStack(alignment: .leading, spacing: 6) {
                     Text(template.title)
-                        .font(FitFont.body(size: 20))
+                        .font(FitFont.heading(size: 20))
                         .foregroundColor(FitTheme.textPrimary)
                     Text("Saved workout actions")
                         .font(FitFont.body(size: 12))
@@ -337,11 +470,32 @@ struct WorkoutTemplateActionsSheet: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 20)
 
+                // Action buttons
                 VStack(spacing: 12) {
-                    WorkoutSheetButton(title: "Start Workout", systemImage: "play.fill", isDestructive: false, action: onStart)
-                    WorkoutSheetButton(title: "Edit Template", systemImage: "slider.horizontal.3", isDestructive: false, action: onEdit)
-                    WorkoutSheetButton(title: "Duplicate", systemImage: "doc.on.doc", isDestructive: false, action: onDuplicate)
-                    WorkoutSheetButton(title: "Delete", systemImage: "trash", isDestructive: true, action: onDelete)
+                    WorkoutSheetButton(title: "Start Workout", systemImage: "play.fill", isDestructive: false) {
+                        dismiss()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                            onStart()
+                        }
+                    }
+                    WorkoutSheetButton(title: "Edit Template", systemImage: "slider.horizontal.3", isDestructive: false) {
+                        dismiss()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                            onEdit()
+                        }
+                    }
+                    WorkoutSheetButton(title: "Duplicate", systemImage: "doc.on.doc", isDestructive: false) {
+                        dismiss()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                            onDuplicate()
+                        }
+                    }
+                    WorkoutSheetButton(title: "Delete", systemImage: "trash", isDestructive: true) {
+                        dismiss()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                            onDelete()
+                        }
+                    }
                 }
                 .padding(.horizontal, 20)
 
@@ -385,6 +539,7 @@ struct WorkoutSessionView: View {
     @State var exercises: [WorkoutExerciseSession]
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
     @State private var restRemaining = 0
     @State private var restActive = false
     @State private var restNotificationId: String?
@@ -396,7 +551,6 @@ struct WorkoutSessionView: View {
     @State private var exerciseTags: [UUID: ExerciseTag] = [:]
     @State private var exerciseTagLinks: [UUID: UUID] = [:]
     @State private var pendingSupersetRestExerciseId: UUID?
-    @State private var showExerciseMenu = false
     @State private var showExercisePicker = false
     @State private var showTagPicker = false
     @State private var pendingTagType: ExerciseTag?
@@ -422,11 +576,23 @@ struct WorkoutSessionView: View {
     @State private var saveStatusMessage = ""
     @State private var isSavingTemplate = false
     @State private var sessionTitle = ""
+    @State private var showNewPRCelebration = false
+    @State private var newPRExercise = ""
+    @State private var newPRWeight: Double = 0
 
     private let restTicker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     private let workoutTicker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     var body: some View {
+        let base = sessionBase
+        let withSheets = applySessionSheets(to: base)
+        let withLifecycle = applySessionLifecycle(to: withSheets)
+        let withAlerts = applySessionAlerts(to: withLifecycle)
+        let withPostSheets = applySessionPostSheets(to: withAlerts)
+        return applySessionOverlay(to: withPostSheets)
+    }
+
+    private var sessionBase: some View {
         ZStack {
             FitTheme.backgroundGradient
                 .ignoresSafeArea()
@@ -465,17 +631,29 @@ struct WorkoutSessionView: View {
                                         selectedExerciseIndex = index
                                         isExerciseSheetPresented = true
                                     },
-                                    onMore: {
+                                    onEdit: {
                                         insertionIndex = index
                                         taggingExerciseIndex = index
-                                        showExerciseMenu = true
+                                        openExerciseEditor()
                                     },
-                                    onTag: { tag in
-                                        if tag == nil {
-                                            clearTag(for: index)
-                                        } else {
-                                            exerciseTags[exercises[index].id] = tag
+                                    onCreateSuperset: {
+                                        insertionIndex = index
+                                        taggingExerciseIndex = index
+                                        beginTagging(.superset)
+                                    },
+                                    onCreateDropSet: {
+                                        insertionIndex = index
+                                        taggingExerciseIndex = index
+                                        beginTagging(.dropSet)
+                                    },
+                                    onClearTag: {
+                                        clearTag(for: index)
+                                    },
+                                    onDelete: {
+                                        withAnimation(.spring(response: 0.3)) {
+                                            exercises.remove(at: index)
                                         }
+                                        Haptics.medium()
                                     }
                                 )
                             }
@@ -523,191 +701,218 @@ struct WorkoutSessionView: View {
                 }
             }
         }
-        .sheet(item: $selectedExercise) { exercise in
-            ExerciseDetailView(userId: userId, exerciseName: exercise.name, unit: exercise.unit)
-        }
-        .sheet(item: $editingCardio) { recommendation in
-            CardioEditorSheet(
-                recommendation: recommendation,
-                onSave: { updated in
-                    if let index = cardioRecommendations.firstIndex(where: { $0.id == updated.id }) {
-                        cardioRecommendations[index] = updated
-                        selectedCardioId = updated.id
-                    }
-                },
-                onLog: { updated in
-                    logCardioIfNeeded(updated)
-                }
-            )
-        }
-        .confirmationDialog("Exercise options", isPresented: $showExerciseMenu, titleVisibility: .visible) {
-            Button("Edit Sets & Reps") {
-                openExerciseEditor()
+    }
+
+    private func applySessionSheets<Content: View>(to view: Content) -> some View {
+        view
+            .sheet(item: $selectedExercise) { exercise in
+                ExerciseDetailView(userId: userId, exerciseName: exercise.name, unit: exercise.unit)
             }
-            Button("Create Superset") {
-                beginTagging(.superset)
-            }
-            Button("Create Drop Set") {
-                beginTagging(.dropSet)
-            }
-            if let index = taggingExerciseIndex,
-               exercises.indices.contains(index),
-               exerciseTags[exercises[index].id] != nil {
-                Button("Clear Tag", role: .destructive) {
-                    clearTag(for: index)
-                }
-            }
-            Button("Cancel", role: .cancel) {}
-        }
-        .confirmationDialog("Workout options", isPresented: $showSessionActions, titleVisibility: .visible) {
-            Button("Save Workout") {
-                Task {
-                    await saveSessionTemplate()
-                }
-            }
-            Button("Rename Workout") {
-                renameDraft = sessionTitle.isEmpty ? title : sessionTitle
-                showRenameAlert = true
-            }
-            Button("Cancel", role: .cancel) {}
-        }
-        .sheet(isPresented: $showTagPicker) {
-            if let tag = pendingTagType,
-               let sourceIndex = taggingExerciseIndex,
-               exercises.indices.contains(sourceIndex) {
-                ExercisePairingSheet(
-                    title: tag.title,
-                    sourceName: exercises[sourceIndex].name,
-                    exercises: exercises,
-                    sourceIndex: sourceIndex,
-                    onSelect: { targetIndex in
-                        applyTag(tag, sourceIndex: sourceIndex, targetIndex: targetIndex)
+            .sheet(item: $editingCardio) { recommendation in
+                CardioEditorSheet(
+                    recommendation: recommendation,
+                    onSave: { updated in
+                        if let index = cardioRecommendations.firstIndex(where: { $0.id == updated.id }) {
+                            cardioRecommendations[index] = updated
+                            selectedCardioId = updated.id
+                        }
                     },
-                    onClose: {
-                        pendingTagType = nil
-                        showTagPicker = false
+                    onLog: { updated in
+                        logCardioIfNeeded(updated)
                     }
                 )
             }
-        }
-        .sheet(isPresented: $showExercisePicker) {
-            ExercisePickerModal(
-                onSearch: { query in
-                    (try? await WorkoutAPIService.shared.searchExercises(query: query)) ?? []
-                },
-                selectedNames: Set(exercises.map(\.name)),
-                onAdd: { definition in
-                    addExercise(definition)
-                },
-                onClose: { showExercisePicker = false }
-            )
-        }
-        .fullScreenCover(isPresented: $isExerciseSheetPresented) {
-            if let index = selectedExerciseIndex, exercises.indices.contains(index) {
-                WorkoutExerciseLoggingSheet(
-                    userId: userId,
-                    exercise: $exercises[index],
-                    restRemaining: $restRemaining,
-                    restActive: $restActive,
-                    existingExerciseNames: Set(exercises.map(\.name)),
-                    onDeleteExercise: {
-                        exercises.remove(at: index)
+            .confirmationDialog("Workout options", isPresented: $showSessionActions, titleVisibility: .visible) {
+                Button("Save Workout") {
+                    Task {
+                        await saveSessionTemplate()
+                    }
+                }
+                Button("Rename Workout") {
+                    renameDraft = sessionTitle.isEmpty ? title : sessionTitle
+                    showRenameAlert = true
+                }
+                Button("Cancel", role: .cancel) {}
+            }
+            .sheet(isPresented: $showTagPicker) {
+                if let tag = pendingTagType,
+                   let sourceIndex = taggingExerciseIndex,
+                   exercises.indices.contains(sourceIndex) {
+                    ExercisePairingSheet(
+                        title: tag.title,
+                        sourceName: exercises[sourceIndex].name,
+                        exercises: exercises,
+                        sourceIndex: sourceIndex,
+                        onSelect: { targetIndex in
+                            applyTag(tag, sourceIndex: sourceIndex, targetIndex: targetIndex)
+                        },
+                        onClose: {
+                            pendingTagType = nil
+                            showTagPicker = false
+                        }
+                    )
+                }
+            }
+            .sheet(isPresented: $showExercisePicker) {
+                ExercisePickerModal(
+                    selectedNames: Set(exercises.map(\.name)),
+                    onAdd: { definition in
+                        addExercise(definition)
                     },
-                    onCompleteSet: { restSeconds, setEntry in
-                        handleSetCompletion(for: index, restSeconds: restSeconds, setEntry: setEntry)
-                    },
-                    onShowHistory: {
-                        selectedExercise = exercises[index]
-                    },
-                    onSkipRest: stopRestTimer,
-                    onAdjustRest: adjustRestTimer
+                    onClose: { showExercisePicker = false }
                 )
-                .id(exercises[index].id)
             }
-        }
-        .task {
-            if sessionTitle.isEmpty {
-                sessionTitle = title
-            }
-        }
-        .onReceive(restTicker) { _ in
-            guard restActive else { return }
-            if restRemaining > 0 {
-                restRemaining -= 1
-                RestTimerLiveActivity.update(remainingSeconds: restRemaining)
-            }
-            if restRemaining <= 0 {
-                completeRestTimer()
-            }
-        }
-        .onReceive(workoutTicker) { _ in
-            guard !isPaused else { return }
-            workoutElapsed += 1
-        }
-        .alert("Finish workout?", isPresented: $showFinishAlert) {
-            Button("Finish", role: .destructive) {
-                Task {
-                    await finishWorkout()
+            .fullScreenCover(isPresented: $isExerciseSheetPresented) {
+                if let index = selectedExerciseIndex, exercises.indices.contains(index) {
+                    WorkoutExerciseLoggingSheet(
+                        userId: userId,
+                        exercise: $exercises[index],
+                        exerciseIndex: index,
+                        sessionExercises: exercises,
+                        restRemaining: $restRemaining,
+                        restActive: $restActive,
+                        existingExerciseNames: Set(exercises.map(\.name)),
+                        onDeleteExercise: {
+                            exercises.remove(at: index)
+                        },
+                        onCompleteSet: { restSeconds, setEntry in
+                            handleSetCompletion(for: index, restSeconds: restSeconds, setEntry: setEntry)
+                        },
+                        onShowHistory: {
+                            selectedExercise = exercises[index]
+                        },
+                        onSkipRest: stopRestTimer,
+                        onAdjustRest: adjustRestTimer,
+                        onCreateDropSet: {
+                            applyDropSet(to: index)
+                        },
+                        onCreateSuperset: { targetIndex in
+                            applyTag(.superset, sourceIndex: index, targetIndex: targetIndex)
+                        }
+                    )
+                    .id(exercises[index].id)
                 }
             }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(finishAlertMessage)
-        }
-        .alert("Discard workout?", isPresented: $showDiscardAlert) {
-            Button("Discard", role: .destructive) {
-                dismiss()
+    }
+
+    private func applySessionLifecycle<Content: View>(to view: Content) -> some View {
+        view
+            .task {
+                if sessionTitle.isEmpty {
+                    sessionTitle = title
+                }
+                // Initial save when session starts
+                saveSessionState()
             }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Are you sure you want to discard this workout? It won't be saved.")
-        }
-        .alert("Rename workout", isPresented: $showRenameAlert) {
-            TextField("Workout name", text: $renameDraft)
-            Button("Save") {
-                let trimmed = renameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmed.isEmpty {
-                    sessionTitle = trimmed
+            .onChange(of: scenePhase) { newPhase in
+                if newPhase == .background || newPhase == .inactive {
+                    // Save session when app goes to background
+                    saveSessionState()
                 }
             }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Update the workout title for this session.")
-        }
-        .alert("Workout Complete", isPresented: $showFinishMessage) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(finishMessage)
-        }
-        .alert("Save workout", isPresented: $showSaveStatus) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(saveStatusMessage)
-        }
-        .sheet(isPresented: $showCompletionSheet) {
-            if let summary = completionSummary {
-                WorkoutCompletionSheet(summary: summary, streakCount: completionStreak) {
-                    showCompletionSheet = false
+            .onChange(of: exercises) { _ in
+                // Auto-save when exercises change (set completion, etc.)
+                saveSessionState()
+            }
+            .onReceive(restTicker) { _ in
+                guard restActive else { return }
+                if restRemaining > 0 {
+                    restRemaining -= 1
+                }
+                if restRemaining <= 0 {
+                    completeRestTimer()
+                }
+            }
+            .onReceive(workoutTicker) { _ in
+                guard !isPaused else { return }
+                workoutElapsed += 1
+            }
+    }
+
+    private func applySessionAlerts<Content: View>(to view: Content) -> some View {
+        view
+            .alert("Finish workout?", isPresented: $showFinishAlert) {
+                Button("Finish", role: .destructive) {
+                    Task {
+                        await finishWorkout()
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text(finishAlertMessage)
+            }
+            .alert("Discard workout?", isPresented: $showDiscardAlert) {
+                Button("Discard", role: .destructive) {
+                    clearSessionState()
                     dismiss()
                 }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Are you sure you want to discard this workout? It won't be saved.")
             }
-        }
-        .sheet(isPresented: $showCoachChat) {
-            CoachChatView(userId: userId)
-        }
-        .overlay(alignment: .bottomTrailing) {
-            Button(action: { showCoachChat = true }) {
-                Image(systemName: "bubble.left.and.bubble.right.fill")
-                    .font(FitFont.body(size: 16, weight: .semibold))
-                    .foregroundColor(FitTheme.buttonText)
-                    .padding(14)
-                    .background(FitTheme.primaryGradient)
-                    .clipShape(Circle())
-                    .shadow(color: FitTheme.buttonShadow, radius: 10, x: 0, y: 6)
+            .alert("Rename workout", isPresented: $showRenameAlert) {
+                TextField("Workout name", text: $renameDraft)
+                Button("Save") {
+                    let trimmed = renameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty {
+                        sessionTitle = trimmed
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Update the workout title for this session.")
             }
-            .padding(.trailing, 20)
-            .padding(.bottom, 20)
-        }
+            .alert("Workout Complete", isPresented: $showFinishMessage) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(finishMessage)
+            }
+            .alert("Save workout", isPresented: $showSaveStatus) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(saveStatusMessage)
+            }
+    }
+
+    private func applySessionPostSheets<Content: View>(to view: Content) -> some View {
+        view
+            .sheet(isPresented: $showCompletionSheet) {
+                if let summary = completionSummary {
+                    WorkoutCompletionSheet(summary: summary, streakCount: completionStreak) {
+                        showCompletionSheet = false
+                        dismiss()
+                    }
+                }
+            }
+            .sheet(isPresented: $showCoachChat) {
+                CoachChatView(userId: userId)
+            }
+            .fullScreenCover(isPresented: $showNewPRCelebration) {
+                PRCelebrationView(
+                    exerciseName: newPRExercise,
+                    weight: newPRWeight,
+                    onDismiss: {
+                        showNewPRCelebration = false
+                    }
+                )
+            }
+    }
+
+    private func applySessionOverlay<Content: View>(to view: Content) -> some View {
+        view
+            .overlay(alignment: .bottomTrailing) {
+                Button(action: { showCoachChat = true }) {
+                    Image(systemName: "bubble.left.and.bubble.right.fill")
+                        .font(FitFont.body(size: 16, weight: .semibold))
+                        .foregroundColor(FitTheme.buttonText)
+                        .padding(14)
+                        .background(FitTheme.primaryGradient)
+                        .clipShape(Circle())
+                        .shadow(color: FitTheme.buttonShadow, radius: 10, x: 0, y: 6)
+                }
+                .padding(.trailing, 20)
+                .padding(.bottom, 20)
+            }
     }
 
     private var canFinish: Bool {
@@ -782,12 +987,10 @@ struct WorkoutSessionView: View {
 
     private func startRestTimer(seconds: Int) {
         cancelRestNotification()
-        RestTimerLiveActivity.stop()
         restRemaining = max(seconds, 0)
         restActive = restRemaining > 0
         if restActive {
             scheduleRestNotification(seconds: restRemaining)
-            RestTimerLiveActivity.start(workoutName: sessionTitle.isEmpty ? title : sessionTitle, durationSeconds: restRemaining)
         }
     }
 
@@ -795,7 +998,6 @@ struct WorkoutSessionView: View {
         restActive = false
         restRemaining = 0
         cancelRestNotification()
-        RestTimerLiveActivity.stop()
     }
 
     private func adjustRestTimer(by delta: Int) {
@@ -805,16 +1007,12 @@ struct WorkoutSessionView: View {
         cancelRestNotification()
         if restActive {
             scheduleRestNotification(seconds: restRemaining)
-            RestTimerLiveActivity.update(remainingSeconds: restRemaining)
-        } else {
-            RestTimerLiveActivity.stop()
         }
     }
 
     private func completeRestTimer() {
         restActive = false
         restRemaining = 0
-        RestTimerLiveActivity.stop()
         Haptics.success()
         SoundEffects.restComplete()
     }
@@ -828,15 +1026,38 @@ struct WorkoutSessionView: View {
             let center = UNUserNotificationCenter.current()
             let settings = await center.notificationSettings()
             if settings.authorizationStatus == .notDetermined {
-                _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
+                // Request critical alerts for time-sensitive workout notifications
+                _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge, .criticalAlert])
             }
             let updatedSettings = await center.notificationSettings()
             guard updatedSettings.authorizationStatus == .authorized else { return }
+            
+            // Register notification category with actions
+            let skipAction = UNNotificationAction(
+                identifier: "fitai.rest.skip",
+                title: "Start Next Set",
+                options: .foreground
+            )
+            let add30Action = UNNotificationAction(
+                identifier: "fitai.rest.add30",
+                title: "+30s Rest",
+                options: []
+            )
+            let category = UNNotificationCategory(
+                identifier: "fitai.rest.timer",
+                actions: [skipAction, add30Action],
+                intentIdentifiers: [],
+                options: .customDismissAction
+            )
+            center.setNotificationCategories([category])
 
             let content = UNMutableNotificationContent()
-            content.title = "Your rest is done!"
-            content.body = "Time for your next set."
-            content.sound = .default
+            content.title = "💪 Rest Complete!"
+            content.body = "Time for your next set. Let's go!"
+            content.sound = UNNotificationSound.default
+            content.categoryIdentifier = "fitai.rest.timer"
+            // Time-sensitive for lockscreen visibility
+            content.interruptionLevel = .timeSensitive
 
             let trigger = UNTimeIntervalNotificationTrigger(timeInterval: TimeInterval(seconds), repeats: false)
             let request = UNNotificationRequest(identifier: notificationId, content: content, trigger: trigger)
@@ -857,11 +1078,35 @@ struct WorkoutSessionView: View {
         return String(format: "%d:%02d:%02d", hours, minutes, remaining)
     }
 
+    /// Save current workout session state to persistent storage for crash recovery
+    private func saveSessionState() {
+        WorkoutSessionStore.save(
+            sessionId: sessionId,
+            title: sessionTitle.isEmpty ? title : sessionTitle,
+            exercises: exercises,
+            workoutElapsed: workoutElapsed,
+            isPaused: isPaused,
+            restRemaining: restRemaining,
+            restActive: restActive
+        )
+    }
+
+    /// Clear saved session state (called on completion or discard)
+    private func clearSessionState() {
+        WorkoutSessionStore.clear()
+    }
+
     private func logSetIfNeeded(exerciseName: String, setEntry: WorkoutSetEntry, unit: WeightUnit) {
         guard !setEntry.isWarmup else { return }
         let reps = Int(setEntry.reps) ?? 0
         let rawWeight = Double(setEntry.weight) ?? 0
         let weight = unit == .kg ? rawWeight * 2.20462 : rawWeight
+        
+        // Check for PR
+        Task {
+            await checkAndCelebratePR(exerciseName: exerciseName, weight: weight, reps: reps)
+        }
+        
         if let sessionId {
             Task {
                 try? await WorkoutAPIService.shared.logExerciseSet(
@@ -884,6 +1129,59 @@ struct WorkoutSessionView: View {
                     createdAt: Date()
                 )
             )
+        }
+    }
+    
+    @MainActor
+    private func checkAndCelebratePR(exerciseName: String, weight: Double, reps: Int) async {
+        guard weight > 0, reps > 0 else { return }
+        
+        do {
+            let history = try await WorkoutAPIService.shared.fetchExerciseHistory(
+                userId: userId,
+                exerciseName: exerciseName
+            )
+            
+            // Check if this is a new weight PR
+            if let bestSet = history.bestSet {
+                let bestWeight = bestSet.weight ?? 0
+                if weight > bestWeight {
+                    // New PR!
+                    showNewPRCelebration = true
+                    newPRExercise = exerciseName
+                    newPRWeight = weight
+                    Haptics.success()
+                    
+                    // Post notification to update homepage PR
+                    NotificationCenter.default.post(
+                        name: .fitAINewPR,
+                        object: nil,
+                        userInfo: [
+                            "exercise": exerciseName,
+                            "weight": weight,
+                            "reps": reps
+                        ]
+                    )
+                }
+            } else {
+                // First time doing this exercise - this is a PR by default
+                showNewPRCelebration = true
+                newPRExercise = exerciseName
+                newPRWeight = weight
+                Haptics.success()
+                
+                NotificationCenter.default.post(
+                    name: .fitAINewPR,
+                    object: nil,
+                    userInfo: [
+                        "exercise": exerciseName,
+                        "weight": weight,
+                        "reps": reps
+                    ]
+                )
+            }
+        } catch {
+            // Silently fail - don't interrupt workout
         }
     }
 
@@ -924,6 +1222,9 @@ struct WorkoutSessionView: View {
     }
 
     private func finishWorkout() async {
+        // Clear saved session state since we're completing the workout
+        clearSessionState()
+        
         guard let sessionId else {
             let summary = WorkoutSessionCompleteResponse(
                 sessionId: "local",
@@ -974,11 +1275,12 @@ struct WorkoutSessionView: View {
     }
 
     private func addExercise(_ definition: ExerciseDefinition) {
-        let newExercise = WorkoutExerciseSession(
+        var newExercise = WorkoutExerciseSession(
             name: definition.name,
             sets: WorkoutSetEntry.batch(reps: "10", weight: "", count: 3),
             restSeconds: 60
         )
+        newExercise.warmupRestSeconds = min(60, newExercise.restSeconds)
         let baseIndex = insertionIndex ?? (exercises.isEmpty ? -1 : exercises.count - 1)
         let insertIndex = baseIndex + 1
         if insertIndex <= exercises.count {
@@ -991,7 +1293,7 @@ struct WorkoutSessionView: View {
 
     private func addCardioExerciseEntry(name: String, durationMinutes: Int) {
         guard !exercises.contains(where: { $0.name == name }) else { return }
-        let entry = WorkoutExerciseSession(
+        var entry = WorkoutExerciseSession(
             name: name,
             sets: [
                 WorkoutSetEntry(
@@ -1003,7 +1305,77 @@ struct WorkoutSessionView: View {
             ],
             restSeconds: 0
         )
+        entry.warmupRestSeconds = 0
         exercises.append(entry)
+    }
+
+    private func saveSessionTemplate() async {
+        guard !userId.isEmpty else {
+            await MainActor.run {
+                saveStatusMessage = "Missing user session. Please log in again."
+                showSaveStatus = true
+            }
+            return
+        }
+        
+        let workoutTitle = sessionTitle.isEmpty ? title : sessionTitle
+        guard !workoutTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            await MainActor.run {
+                saveStatusMessage = "Add a workout name."
+                showSaveStatus = true
+            }
+            return
+        }
+        
+        guard !exercises.isEmpty else {
+            await MainActor.run {
+                saveStatusMessage = "Add at least one exercise."
+                showSaveStatus = true
+            }
+            return
+        }
+
+        await MainActor.run {
+            isSavingTemplate = true
+            saveStatusMessage = ""
+            showSaveStatus = false
+        }
+        
+        do {
+            let inputs = exercises.map { exercise in
+                let reps = Int(exercise.sets.first?.reps ?? "10") ?? 10
+                return WorkoutExerciseInput(
+                    name: exercise.name,
+                    muscleGroups: [], // Will be populated by backend if needed
+                    equipment: [], // Will be populated by backend if needed
+                    sets: exercise.sets.count,
+                    reps: reps,
+                    restSeconds: exercise.restSeconds,
+                    notes: exercise.notes.isEmpty ? nil : exercise.notes
+                )
+            }
+            
+            _ = try await WorkoutAPIService.shared.createTemplate(
+                userId: userId,
+                title: workoutTitle,
+                description: nil,
+                mode: "manual",
+                exercises: inputs
+            )
+            
+            await MainActor.run {
+                saveStatusMessage = "Workout saved successfully!"
+                showSaveStatus = true
+                isSavingTemplate = false
+                Haptics.success()
+            }
+        } catch {
+            await MainActor.run {
+                saveStatusMessage = "Unable to save workout. \(error.localizedDescription)"
+                showSaveStatus = true
+                isSavingTemplate = false
+            }
+        }
     }
 
     private func openExerciseEditor() {
@@ -1030,15 +1402,36 @@ struct WorkoutSessionView: View {
     private func applyTag(_ tag: ExerciseTag, sourceIndex: Int, targetIndex: Int) {
         guard exercises.indices.contains(sourceIndex),
               exercises.indices.contains(targetIndex) else { return }
+        clearTag(for: sourceIndex)
+        clearTag(for: targetIndex)
         let sourceId = exercises[sourceIndex].id
         let targetId = exercises[targetIndex].id
         exerciseTags[sourceId] = tag
         exerciseTags[targetId] = tag
         exerciseTagLinks[sourceId] = targetId
         exerciseTagLinks[targetId] = sourceId
+        if tag == .superset {
+            moveExerciseAdjacentToSource(sourceId: sourceId, targetId: targetId)
+        }
         pendingSupersetRestExerciseId = nil
         pendingTagType = nil
         showTagPicker = false
+    }
+
+    private func moveExerciseAdjacentToSource(sourceId: UUID, targetId: UUID) {
+        guard let sourceIndex = exercises.firstIndex(where: { $0.id == sourceId }),
+              let targetIndex = exercises.firstIndex(where: { $0.id == targetId }) else { return }
+        guard abs(sourceIndex - targetIndex) > 1 else { return }
+        let targetExercise = exercises.remove(at: targetIndex)
+        guard let updatedSourceIndex = exercises.firstIndex(where: { $0.id == sourceId }) else { return }
+        let insertIndex = min(updatedSourceIndex + 1, exercises.count)
+        exercises.insert(targetExercise, at: insertIndex)
+        if insertionIndex != nil {
+            insertionIndex = updatedSourceIndex
+        }
+        if taggingExerciseIndex != nil {
+            taggingExerciseIndex = updatedSourceIndex
+        }
     }
 
     private func clearTag(for index: Int) {
@@ -1061,6 +1454,10 @@ struct WorkoutSessionView: View {
     private func applyDropSet(to index: Int) {
         guard exercises.indices.contains(index) else { return }
         clearTag(for: index)
+        if exercises[index].sets.contains(where: { $0.isDropSet }) {
+            exerciseTags[exercises[index].id] = .dropSet
+            return
+        }
         insertDropSets(for: index)
         exerciseTags[exercises[index].id] = .dropSet
     }
@@ -1170,6 +1567,132 @@ struct WorkoutSessionView: View {
             return .up
         }
         return nil
+    }
+}
+
+// MARK: - PR Celebration View
+private struct PRCelebrationView: View {
+    let exerciseName: String
+    let weight: Double
+    let onDismiss: () -> Void
+    
+    @State private var showContent = false
+    @State private var showConfetti = false
+    @State private var ringScale: CGFloat = 0.1
+    @State private var ringOpacity: Double = 1.0
+    
+    var body: some View {
+        ZStack {
+            // Dark overlay
+            Color.black.opacity(0.85)
+                .ignoresSafeArea()
+            
+            // Pulsing rings
+            ForEach(0..<3, id: \.self) { index in
+                Circle()
+                    .stroke(Color(red: 1.0, green: 0.84, blue: 0.0).opacity(0.5 - Double(index) * 0.15), lineWidth: 3)
+                    .frame(width: 200 + CGFloat(index * 50), height: 200 + CGFloat(index * 50))
+                    .scaleEffect(ringScale + CGFloat(index) * 0.1)
+                    .opacity(ringOpacity - Double(index) * 0.2)
+            }
+            
+            // Main content
+            VStack(spacing: 24) {
+                // Trophy icon with glow
+                ZStack {
+                    Circle()
+                        .fill(
+                            RadialGradient(
+                                colors: [Color(red: 1.0, green: 0.84, blue: 0.0).opacity(0.4), Color.clear],
+                                center: .center,
+                                startRadius: 0,
+                                endRadius: 80
+                            )
+                        )
+                        .frame(width: 160, height: 160)
+                    
+                    Circle()
+                        .fill(
+                            LinearGradient(
+                                colors: [Color(red: 1.0, green: 0.84, blue: 0.0), Color(red: 1.0, green: 0.65, blue: 0.0)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .frame(width: 100, height: 100)
+                        .shadow(color: Color(red: 1.0, green: 0.84, blue: 0.0).opacity(0.6), radius: 20, x: 0, y: 10)
+                    
+                    Image(systemName: "trophy.fill")
+                        .font(.system(size: 48, weight: .bold))
+                        .foregroundColor(.white)
+                }
+                .scaleEffect(showContent ? 1.0 : 0.5)
+                .opacity(showContent ? 1.0 : 0.0)
+                
+                // Text
+                VStack(spacing: 12) {
+                    Text("NEW PR!")
+                        .font(FitFont.heading(size: 36))
+                        .foregroundColor(.white)
+                        .shadow(color: Color(red: 1.0, green: 0.84, blue: 0.0).opacity(0.5), radius: 8, x: 0, y: 2)
+                    
+                    Text(exerciseName)
+                        .font(FitFont.body(size: 18))
+                        .foregroundColor(.white.opacity(0.8))
+                    
+                    Text("\(Int(weight)) lbs")
+                        .font(FitFont.heading(size: 48))
+                        .foregroundColor(Color(red: 1.0, green: 0.84, blue: 0.0))
+                        .shadow(color: Color(red: 1.0, green: 0.84, blue: 0.0).opacity(0.5), radius: 8, x: 0, y: 2)
+                }
+                .scaleEffect(showContent ? 1.0 : 0.8)
+                .opacity(showContent ? 1.0 : 0.0)
+                
+                Spacer().frame(height: 40)
+                
+                // Continue button
+                Button(action: onDismiss) {
+                    Text("KEEP CRUSHING IT")
+                        .font(FitFont.body(size: 16, weight: .bold))
+                        .foregroundColor(.black)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 16)
+                        .background(
+                            LinearGradient(
+                                colors: [Color(red: 1.0, green: 0.84, blue: 0.0), Color(red: 1.0, green: 0.65, blue: 0.0)],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        .shadow(color: Color(red: 1.0, green: 0.84, blue: 0.0).opacity(0.4), radius: 12, x: 0, y: 6)
+                }
+                .padding(.horizontal, 40)
+                .opacity(showContent ? 1.0 : 0.0)
+            }
+        }
+        .onAppear {
+            // Trigger haptic
+            Haptics.heavy()
+            
+            // Animate content in
+            withAnimation(.spring(response: 0.6, dampingFraction: 0.7)) {
+                showContent = true
+            }
+            
+            // Animate rings
+            withAnimation(.easeOut(duration: 1.0)) {
+                ringScale = 1.5
+                ringOpacity = 0
+            }
+            
+            // Repeat ring animation
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                withAnimation(.easeInOut(duration: 1.5).repeatForever(autoreverses: false)) {
+                    ringScale = 2.0
+                }
+            }
+        }
     }
 }
 
@@ -1373,88 +1896,246 @@ private struct ExerciseRowSummary: View {
     let tagDetail: String?
     let supersetIndicator: SupersetIndicator?
     let onOpen: () -> Void
-    let onMore: () -> Void
-    let onTag: (ExerciseTag?) -> Void
+    let onEdit: () -> Void
+    let onCreateSuperset: () -> Void
+    let onCreateDropSet: () -> Void
+    let onClearTag: () -> Void
+    let onDelete: () -> Void
+    
+    @State private var showMenu = false
+    @State private var swipeOffset: CGFloat = 0
+    @State private var showDeleteButton = false
+    @State private var dragAxis: DragAxis?
+    
+    private let deleteButtonWidth: CGFloat = 80
 
     var body: some View {
-        let completedSets = exercise.sets.filter { $0.isComplete }.count
-        let isComplete = !exercise.sets.isEmpty && completedSets == exercise.sets.count
-
-        return Button(action: onOpen) {
-            HStack(spacing: 12) {
-                ZStack {
-                    Circle()
-                        .fill(isComplete ? FitTheme.success.opacity(0.18) : FitTheme.cardHighlight)
-                        .frame(width: 36, height: 36)
-                    if isComplete {
-                        Image(systemName: "checkmark")
-                            .font(FitFont.body(size: 14, weight: .semibold))
-                            .foregroundColor(FitTheme.success)
-                    } else {
-                        Text("\(index)")
-                            .font(FitFont.body(size: 16))
-                            .foregroundColor(FitTheme.textPrimary)
-                    }
-                }
-
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(spacing: 8) {
-                        Text(exercise.name)
-                            .font(FitFont.body(size: 18))
-                            .foregroundColor(FitTheme.textPrimary)
-
-                        if let tag {
-                            Text(tagDetail ?? tag.title)
-                                .font(FitFont.body(size: 12))
-                                .foregroundColor(tag.color)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(tag.color.opacity(0.12))
-                                .clipShape(Capsule())
-                        }
-                    }
-
-                    Text("\(completedSets)/\(exercise.sets.count) sets  •  \(exercise.sets.first?.reps ?? "10") reps")
-                        .font(FitFont.body(size: 13))
-                        .foregroundColor(FitTheme.textSecondary)
-                }
-
-                Spacer()
-
-                if let supersetIndicator {
-                    Image(systemName: supersetIndicator.systemImage)
-                        .font(FitFont.body(size: 12, weight: .semibold))
-                        .foregroundColor(ExerciseTag.superset.color)
-                        .padding(6)
-                        .background(ExerciseTag.superset.color.opacity(0.12))
-                        .clipShape(Circle())
-                }
-
-                Button(action: onMore) {
-                    Image(systemName: "ellipsis")
-                        .font(FitFont.body(size: 14, weight: .semibold))
-                        .foregroundColor(FitTheme.textSecondary)
-                }
-                .buttonStyle(.plain)
-
-                Image(systemName: "chevron.right")
-                    .font(FitFont.body(size: 12, weight: .semibold))
-                    .foregroundColor(FitTheme.textSecondary)
-            }
-            .padding(14)
-            .background(FitTheme.cardBackground)
+        rowBase
             .clipShape(RoundedRectangle(cornerRadius: 18))
-            .overlay(
-                RoundedRectangle(cornerRadius: 18)
-                    .stroke(FitTheme.cardStroke, lineWidth: 1)
-            )
+    }
+
+    private var completedSets: Int {
+        exercise.sets.filter { $0.isComplete }.count
+    }
+
+    private var isComplete: Bool {
+        !exercise.sets.isEmpty && completedSets == exercise.sets.count
+    }
+
+    private var isCardioExercise: Bool {
+        exercise.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .hasPrefix("cardio")
+    }
+
+    private var cardioDurationText: String? {
+        guard isCardioExercise else { return nil }
+        let repsText = exercise.sets.first?.reps ?? ""
+        let trimmed = repsText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let minutes = Int(trimmed), minutes > 0 {
+            return "\(minutes) min"
+        }
+        return "Cardio"
+    }
+
+    private var detailText: String {
+        if let cardioDurationText {
+            return cardioDurationText
+        }
+        let repsText = exercise.sets.first?.reps ?? "10"
+        return "\(completedSets)/\(exercise.sets.count) sets  •  \(repsText) reps"
+    }
+
+    private var rowBase: some View {
+        ZStack(alignment: .leading) {
+            deleteButton
+            rowContent
+        }
+    }
+
+    private var deleteButton: some View {
+        HStack {
+            Spacer()
+            Button(action: {
+                Haptics.medium()
+                withAnimation(.spring(response: 0.3)) {
+                    swipeOffset = 0
+                    showDeleteButton = false
+                }
+                onDelete()
+            }) {
+                VStack(spacing: 4) {
+                    Image(systemName: "trash.fill")
+                        .font(.system(size: 18, weight: .semibold))
+                    Text("Delete")
+                        .font(FitFont.body(size: 10))
+                }
+                .foregroundColor(.white)
+                .frame(width: deleteButtonWidth)
+                .frame(maxHeight: .infinity)
+                .background(Color.red)
+                .clipShape(RoundedRectangle(cornerRadius: 18))
+            }
+        }
+    }
+
+    private var rowContent: some View {
+        HStack(spacing: 12) {
+            indexIndicator
+            exerciseInfo
+
+            Spacer()
+
+            if let supersetIndicator {
+                Image(systemName: supersetIndicator.systemImage)
+                    .font(FitFont.body(size: 12, weight: .semibold))
+                    .foregroundColor(ExerciseTag.superset.color)
+                    .padding(6)
+                    .background(ExerciseTag.superset.color.opacity(0.12))
+                    .clipShape(Circle())
+            }
+
+            menuButton
+            openButton
+        }
+        .padding(14)
+        .background(FitTheme.cardBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 18))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18)
+                .stroke(FitTheme.cardStroke, lineWidth: 1)
+        )
+        .offset(x: swipeOffset)
+        .simultaneousGesture(rowSwipeGesture)
+    }
+
+    private var indexIndicator: some View {
+        ZStack {
+            Circle()
+                .fill(isComplete ? FitTheme.success.opacity(0.18) : FitTheme.cardHighlight)
+                .frame(width: 36, height: 36)
+            if isComplete {
+                Image(systemName: "checkmark")
+                    .font(FitFont.body(size: 14, weight: .semibold))
+                    .foregroundColor(FitTheme.success)
+            } else {
+                Text("\(index)")
+                    .font(FitFont.body(size: 16))
+                    .foregroundColor(FitTheme.textPrimary)
+            }
+        }
+    }
+
+    private var exerciseInfo: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text(exercise.name)
+                    .font(FitFont.body(size: 18))
+                    .foregroundColor(FitTheme.textPrimary)
+
+                if let tag {
+                    Text(tagDetail ?? tag.title)
+                        .font(FitFont.body(size: 12))
+                        .foregroundColor(tag.color)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(tag.color.opacity(0.12))
+                        .clipShape(Capsule())
+                }
+            }
+
+            Text(detailText)
+                .font(FitFont.body(size: 13))
+                .foregroundColor(FitTheme.textSecondary)
+        }
+    }
+
+    private var menuButton: some View {
+        Menu {
+            Button {
+                onEdit()
+            } label: {
+                Label("Edit Sets & Reps", systemImage: "slider.horizontal.3")
+            }
+            Button {
+                onCreateSuperset()
+            } label: {
+                Label("Create Superset", systemImage: "arrow.up.arrow.down")
+            }
+            Button {
+                onCreateDropSet()
+            } label: {
+                Label("Create Drop Set", systemImage: "arrow.down.right")
+            }
+            if tag != nil {
+                Divider()
+                Button(role: .destructive) {
+                    onClearTag()
+                } label: {
+                    Label("Clear Tag", systemImage: "xmark.circle")
+                }
+            }
+            Divider()
+            Button(role: .destructive) {
+                onDelete()
+            } label: {
+                Label("Remove Exercise", systemImage: "trash")
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(FitFont.body(size: 14, weight: .semibold))
+                .foregroundColor(FitTheme.textSecondary)
+                .frame(width: 32, height: 32)
+                .background(FitTheme.cardHighlight)
+                .clipShape(Circle())
+        }
+    }
+
+    private var openButton: some View {
+        Button(action: onOpen) {
+            Image(systemName: "chevron.right")
+                .font(FitFont.body(size: 12, weight: .semibold))
+                .foregroundColor(FitTheme.textSecondary)
+                .frame(width: 32, height: 32)
+                .background(FitTheme.cardHighlight.opacity(0.5))
+                .clipShape(Circle())
         }
         .buttonStyle(.plain)
-        .contextMenu {
-            Button("Clear Tag") {
-                onTag(nil)
+    }
+
+    private var rowSwipeGesture: some Gesture {
+        DragGesture()
+            .onChanged { value in
+                if dragAxis == nil {
+                    let isHorizontal = abs(value.translation.width) > abs(value.translation.height)
+                    dragAxis = isHorizontal ? .horizontal : .vertical
+                }
+                guard dragAxis == .horizontal else { return }
+                let translation = value.translation.width
+                if translation < 0 {
+                    swipeOffset = max(translation, -deleteButtonWidth - 20)
+                } else if showDeleteButton {
+                    swipeOffset = min(0, -deleteButtonWidth + translation)
+                }
             }
-        }
+            .onEnded { value in
+                defer { dragAxis = nil }
+                guard dragAxis == .horizontal else { return }
+                withAnimation(.spring(response: 0.3)) {
+                    if showDeleteButton && value.translation.width > 0 {
+                        swipeOffset = 0
+                        showDeleteButton = false
+                        return
+                    }
+                    if value.translation.width < -40 {
+                        swipeOffset = -deleteButtonWidth
+                        showDeleteButton = true
+                    } else {
+                        swipeOffset = 0
+                        showDeleteButton = false
+                    }
+                }
+            }
     }
 }
 
@@ -1567,26 +2248,37 @@ private struct CardioRecommendationCard: View {
     let onDismiss: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                HStack(spacing: 10) {
-                    Image(systemName: "stopwatch.fill")
-                        .foregroundColor(Color(red: 0.5, green: 0.75, blue: 1))
-                        .padding(10)
-                        .background(Color(red: 0.12, green: 0.2, blue: 0.3))
-                        .clipShape(Circle())
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(spacing: 12) {
+                ZStack {
+                    Circle()
+                        .fill(cardAccentGradient)
+                        .frame(width: 44, height: 44)
+                    Image(systemName: "figure.run")
+                        .font(FitFont.body(size: 16, weight: .semibold))
+                        .foregroundColor(.white)
+                }
 
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("AI Recommended Cardio")
-                            .font(FitFont.body(size: 20))
-                            .foregroundColor(FitTheme.textPrimary)
-                        Text("Based on your training level and goals")
-                            .font(FitFont.body(size: 13))
-                            .foregroundColor(FitTheme.textSecondary)
-                    }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("AI Recommended Cardio")
+                        .font(FitFont.heading(size: 20))
+                        .foregroundColor(FitTheme.textPrimary)
+                    Text("Tuned to your recovery + goal")
+                        .font(FitFont.body(size: 13, weight: .regular))
+                        .foregroundColor(FitTheme.textSecondary)
                 }
 
                 Spacer()
+
+                Text("Today")
+                    .font(FitFont.body(size: 11, weight: .semibold))
+                    .foregroundColor(FitTheme.textPrimary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(
+                        Capsule()
+                            .fill(FitTheme.cardBackground.opacity(0.9))
+                    )
 
                 Button(action: onDismiss) {
                     Image(systemName: "xmark")
@@ -1608,23 +2300,57 @@ private struct CardioRecommendationCard: View {
                 }
             }
 
-            Text("💡 Tap a row to select and customize your cardio")
-                .font(FitFont.body(size: 12))
-                .foregroundColor(FitTheme.textSecondary)
+            HStack(spacing: 6) {
+                Image(systemName: "sparkles")
+                    .font(FitFont.body(size: 11, weight: .semibold))
+                    .foregroundColor(FitTheme.cardWorkoutAccent)
+                Text("Tap a row to tweak time + intensity.")
+                    .font(FitFont.body(size: 12))
+                    .foregroundColor(FitTheme.textSecondary)
+            }
         }
-        .padding(16)
+        .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            LinearGradient(
-                colors: [Color(red: 0.08, green: 0.12, blue: 0.2), FitTheme.cardBackground],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
+            ZStack {
+                RoundedRectangle(cornerRadius: 24)
+                    .fill(cardSurfaceGradient)
+                Circle()
+                    .fill(Color(red: 0.22, green: 0.72, blue: 0.88).opacity(0.12))
+                    .frame(width: 160, height: 160)
+                    .offset(x: 140, y: -90)
+                Circle()
+                    .fill(Color(red: 0.16, green: 0.42, blue: 0.92).opacity(0.12))
+                    .frame(width: 140, height: 140)
+                    .offset(x: -120, y: 120)
+            }
         )
-        .clipShape(RoundedRectangle(cornerRadius: 20))
+        .clipShape(RoundedRectangle(cornerRadius: 24))
         .overlay(
-            RoundedRectangle(cornerRadius: 20)
-                .stroke(Color(red: 0.2, green: 0.3, blue: 0.45), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 24)
+                .stroke(Color(red: 0.2, green: 0.36, blue: 0.46).opacity(0.25), lineWidth: 1)
+        )
+    }
+
+    private var cardSurfaceGradient: LinearGradient {
+        LinearGradient(
+            colors: [
+                FitTheme.cardWorkout.opacity(0.9),
+                FitTheme.cardBackground
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+    }
+
+    private var cardAccentGradient: LinearGradient {
+        LinearGradient(
+            colors: [
+                Color(red: 0.18, green: 0.56, blue: 0.98),
+                Color(red: 0.18, green: 0.78, blue: 0.86)
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
         )
     }
 }
@@ -1636,33 +2362,86 @@ private struct CardioRow: View {
 
     var body: some View {
         Button(action: onSelect) {
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 10) {
+                    Circle()
+                        .fill(intensityColor.opacity(0.2))
+                        .frame(width: 34, height: 34)
+                        .overlay(
+                            Circle()
+                                .stroke(intensityColor.opacity(0.5), lineWidth: 1)
+                        )
+                        .overlay(
+                            Image(systemName: "bolt.fill")
+                                .font(FitFont.body(size: 12, weight: .semibold))
+                                .foregroundColor(intensityColor)
+                        )
+
                     Text(recommendation.title)
-                        .font(FitFont.body(size: 16))
+                        .font(FitFont.body(size: 16, weight: .semibold))
                         .foregroundColor(FitTheme.textPrimary)
-                    Text(recommendation.intensity)
-                        .font(FitFont.body(size: 12))
-                        .foregroundColor(FitTheme.textSecondary)
+
+                    Spacer()
+
+                    Text("\(recommendation.durationMinutes) min")
+                        .font(FitFont.mono(size: 13, weight: .semibold))
+                        .foregroundColor(FitTheme.textPrimary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(
+                            Capsule()
+                                .fill(FitTheme.cardHighlight)
+                        )
                 }
 
-                Spacer()
+                HStack(spacing: 8) {
+                    Text(recommendation.intensity.uppercased())
+                        .font(FitFont.body(size: 10, weight: .semibold))
+                        .foregroundColor(intensityColor)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(
+                            Capsule()
+                                .fill(intensityColor.opacity(0.12))
+                        )
 
-                Text("\(recommendation.durationMinutes) min")
-                    .font(FitFont.body(size: 14))
-                    .foregroundColor(FitTheme.textPrimary)
-
-                if isSelected {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundColor(FitTheme.accent)
-                        .font(FitFont.body(size: 14))
+                    if isSelected {
+                        Label("Selected", systemImage: "checkmark.circle.fill")
+                            .font(FitFont.body(size: 11, weight: .semibold))
+                            .foregroundColor(FitTheme.cardWorkoutAccent)
+                    } else {
+                        Text("Tap to customize")
+                            .font(FitFont.body(size: 11, weight: .regular))
+                            .foregroundColor(FitTheme.textSecondary)
+                    }
                 }
             }
-            .padding(12)
-            .background(isSelected ? FitTheme.cardHighlight : FitTheme.cardBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 14))
+            .padding(14)
+            .background(
+                RoundedRectangle(cornerRadius: 18)
+                    .fill(isSelected ? Color.white.opacity(0.9) : FitTheme.cardBackground)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 18)
+                    .stroke(isSelected ? intensityColor.opacity(0.55) : FitTheme.cardStroke, lineWidth: isSelected ? 1.5 : 1)
+            )
+            .shadow(color: isSelected ? intensityColor.opacity(0.15) : .clear, radius: 8, x: 0, y: 4)
         }
         .buttonStyle(.plain)
+    }
+
+    private var intensityColor: Color {
+        let lower = recommendation.intensity.lowercased()
+        if lower.contains("low") {
+            return FitTheme.cardProgressAccent
+        }
+        if lower.contains("light") {
+            return Color(red: 0.22, green: 0.66, blue: 0.88)
+        }
+        if lower.contains("moderate") {
+            return FitTheme.cardWorkoutAccent
+        }
+        return Color(red: 0.92, green: 0.48, blue: 0.28)
     }
 }
 
@@ -1696,129 +2475,266 @@ private struct CardioEditorSheet: View {
     }
 
     var body: some View {
+        let base = editorBase
+        return applyEditorLifecycle(to: base)
+    }
+
+    private var editorBase: some View {
         ZStack {
             FitTheme.backgroundGradient
                 .ignoresSafeArea()
 
-            VStack(spacing: 16) {
-                HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(recommendation.title)
-                            .font(FitFont.heading(size: 22))
-                            .foregroundColor(FitTheme.textPrimary)
-                        Text("Customize your cardio")
-                            .font(FitFont.body(size: 12))
-                            .foregroundColor(FitTheme.textSecondary)
-                    }
-                    Spacer()
-                    Button(action: { dismiss() }) {
-                        Image(systemName: "xmark")
-                            .font(FitFont.body(size: 14, weight: .semibold))
-                            .foregroundColor(FitTheme.textPrimary)
-                            .padding(10)
-                            .background(FitTheme.cardBackground)
-                            .clipShape(Circle())
-                    }
-                }
-                .padding(.horizontal, 20)
-                .padding(.top, 12)
-
-                VStack(spacing: 14) {
-                    HStack {
-                        Text("Duration")
-                            .font(FitFont.body(size: 13))
-                            .foregroundColor(FitTheme.textSecondary)
-                        Spacer()
-                        Text("\(durationMinutes) min")
-                            .font(FitFont.body(size: 14))
-                            .foregroundColor(FitTheme.textPrimary)
-                    }
-
-                    Stepper(value: $durationMinutes, in: 1...120, step: 1) {
-                        Text("Adjust time")
-                            .font(FitFont.body(size: 12))
-                            .foregroundColor(FitTheme.textSecondary)
-                    }
-
-                    Text("Intensity")
-                        .font(FitFont.body(size: 13))
-                        .foregroundColor(FitTheme.textSecondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-
-                    Picker("Intensity", selection: $intensity) {
-                        ForEach(intensityOptions, id: \.self) { option in
-                            Text(option).tag(option)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                }
-                .padding(16)
-                .background(FitTheme.cardBackground)
-                .clipShape(RoundedRectangle(cornerRadius: 18))
-                .padding(.horizontal, 20)
-
-                VStack(spacing: 12) {
-                    if isRunning {
-                        Text(timeString(from: remainingSeconds))
-                            .font(FitFont.heading(size: 28))
-                            .foregroundColor(FitTheme.textPrimary)
-                    } else if elapsedSeconds > 0 {
-                        Text("Completed \(timeString(from: elapsedSeconds))")
-                            .font(FitFont.body(size: 13))
-                            .foregroundColor(FitTheme.textSecondary)
-                    }
-
-                    HStack(spacing: 12) {
-                        if isRunning {
-                            Button(action: endAndSaveCardio) {
-                                Text("End & Save")
-                                    .font(FitFont.body(size: 14))
-                                    .fontWeight(.semibold)
-                                    .foregroundColor(FitTheme.textPrimary)
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 12)
-                                    .background(FitTheme.cardHighlight)
-                                    .clipShape(RoundedRectangle(cornerRadius: 16))
-                            }
-                        } else {
-                            Button(action: startCardio) {
-                                Text(didComplete ? "Restart Cardio" : "Start Cardio")
-                                    .font(FitFont.body(size: 14))
-                                    .fontWeight(.semibold)
-                                    .foregroundColor(FitTheme.buttonText)
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 12)
-                                    .background(FitTheme.primaryGradient)
-                                    .clipShape(RoundedRectangle(cornerRadius: 16))
-                                    .shadow(color: FitTheme.buttonShadow, radius: 10, x: 0, y: 6)
-                            }
-                        }
-
-                        Button(action: saveCardio) {
-                            Text("Save Cardio")
-                                .font(FitFont.body(size: 14))
-                                .fontWeight(.semibold)
-                                .foregroundColor(FitTheme.textPrimary)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 12)
-                                .background(FitTheme.cardHighlight)
-                                .clipShape(RoundedRectangle(cornerRadius: 16))
-                        }
-                        .disabled(isRunning)
-                    }
-                }
-                .padding(.horizontal, 20)
-
+            VStack(spacing: 18) {
+                editorHeader
+                summaryCard
+                timerSection
                 Spacer()
             }
         }
-        .onDisappear {
-            timerTask?.cancel()
-            timerTask = nil
+    }
+
+    private func applyEditorLifecycle<Content: View>(to view: Content) -> some View {
+        view
+            .onDisappear {
+                timerTask?.cancel()
+                timerTask = nil
+            }
+            .onChange(of: durationMinutes) { newValue in
+                guard !isRunning else { return }
+                remainingSeconds = newValue * 60
+            }
+    }
+
+    private var editorHeader: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(recommendation.title)
+                    .font(FitFont.heading(size: 24))
+                    .foregroundColor(FitTheme.textPrimary)
+                Text("Customize your cardio session")
+                    .font(FitFont.body(size: 12, weight: .regular))
+                    .foregroundColor(FitTheme.textSecondary)
+            }
+
+            Spacer()
+
+            Button(action: { dismiss() }) {
+                Image(systemName: "xmark")
+                    .font(FitFont.body(size: 14, weight: .semibold))
+                    .foregroundColor(FitTheme.textPrimary)
+                    .padding(10)
+                    .background(FitTheme.cardBackground)
+                    .clipShape(Circle())
+            }
         }
-        .onChange(of: durationMinutes) { newValue in
-            guard !isRunning else { return }
-            remainingSeconds = newValue * 60
+        .padding(.horizontal, 20)
+        .padding(.top, 12)
+    }
+
+    private var summaryCard: some View {
+        VStack(spacing: 14) {
+            sessionSummary
+            durationControls
+            intensityControls
+        }
+        .padding(18)
+        .background(
+            RoundedRectangle(cornerRadius: 22)
+                .fill(FitTheme.cardWorkout.opacity(0.8))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 22)
+                .stroke(Color(red: 0.2, green: 0.36, blue: 0.46).opacity(0.2), lineWidth: 1)
+        )
+        .padding(.horizontal, 20)
+    }
+
+    private var sessionSummary: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Session")
+                    .font(FitFont.body(size: 12, weight: .semibold))
+                    .foregroundColor(FitTheme.textSecondary)
+                Text("\(durationMinutes) min")
+                    .font(FitFont.heading(size: 28))
+                    .foregroundColor(FitTheme.textPrimary)
+            }
+
+            Spacer()
+
+            Text(intensity)
+                .font(FitFont.body(size: 12, weight: .semibold))
+                .foregroundColor(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(
+                    Capsule()
+                        .fill(accentGradient)
+                )
+        }
+    }
+
+    private var durationControls: some View {
+        HStack(spacing: 12) {
+            Button(action: { adjustDuration(-1) }) {
+                Image(systemName: "minus")
+                    .font(FitFont.body(size: 14, weight: .semibold))
+                    .foregroundColor(FitTheme.textPrimary)
+                    .frame(width: 36, height: 36)
+                    .background(FitTheme.cardBackground)
+                    .clipShape(Circle())
+            }
+
+            VStack(spacing: 4) {
+                Text("Adjust duration")
+                    .font(FitFont.body(size: 11, weight: .semibold))
+                    .foregroundColor(FitTheme.textSecondary)
+                Text("1 - 120 min")
+                    .font(FitFont.body(size: 11, weight: .regular))
+                    .foregroundColor(FitTheme.textSecondary.opacity(0.8))
+            }
+
+            Button(action: { adjustDuration(1) }) {
+                Image(systemName: "plus")
+                    .font(FitFont.body(size: 14, weight: .semibold))
+                    .foregroundColor(FitTheme.textPrimary)
+                    .frame(width: 36, height: 36)
+                    .background(FitTheme.cardBackground)
+                    .clipShape(Circle())
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 6)
+    }
+
+    private var intensityControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Intensity")
+                .font(FitFont.body(size: 12, weight: .semibold))
+                .foregroundColor(FitTheme.textSecondary)
+
+            HStack(spacing: 8) {
+                ForEach(Array(intensityOptions.enumerated()), id: \.offset) { _, option in
+                    let isActive = intensity == option
+                    let backgroundStyle = isActive
+                        ? AnyShapeStyle(accentGradient)
+                        : AnyShapeStyle(FitTheme.cardHighlight)
+                    Button(action: { intensity = option }) {
+                        Text(option)
+                            .font(FitFont.body(size: 12, weight: .semibold))
+                            .foregroundColor(isActive ? .white : FitTheme.textSecondary)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                            .background(
+                                Capsule()
+                                    .fill(backgroundStyle)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private var timerSection: some View {
+        VStack(spacing: 12) {
+            timerStatus
+            timerActions
+        }
+        .padding(.horizontal, 20)
+    }
+
+    private var timerStatus: some View {
+        VStack(spacing: 8) {
+            HStack {
+                Text(isRunning ? "Live timer" : "Last session")
+                    .font(FitFont.body(size: 12, weight: .semibold))
+                    .foregroundColor(FitTheme.textSecondary)
+                Spacer()
+                if isRunning {
+                    Text(timeString(from: remainingSeconds))
+                        .font(FitFont.mono(size: 20, weight: .semibold))
+                        .foregroundColor(FitTheme.textPrimary)
+                } else if elapsedSeconds > 0 {
+                    Text("Completed \(timeString(from: elapsedSeconds))")
+                        .font(FitFont.body(size: 12, weight: .semibold))
+                        .foregroundColor(FitTheme.textPrimary)
+                } else {
+                    Text("Ready to start")
+                        .font(FitFont.body(size: 12, weight: .regular))
+                        .foregroundColor(FitTheme.textSecondary)
+                }
+            }
+
+            if isRunning {
+                ProgressView(value: progressValue)
+                    .tint(Color(red: 0.2, green: 0.66, blue: 0.88))
+            }
+        }
+    }
+
+    private var timerActions: some View {
+        HStack(spacing: 12) {
+            if isRunning {
+                Button(action: endAndSaveCardio) {
+                    Text("End & Save")
+                        .font(FitFont.body(size: 14, weight: .semibold))
+                        .foregroundColor(FitTheme.textPrimary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(FitTheme.cardHighlight)
+                        .clipShape(RoundedRectangle(cornerRadius: 16))
+                }
+            } else {
+                Button(action: startCardio) {
+                    Text(didComplete ? "Restart Cardio" : "Start Cardio")
+                        .font(FitFont.body(size: 14, weight: .semibold))
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(accentGradient)
+                        .clipShape(RoundedRectangle(cornerRadius: 16))
+                        .shadow(color: FitTheme.cardWorkoutAccent.opacity(0.3), radius: 10, x: 0, y: 6)
+                }
+            }
+
+            Button(action: saveCardio) {
+                Text("Save Cardio")
+                    .font(FitFont.body(size: 14, weight: .semibold))
+                    .foregroundColor(FitTheme.textPrimary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .background(FitTheme.cardBackground)
+                    .clipShape(RoundedRectangle(cornerRadius: 16))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16)
+                            .stroke(FitTheme.cardStroke, lineWidth: 1)
+                    )
+            }
+            .disabled(isRunning)
+        }
+    }
+
+    private var accentGradient: LinearGradient {
+        LinearGradient(
+            colors: [
+                Color(red: 0.18, green: 0.56, blue: 0.98),
+                Color(red: 0.18, green: 0.78, blue: 0.86)
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+    }
+
+    private var progressValue: Double {
+        let total = max(1, remainingSeconds + elapsedSeconds)
+        return 1.0 - (Double(remainingSeconds) / Double(total))
+    }
+
+    private func adjustDuration(_ delta: Int) {
+        let updated = min(120, max(1, durationMinutes + delta))
+        if updated != durationMinutes {
+            durationMinutes = updated
         }
     }
 
@@ -1893,6 +2809,8 @@ private struct CardioEditorSheet: View {
 private struct WorkoutExerciseLoggingSheet: View {
     let userId: String
     @Binding var exercise: WorkoutExerciseSession
+    let exerciseIndex: Int
+    let sessionExercises: [WorkoutExerciseSession]
     @Binding var restRemaining: Int
     @Binding var restActive: Bool
     let existingExerciseNames: Set<String>
@@ -1901,16 +2819,36 @@ private struct WorkoutExerciseLoggingSheet: View {
     let onShowHistory: () -> Void
     let onSkipRest: () -> Void
     let onAdjustRest: (Int) -> Void
+    let onCreateDropSet: () -> Void
+    let onCreateSuperset: (Int) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var showCoachChat = false
     @State private var showRestPicker = false
+    @State private var showWarmupRestPicker = false
     @State private var showMoreSheet = false
     @State private var showReplacePicker = false
     @State private var showNotesEditor = false
     @State private var showDeleteAlert = false
+    @State private var showSupersetPicker = false
+    @State private var showSupersetUnavailableAlert = false
+    @State private var recommendedWeight: Double?
+    @State private var lastSetInfo: String?
+    @State private var isLoadingRecommendation = false
+    @State private var showSetAddedFeedback = false
+    @State private var isKeyboardVisible = false
 
     var body: some View {
+        let base = loggingBase
+        let withGestures = applyLoggingGestures(to: base)
+        let withSheets = applyLoggingSheets(to: withGestures)
+        let withAlerts = applyLoggingAlerts(to: withSheets)
+        let withPostSheets = applyLoggingPostSheets(to: withAlerts)
+        let withOverlay = applyLoggingOverlay(to: withPostSheets)
+        return applyLoggingObservers(to: withOverlay)
+    }
+
+    private var loggingBase: some View {
         ZStack {
             FitTheme.backgroundGradient
                 .ignoresSafeArea()
@@ -1918,6 +2856,11 @@ private struct WorkoutExerciseLoggingSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     header
+
+                    // Weight Recommendation Card
+                    if let recommended = recommendedWeight {
+                        weightRecommendationCard(recommended: recommended, lastSet: lastSetInfo)
+                    }
 
                     actionPills
 
@@ -1930,7 +2873,7 @@ private struct WorkoutExerciseLoggingSheet: View {
                                 setEntry: $exercise.sets[setIndex],
                                 onComplete: { isComplete in
                                     guard isComplete else { return }
-                                    onCompleteSet(exercise.restSeconds, exercise.sets[setIndex])
+                                    onCompleteSet(exercise.warmupRestSeconds, exercise.sets[setIndex])
                                 },
                                 onDelete: { removeSet(id: exercise.sets[setIndex].id) }
                             )
@@ -1946,6 +2889,10 @@ private struct WorkoutExerciseLoggingSheet: View {
                             setEntry: $exercise.sets[setIndex],
                             onComplete: { isComplete in
                                 guard isComplete else { return }
+                                // Auto-fill remaining sets when first working set is completed
+                                if index == 0 {
+                                    autoFillRemainingSets(from: setIndex)
+                                }
                                 onCompleteSet(exercise.restSeconds, exercise.sets[setIndex])
                             },
                             onDelete: { removeSet(id: exercise.sets[setIndex].id) }
@@ -1958,109 +2905,206 @@ private struct WorkoutExerciseLoggingSheet: View {
                 .padding(.bottom, 24)
             }
             .scrollDismissesKeyboard(.interactively)
+            .task {
+                await loadWeightRecommendation()
+            }
+
+            // Set Added Feedback Toast
+            if showSetAddedFeedback {
+                VStack {
+                    Spacer()
+                    HStack(spacing: 8) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundColor(.green)
+                        Text("Set added")
+                            .font(FitFont.body(size: 14, weight: .medium))
+                            .foregroundColor(.white)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(Color.black.opacity(0.8))
+                    .clipShape(Capsule())
+                    .padding(.bottom, 120)
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .animation(.spring(response: 0.3), value: showSetAddedFeedback)
+            }
         }
-        .contentShape(Rectangle())
-        .onTapGesture {
-            dismissKeyboard()
-        }
-        .safeAreaInset(edge: .bottom) {
-            VStack(spacing: 12) {
-                if restActive {
-                    RestTimerCard(
-                        remaining: restRemaining,
-                        onSkip: onSkipRest,
-                        onAdjust: onAdjustRest
-                    )
+    }
+
+    private func applyLoggingGestures<Content: View>(to view: Content) -> some View {
+        view
+            .contentShape(Rectangle())
+            .onTapGesture {
+                dismissKeyboard()
+            }
+            // Swipe down gesture to go back (like FitBod)
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 40, coordinateSpace: .local)
+                    .onEnded { value in
+                        guard !isKeyboardVisible else { return }
+                        let isVertical = abs(value.translation.width) < 80
+                        let isDownward = value.translation.height > 120
+                        let isFromTop = value.startLocation.y < 140
+                        if isVertical && isDownward && isFromTop {
+                            dismiss()
+                        }
+                    }
+            )
+            .safeAreaInset(edge: .bottom) {
+                VStack(spacing: 12) {
+                    if restActive {
+                        RestTimerCard(
+                            remaining: restRemaining,
+                            onSkip: onSkipRest,
+                            onAdjust: onAdjustRest
+                        )
+                        .padding(.horizontal, 20)
+                    }
+
+                    // Changed from "Done" to "Back" since X button is now in header
+                    Button("Back to Workout") {
+                        dismiss()
+                    }
+                    .font(FitFont.body(size: 16, weight: .semibold))
+                    .foregroundColor(FitTheme.buttonText)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+                    .background(FitTheme.primaryGradient)
+                    .clipShape(RoundedRectangle(cornerRadius: 18))
+                    .shadow(color: FitTheme.buttonShadow, radius: 12, x: 0, y: 8)
                     .padding(.horizontal, 20)
                 }
+                .padding(.bottom, 10)
+            }
+    }
 
-                Button("Done") {
+    private func applyLoggingSheets<Content: View>(to view: Content) -> some View {
+        view
+            .sheet(isPresented: $showRestPicker) {
+                RestTimePickerSheet(restSeconds: $exercise.restSeconds)
+            }
+            .sheet(isPresented: $showWarmupRestPicker) {
+                RestTimePickerSheet(
+                    restSeconds: $exercise.warmupRestSeconds,
+                    title: "Warm-up Rest",
+                    subtitle: "Set rest time between warm-up sets."
+                )
+            }
+            .sheet(isPresented: $showReplacePicker) {
+                ExercisePickerModal(
+                    title: "Replace Exercise",
+                    subtitle: "Search to swap this exercise.",
+                    selectedNames: existingExerciseNames.subtracting([exercise.name]),
+                    onAdd: { definition in
+                        applyReplacement(definition)
+                        showReplacePicker = false
+                    },
+                    onClose: { showReplacePicker = false }
+                )
+            }
+            .sheet(isPresented: $showMoreSheet) {
+                ExerciseMoreSheet(
+                    notes: $exercise.notes,
+                    unit: $exercise.unit,
+                    recommendationPreference: $exercise.recommendationPreference,
+                    onAddWarmup: addWarmupSet,
+                    onEditNotes: {
+                        showMoreSheet = false
+                        showNotesEditor = true
+                    },
+                    onDelete: {
+                        showMoreSheet = false
+                        showDeleteAlert = true
+                    },
+                    onClose: { showMoreSheet = false }
+                )
+            }
+            .sheet(isPresented: $showSupersetPicker) {
+                ExercisePairingSheet(
+                    title: ExerciseTag.superset.title,
+                    sourceName: exercise.name,
+                    exercises: sessionExercises,
+                    sourceIndex: exerciseIndex,
+                    onSelect: { targetIndex in
+                        onCreateSuperset(targetIndex)
+                        showSupersetPicker = false
+                    },
+                    onClose: { showSupersetPicker = false }
+                )
+            }
+            .sheet(isPresented: $showNotesEditor) {
+                ExerciseNotesSheet(notes: $exercise.notes)
+            }
+    }
+
+    private func applyLoggingAlerts<Content: View>(to view: Content) -> some View {
+        view
+            .alert("Add another exercise", isPresented: $showSupersetUnavailableAlert) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text("Supersets need at least two exercises in the workout.")
+            }
+            .alert("Delete exercise?", isPresented: $showDeleteAlert) {
+                Button("Delete", role: .destructive) {
+                    onDeleteExercise()
                     dismiss()
                 }
-                .font(FitFont.body(size: 16, weight: .semibold))
-                .foregroundColor(FitTheme.buttonText)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 14)
-                .background(FitTheme.primaryGradient)
-                .clipShape(RoundedRectangle(cornerRadius: 18))
-                .shadow(color: FitTheme.buttonShadow, radius: 12, x: 0, y: 8)
-                .padding(.horizontal, 20)
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This removes the exercise and its sets from the workout.")
             }
-            .padding(.bottom, 10)
-        }
-        .sheet(isPresented: $showRestPicker) {
-            RestTimePickerSheet(restSeconds: $exercise.restSeconds)
-        }
-        .sheet(isPresented: $showReplacePicker) {
-            ExercisePickerModal(
-                title: "Replace Exercise",
-                subtitle: "Search to swap this exercise.",
-                onSearch: { query in
-                    (try? await WorkoutAPIService.shared.searchExercises(query: query)) ?? []
-                },
-                selectedNames: existingExerciseNames.subtracting([exercise.name]),
-                onAdd: { definition in
-                    applyReplacement(definition)
-                    showReplacePicker = false
-                },
-                onClose: { showReplacePicker = false }
-            )
-        }
-        .sheet(isPresented: $showMoreSheet) {
-            ExerciseMoreSheet(
-                notes: $exercise.notes,
-                unit: $exercise.unit,
-                recommendationPreference: $exercise.recommendationPreference,
-                onAddWarmup: addWarmupSet,
-                onEditNotes: {
-                    showMoreSheet = false
-                    showNotesEditor = true
-                },
-                onDelete: {
-                    showMoreSheet = false
-                    showDeleteAlert = true
-                },
-                onClose: { showMoreSheet = false }
-            )
-        }
-        .sheet(isPresented: $showNotesEditor) {
-            ExerciseNotesSheet(notes: $exercise.notes)
-        }
-        .alert("Delete exercise?", isPresented: $showDeleteAlert) {
-            Button("Delete", role: .destructive) {
-                onDeleteExercise()
-                dismiss()
+    }
+
+    private func applyLoggingPostSheets<Content: View>(to view: Content) -> some View {
+        view
+            .sheet(isPresented: $showCoachChat) {
+                CoachChatView(userId: userId)
             }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This removes the exercise and its sets from the workout.")
-        }
-        .sheet(isPresented: $showCoachChat) {
-            CoachChatView(userId: userId)
-        }
-        .overlay(alignment: .bottomTrailing) {
-            Button(action: { showCoachChat = true }) {
-                Image(systemName: "bubble.left.and.bubble.right.fill")
-                    .font(FitFont.body(size: 14, weight: .semibold))
-                    .foregroundColor(FitTheme.buttonText)
-                    .padding(12)
-                    .background(FitTheme.primaryGradient)
-                    .clipShape(Circle())
-                    .shadow(color: FitTheme.buttonShadow, radius: 10, x: 0, y: 6)
+    }
+
+    private func applyLoggingOverlay<Content: View>(to view: Content) -> some View {
+        view
+            .overlay(alignment: .bottomTrailing) {
+                Button(action: { showCoachChat = true }) {
+                    Image(systemName: "bubble.left.and.bubble.right.fill")
+                        .font(FitFont.body(size: 14, weight: .semibold))
+                        .foregroundColor(FitTheme.buttonText)
+                        .padding(12)
+                        .background(FitTheme.primaryGradient)
+                        .clipShape(Circle())
+                        .shadow(color: FitTheme.buttonShadow, radius: 10, x: 0, y: 6)
+                }
+                .padding(.trailing, 20)
+                .padding(.bottom, restActive ? 180 : 84)
             }
-            .padding(.trailing, 20)
-            .padding(.bottom, restActive ? 180 : 84)
-        }
-        .onChange(of: exercise.unit) { newValue in
-            convertWeights(to: newValue)
-        }
+    }
+
+    private func applyLoggingObservers<Content: View>(to view: Content) -> some View {
+        view
+            .onChange(of: exercise.unit) { newValue in
+                convertWeights(to: newValue)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
+                isKeyboardVisible = true
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+                isKeyboardVisible = false
+            }
     }
 
     private func addSet() {
         let last = exercise.sets.last
         let reps = last?.reps ?? "10"
         let weight = last?.weight ?? ""
-        exercise.sets.append(WorkoutSetEntry(reps: reps, weight: weight, isComplete: false, isWarmup: false))
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+            exercise.sets.append(WorkoutSetEntry(reps: reps, weight: weight, isComplete: false, isWarmup: false))
+        }
+        Haptics.medium()
+        showSetAddedFeedback = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            showSetAddedFeedback = false
+        }
     }
 
     private func addWarmupSet() {
@@ -2075,6 +3119,34 @@ private struct WorkoutExerciseLoggingSheet: View {
             exercise.sets.append(entry)
         }
         Haptics.medium()
+    }
+
+    /// Auto-fill remaining working sets with the weight and reps from the first completed working set
+    private func autoFillRemainingSets(from completedIndex: Int) {
+        let completedSet = exercise.sets[completedIndex]
+        let weight = completedSet.weight
+        let reps = completedSet.reps
+        
+        // Only auto-fill if the completed set has both weight and reps
+        guard !weight.isEmpty, !reps.isEmpty else { return }
+        
+        // Get all working set indices after the first one
+        let workingSetIndices = exercise.sets.indices.filter { !exercise.sets[$0].isWarmup }
+        
+        // Skip the first working set (the one just completed) and fill the rest
+        for setIndex in workingSetIndices.dropFirst() {
+            // Only fill if the set hasn't been completed yet and is currently empty
+            if !exercise.sets[setIndex].isComplete {
+                // Only fill weight if it's empty (preserve user edits)
+                if exercise.sets[setIndex].weight.isEmpty {
+                    exercise.sets[setIndex].weight = weight
+                }
+                // Only fill reps if it's empty or still the default
+                if exercise.sets[setIndex].reps.isEmpty || exercise.sets[setIndex].reps == "10" {
+                    exercise.sets[setIndex].reps = reps
+                }
+            }
+        }
     }
 
     private func removeSet(id: UUID) {
@@ -2119,39 +3191,188 @@ private struct WorkoutExerciseLoggingSheet: View {
         )
     }
 
+    private var completedSetsCount: Int {
+        exercise.sets.filter { $0.isComplete && !$0.isWarmup }.count
+    }
+    
+    private var totalWorkingSets: Int {
+        exercise.sets.filter { !$0.isWarmup }.count
+    }
+    
     private var header: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(exercise.name)
-                .font(FitFont.heading(size: 24))
-                .foregroundColor(FitTheme.textPrimary)
-            Text("Log your sets")
-                .font(FitFont.body(size: 13))
-                .foregroundColor(FitTheme.textSecondary)
+        VStack(spacing: 16) {
+            Capsule()
+                .fill(FitTheme.cardHighlight)
+                .frame(width: 44, height: 5)
+                .padding(.top, 4)
+
+            // Top bar with close button
+            HStack {
+                Spacer()
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(FitTheme.textSecondary)
+                        .padding(10)
+                        .background(FitTheme.cardBackground.opacity(0.8))
+                        .clipShape(Circle())
+                }
+            }
+            
+            // Exercise info card
+            VStack(spacing: 16) {
+                // Icon and name
+                HStack(spacing: 14) {
+                    // Exercise icon
+                    ZStack {
+                        Circle()
+                            .fill(
+                                LinearGradient(
+                                    colors: [FitTheme.cardWorkoutAccent.opacity(0.2), FitTheme.cardWorkoutAccent.opacity(0.1)],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                            .frame(width: 56, height: 56)
+                        
+                        Image(systemName: exerciseIcon)
+                            .font(.system(size: 24, weight: .semibold))
+                            .foregroundColor(FitTheme.cardWorkoutAccent)
+                    }
+                    
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(exercise.name)
+                            .font(FitFont.heading(size: 22))
+                            .foregroundColor(FitTheme.textPrimary)
+                            .lineLimit(2)
+                        
+                        HStack(spacing: 8) {
+                            // Progress indicator
+                            HStack(spacing: 4) {
+                                Image(systemName: "flame.fill")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(completedSetsCount > 0 ? FitTheme.cardWorkoutAccent : FitTheme.textSecondary)
+                                Text("\(completedSetsCount)/\(totalWorkingSets) sets")
+                                    .font(FitFont.body(size: 12, weight: .medium))
+                                    .foregroundColor(FitTheme.textSecondary)
+                            }
+                            
+                            Text("•")
+                                .foregroundColor(FitTheme.textSecondary.opacity(0.5))
+                            
+                            // Rest time badge
+                            HStack(spacing: 3) {
+                                Image(systemName: "timer")
+                                    .font(.system(size: 10))
+                                Text(formatRest(exercise.restSeconds))
+                                    .font(FitFont.body(size: 12))
+                            }
+                            .foregroundColor(FitTheme.textSecondary)
+                        }
+                    }
+                    
+                    Spacer()
+                }
+                
+                // Progress bar
+                GeometryReader { geometry in
+                    ZStack(alignment: .leading) {
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(FitTheme.cardStroke)
+                            .frame(height: 6)
+                        
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(
+                                LinearGradient(
+                                    colors: [FitTheme.cardWorkoutAccent, FitTheme.cardWorkoutAccent.opacity(0.7)],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                )
+                            )
+                            .frame(width: totalWorkingSets > 0 ? geometry.size.width * CGFloat(completedSetsCount) / CGFloat(totalWorkingSets) : 0, height: 6)
+                            .animation(.spring(response: 0.4), value: completedSetsCount)
+                    }
+                }
+                .frame(height: 6)
+            }
+            .padding(16)
+            .background(FitTheme.cardBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .stroke(FitTheme.cardWorkoutAccent.opacity(0.15), lineWidth: 1)
+            )
         }
-        .padding(.top, 12)
+        .padding(.top, 8)
+    }
+    
+    private var exerciseIcon: String {
+        let name = exercise.name.lowercased()
+        if name.contains("bench") || name.contains("press") || name.contains("chest") || name.contains("fly") {
+            return "figure.strengthtraining.traditional"
+        } else if name.contains("squat") || name.contains("leg") || name.contains("lunge") {
+            return "figure.walk"
+        } else if name.contains("deadlift") || name.contains("row") || name.contains("back") || name.contains("pull") {
+            return "figure.rowing"
+        } else if name.contains("curl") || name.contains("bicep") || name.contains("tricep") || name.contains("arm") {
+            return "dumbbell.fill"
+        } else if name.contains("shoulder") || name.contains("lateral") || name.contains("overhead") {
+            return "figure.arms.open"
+        } else if name.contains("core") || name.contains("ab") || name.contains("crunch") || name.contains("plank") {
+            return "figure.core.training"
+        } else {
+            return "figure.strengthtraining.functional"
+        }
     }
 
     private var actionPills: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 10) {
                 ExerciseActionPill(
-                    title: "\(formatRest(exercise.restSeconds)) rest",
+                    title: "Edit Rest",
                     systemImage: "timer",
+                    accentColor: FitTheme.accent,
                     action: { showRestPicker = true }
                 )
                 ExerciseActionPill(
                     title: "History",
-                    systemImage: "chart.bar",
+                    systemImage: "chart.bar.fill",
+                    accentColor: FitTheme.cardWorkoutAccent,
                     action: onShowHistory
                 )
                 ExerciseActionPill(
+                    title: "Superset",
+                    systemImage: "arrow.up.arrow.down",
+                    accentColor: ExerciseTag.superset.color,
+                    action: {
+                        if sessionExercises.count > 1 {
+                            showSupersetPicker = true
+                        } else {
+                            showSupersetUnavailableAlert = true
+                        }
+                    }
+                )
+                ExerciseActionPill(
+                    title: "Drop Set",
+                    systemImage: "arrow.down.right",
+                    accentColor: ExerciseTag.dropSet.color,
+                    action: {
+                        onCreateDropSet()
+                        Haptics.medium()
+                    }
+                )
+                ExerciseActionPill(
                     title: "Replace",
-                    systemImage: "arrow.left.arrow.right",
+                    systemImage: "arrow.triangle.2.circlepath",
+                    accentColor: FitTheme.cardNutritionAccent,
                     action: { showReplacePicker = true }
                 )
                 ExerciseActionPill(
                     title: "More",
-                    systemImage: "ellipsis",
+                    systemImage: "ellipsis.circle.fill",
+                    accentColor: FitTheme.textSecondary,
                     action: { showMoreSheet = true }
                 )
             }
@@ -2160,62 +3381,101 @@ private struct WorkoutExerciseLoggingSheet: View {
     }
 
     private var setActions: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 12) {
             Button(action: addSet) {
-                Label("Add Set", systemImage: "plus")
-                    .font(FitFont.body(size: 12))
-                    .foregroundColor(FitTheme.textPrimary)
-                    .padding(.vertical, 6)
-                    .padding(.horizontal, 12)
-                    .background(FitTheme.cardHighlight)
-                    .clipShape(Capsule())
+                HStack(spacing: 6) {
+                    Image(systemName: "plus.circle.fill")
+                        .font(.system(size: 16, weight: .semibold))
+                    Text("Add Set")
+                        .font(FitFont.body(size: 14, weight: .semibold))
+                }
+                .foregroundColor(FitTheme.cardWorkoutAccent)
+                .padding(.vertical, 10)
+                .padding(.horizontal, 16)
+                .background(FitTheme.cardWorkoutAccent.opacity(0.12))
+                .clipShape(Capsule())
+                .overlay(
+                    Capsule()
+                        .strokeBorder(FitTheme.cardWorkoutAccent.opacity(0.3), lineWidth: 1)
+                )
             }
 
             Spacer()
 
-            Button(action: dismissKeyboard) {
-                Image(systemName: "keyboard.chevron.compact.down")
-                    .font(FitFont.body(size: 12))
-                    .foregroundColor(FitTheme.textPrimary)
-                    .padding(.vertical, 6)
-                    .padding(.horizontal, 10)
-                    .background(FitTheme.cardHighlight)
-                    .clipShape(Capsule())
+            // Only show keyboard dismiss button when keyboard is visible
+            if isKeyboardVisible {
+                Button(action: dismissKeyboard) {
+                    Image(systemName: "keyboard.chevron.compact.down")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(FitTheme.textSecondary)
+                        .padding(10)
+                        .background(FitTheme.cardBackground)
+                        .clipShape(Circle())
+                }
+                .transition(.opacity.combined(with: .scale))
             }
         }
+        .padding(.top, 8)
+        .animation(.easeInOut(duration: 0.2), value: isKeyboardVisible)
     }
 
     private var warmupSetActions: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 12) {
             Button(action: addWarmupSet) {
-                Label("Add Set", systemImage: "plus")
-                    .font(FitFont.body(size: 12))
-                    .foregroundColor(FitTheme.textPrimary)
-                    .padding(.vertical, 6)
-                    .padding(.horizontal, 12)
-                    .background(FitTheme.cardHighlight)
-                    .clipShape(Capsule())
+                HStack(spacing: 6) {
+                    Image(systemName: "plus.circle.fill")
+                        .font(.system(size: 16, weight: .semibold))
+                    Text("Add Warm-up")
+                        .font(FitFont.body(size: 14, weight: .semibold))
+                }
+                .foregroundColor(FitTheme.textSecondary)
+                .padding(.vertical, 10)
+                .padding(.horizontal, 16)
+                .background(FitTheme.cardBackground)
+                .clipShape(Capsule())
+                .overlay(
+                    Capsule()
+                        .strokeBorder(FitTheme.cardStroke, lineWidth: 1)
+                )
+            }
+
+            Button(action: { showWarmupRestPicker = true }) {
+                HStack(spacing: 6) {
+                    Image(systemName: "timer")
+                        .font(.system(size: 14, weight: .semibold))
+                    Text("Warm-up \(formatRest(exercise.warmupRestSeconds))")
+                        .font(FitFont.body(size: 13, weight: .semibold))
+                }
+                .foregroundColor(FitTheme.textSecondary)
+                .padding(.vertical, 10)
+                .padding(.horizontal, 14)
+                .background(FitTheme.cardBackground)
+                .clipShape(Capsule())
+                .overlay(
+                    Capsule()
+                        .strokeBorder(FitTheme.cardStroke, lineWidth: 1)
+                )
             }
 
             Spacer()
-
-            Button(action: dismissKeyboard) {
-                Image(systemName: "keyboard.chevron.compact.down")
-                    .font(FitFont.body(size: 12))
-                    .foregroundColor(FitTheme.textPrimary)
-                    .padding(.vertical, 6)
-                    .padding(.horizontal, 10)
-                    .background(FitTheme.cardHighlight)
-                    .clipShape(Capsule())
-            }
         }
+        .padding(.top, 8)
     }
 
     private func sectionTitle(_ text: String) -> some View {
-        Text(text)
-            .font(FitFont.body(size: 12))
-            .foregroundColor(FitTheme.textSecondary)
-            .padding(.top, 6)
+        HStack(spacing: 8) {
+            Rectangle()
+                .fill(FitTheme.cardWorkoutAccent)
+                .frame(width: 3, height: 14)
+                .clipShape(RoundedRectangle(cornerRadius: 2))
+            
+            Text(text.uppercased())
+                .font(FitFont.body(size: 11, weight: .bold))
+                .foregroundColor(FitTheme.textSecondary)
+                .tracking(1)
+        }
+        .padding(.top, 12)
+        .padding(.bottom, 4)
     }
 
     private var warmupIndices: [Int] {
@@ -2241,30 +3501,148 @@ private struct WorkoutExerciseLoggingSheet: View {
         }
         return String(format: "%.1f", rounded)
     }
+    
+    // MARK: - Weight Recommendation
+    
+    private func weightRecommendationCard(recommended: Double, lastSet: String?) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "chart.line.uptrend.xyaxis")
+                .font(.system(size: 20))
+                .foregroundColor(FitTheme.accent)
+                .frame(width: 36, height: 36)
+                .background(FitTheme.accent.opacity(0.15))
+                .clipShape(Circle())
+            
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text("Recommended")
+                        .font(FitFont.body(size: 12))
+                        .foregroundColor(FitTheme.textSecondary)
+                    
+                    Button {
+                        applyRecommendedWeight(recommended)
+                    } label: {
+                        Text("Apply")
+                            .font(FitFont.body(size: 11, weight: .semibold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4)
+                            .background(FitTheme.accent)
+                            .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+                
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                    Text(formatWeight(recommended))
+                        .font(FitFont.heading(size: 22, weight: .bold))
+                        .foregroundColor(FitTheme.textPrimary)
+                    Text(exercise.unit.label)
+                        .font(FitFont.body(size: 14))
+                        .foregroundColor(FitTheme.textSecondary)
+                }
+                
+                if let lastSet {
+                    Text(lastSet)
+                        .font(FitFont.body(size: 11))
+                        .foregroundColor(FitTheme.textSecondary)
+                }
+            }
+            
+            Spacer()
+        }
+        .padding(14)
+        .background(FitTheme.cardBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16)
+                .stroke(FitTheme.accent.opacity(0.3), lineWidth: 1)
+        )
+    }
+    
+    private func loadWeightRecommendation() async {
+        isLoadingRecommendation = true
+        defer { Task { @MainActor in isLoadingRecommendation = false } }
+        
+        do {
+            let history = try await WorkoutAPIService.shared.fetchExerciseHistory(
+                userId: userId,
+                exerciseName: exercise.name
+            )
+            
+            guard let bestSet = history.bestSet else { return }
+            
+            // Progressive overload: recommend 2.5-5% increase from best set
+            // or same weight if recent, to ensure user can complete sets
+            let progressMultiplier = 1.025 // 2.5% increase
+            let recommended = (bestSet.weight * progressMultiplier / 5).rounded() * 5 // Round to nearest 5
+            
+            // Convert if needed
+            let finalWeight: Double
+            if exercise.unit == .kg {
+                finalWeight = (recommended / 2.20462 / 2.5).rounded() * 2.5 // Round to nearest 2.5 for kg
+            } else {
+                finalWeight = recommended
+            }
+            
+            await MainActor.run {
+                recommendedWeight = finalWeight
+                lastSetInfo = "Last best: \(formatWeight(bestSet.weight)) lb × \(bestSet.reps) reps"
+            }
+        } catch {
+            // Silently fail - just don't show recommendation
+        }
+    }
+    
+    private func applyRecommendedWeight(_ weight: Double) {
+        let weightStr = formatWeight(weight)
+        for index in exercise.sets.indices {
+            if !exercise.sets[index].isComplete && !exercise.sets[index].isWarmup {
+                exercise.sets[index].weight = weightStr
+            }
+        }
+        Haptics.light()
+    }
+    
+    private func formatWeight(_ weight: Double) -> String {
+        if weight.truncatingRemainder(dividingBy: 1) == 0 {
+            return "\(Int(weight))"
+        }
+        return String(format: "%.1f", weight)
+    }
 }
 
 private struct ExerciseActionPill: View {
     let title: String
     let systemImage: String
+    var accentColor: Color = FitTheme.textPrimary
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             HStack(spacing: 8) {
-                Image(systemName: systemImage)
-                    .font(FitFont.body(size: 12, weight: .semibold))
+                ZStack {
+                    Circle()
+                        .fill(accentColor.opacity(0.15))
+                        .frame(width: 28, height: 28)
+                    Image(systemName: systemImage)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(accentColor)
+                }
                 Text(title)
-                    .font(FitFont.body(size: 12, weight: .semibold))
+                    .font(FitFont.body(size: 13, weight: .medium))
+                    .foregroundColor(FitTheme.textPrimary)
             }
-            .foregroundColor(FitTheme.textPrimary)
-            .padding(.vertical, 8)
-            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .padding(.leading, 6)
+            .padding(.trailing, 14)
             .background(FitTheme.cardBackground)
             .clipShape(Capsule())
             .overlay(
                 Capsule()
-                    .stroke(FitTheme.cardStroke, lineWidth: 1)
+                    .stroke(accentColor.opacity(0.2), lineWidth: 1)
             )
+            .shadow(color: accentColor.opacity(0.08), radius: 8, x: 0, y: 4)
         }
         .buttonStyle(.plain)
     }
@@ -2272,6 +3650,9 @@ private struct ExerciseActionPill: View {
 
 private struct RestTimePickerSheet: View {
     @Binding var restSeconds: Int
+    var title: String = "Rest Time"
+    var subtitle: String = "Scroll to set the default rest timer."
+
     @Environment(\.dismiss) private var dismiss
     @State private var selection: Int = 60
 
@@ -2289,10 +3670,10 @@ private struct RestTimePickerSheet: View {
                     .padding(.top, 12)
 
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Rest Time")
+                    Text(title)
                         .font(FitFont.heading(size: 20))
                         .foregroundColor(FitTheme.textPrimary)
-                    Text("Scroll to set the default rest timer.")
+                    Text(subtitle)
                         .font(FitFont.body(size: 12))
                         .foregroundColor(FitTheme.textSecondary)
                 }
@@ -2353,6 +3734,8 @@ private struct ExerciseMoreSheet: View {
     let onEditNotes: () -> Void
     let onDelete: () -> Void
     let onClose: () -> Void
+    
+    @State private var showWarmupAddedToast = false
 
     var body: some View {
         ZStack {
@@ -2393,7 +3776,18 @@ private struct ExerciseMoreSheet: View {
                         title: "Add warm-up set",
                         systemImage: "flame",
                         isDestructive: false,
-                        action: onAddWarmup
+                        action: {
+                            onAddWarmup()
+                            Haptics.success()
+                            withAnimation(.spring(response: 0.3)) {
+                                showWarmupAddedToast = true
+                            }
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                                withAnimation {
+                                    showWarmupAddedToast = false
+                                }
+                            }
+                        }
                     )
 
                     HStack(spacing: 12) {
@@ -2452,6 +3846,28 @@ private struct ExerciseMoreSheet: View {
                 .padding(.horizontal, 20)
 
                 Spacer()
+            }
+            
+            // Warm-up added toast
+            if showWarmupAddedToast {
+                VStack {
+                    Spacer()
+                    HStack(spacing: 10) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundColor(.green)
+                            .font(.system(size: 20))
+                        Text("Warm-up set added")
+                            .font(FitFont.body(size: 15, weight: .semibold))
+                            .foregroundColor(FitTheme.textPrimary)
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 14)
+                    .background(FitTheme.cardBackground)
+                    .clipShape(Capsule())
+                    .shadow(color: .black.opacity(0.15), radius: 10, x: 0, y: 5)
+                    .padding(.bottom, 40)
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
     }
@@ -2624,72 +4040,272 @@ private struct WorkoutSetRow: View {
     let onComplete: (Bool) -> Void
     let onDelete: () -> Void
     @FocusState private var focusedField: Field?
+    @State private var swipeOffset: CGFloat = 0
+    @State private var showDeleteButton = false
+    @State private var rowWidth: CGFloat = 0
+    @State private var didTriggerLogHaptic = false
+    @State private var dragAxis: DragAxis?
 
     private enum Field {
         case reps
         case weight
     }
+    
+    private let deleteButtonWidth: CGFloat = 80
+    private let logThresholdRatio: CGFloat = 0.5
+    private let minLogThreshold: CGFloat = 140
+    private let maxLogSwipePadding: CGFloat = 30
 
     var body: some View {
-        let isComplete = setEntry.isComplete
-        let isWarmup = setEntry.isWarmup
-        let isDropSet = setEntry.isDropSet
-        HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(isWarmup ? "Warm-up \(index)" : "Set \(index)")
-                    .font(FitFont.body(size: 13))
-                    .foregroundColor(FitTheme.textSecondary)
-                if isDropSet {
-                    Text("Drop Set")
-                        .font(FitFont.body(size: 10, weight: .semibold))
-                        .foregroundColor(FitTheme.accent)
+        rowBase
+            .clipShape(RoundedRectangle(cornerRadius: 14))
+    }
+
+    private var isComplete: Bool {
+        setEntry.isComplete
+    }
+
+    private var isWarmup: Bool {
+        setEntry.isWarmup
+    }
+
+    private var isDropSet: Bool {
+        setEntry.isDropSet
+    }
+
+    private var logThreshold: CGFloat {
+        max(rowWidth * logThresholdRatio, minLogThreshold)
+    }
+
+    private var maxLogSwipe: CGFloat {
+        max(rowWidth - maxLogSwipePadding, logThreshold + 20)
+    }
+
+    private var logFillWidth: CGFloat {
+        max(0, min(swipeOffset, rowWidth))
+    }
+
+    private var canLog: Bool {
+        !isComplete
+    }
+
+    private var rowBase: some View {
+        ZStack(alignment: .leading) {
+            logBackground
+            deleteButton
+            rowContent
+        }
+    }
+
+    @ViewBuilder
+    private var logBackground: some View {
+        if swipeOffset > 0 {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(FitTheme.success)
+                .frame(width: logFillWidth)
+                .overlay(
+                    Text("LOG")
+                        .font(FitFont.body(size: 13, weight: .bold))
+                        .foregroundColor(.white)
+                        .opacity(min(1, logFillWidth / 60))
+                        .padding(.leading, 16),
+                    alignment: .leading
+                )
+        }
+    }
+
+    @ViewBuilder
+    private var deleteButton: some View {
+        if swipeOffset < 0 {
+            HStack {
+                Spacer()
+                Button(action: {
+                    Haptics.medium()
+                    withAnimation(.spring(response: 0.3)) {
+                        swipeOffset = 0
+                        showDeleteButton = false
+                    }
+                    onDelete()
+                }) {
+                    Image(systemName: "trash.fill")
+                        .foregroundColor(.white)
+                        .font(.system(size: 18, weight: .semibold))
+                        .frame(width: deleteButtonWidth, height: 56)
+                        .background(Color.red)
+                        .clipShape(RoundedRectangle(cornerRadius: 14))
                 }
             }
-            .frame(width: 88, alignment: .leading)
+            .frame(maxWidth: .infinity)
+        }
+    }
 
-            setField(title: "Reps", value: $setEntry.reps, field: .reps)
-            setField(title: "Weight (\(unit.label))", value: $setEntry.weight, field: .weight)
+    private var rowContent: some View {
+        HStack(spacing: 0) {
+            setNumber
+            setMeta
+
+            Spacer()
+
+            setFieldModern(title: "Reps", value: $setEntry.reps, field: .reps, isComplete: isComplete)
+                .padding(.trailing, 8)
+            setFieldModern(title: unit.label.uppercased(), value: $setEntry.weight, field: .weight, isComplete: isComplete)
 
             Button(action: { setCompletion(!isComplete) }) {
-                Image(systemName: isComplete ? "checkmark.circle.fill" : "circle")
-                    .foregroundColor(isComplete ? FitTheme.success : FitTheme.textSecondary)
-                    .font(FitFont.body(size: 18))
+                ZStack {
+                    Circle()
+                        .fill(isComplete ? FitTheme.success : FitTheme.cardStroke)
+                        .frame(width: 36, height: 36)
+
+                    if isComplete {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundColor(.white)
+                    }
+                }
             }
             .buttonStyle(.plain)
+            .padding(.leading, 12)
         }
-        .padding(10)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity)
         .background(rowBackground(isComplete: isComplete, isWarmup: isWarmup, isDropSet: isDropSet))
-        .clipShape(RoundedRectangle(cornerRadius: 14))
-        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-            if isComplete {
-                Button("Undo") {
-                    setCompletion(false)
-                }
-                .tint(FitTheme.cardHighlight)
-            } else {
-                Button("Log") {
-                    setCompletion(true)
-                }
-                .tint(FitTheme.success)
-            }
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(isComplete ? FitTheme.success.opacity(0.3) : Color.clear, lineWidth: 1.5)
+        )
+        .offset(x: swipeOffset)
+        .background(rowWidthReader)
+        .simultaneousGesture(swipeGesture)
+    }
 
-            Button("Delete", role: .destructive) {
-                onDelete()
+    private var setNumber: some View {
+        ZStack {
+            Circle()
+                .fill(setNumberBackground(isComplete: isComplete, isWarmup: isWarmup))
+                .frame(width: 40, height: 40)
+
+            if isComplete {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundColor(.white)
+            } else {
+                Text("\(index)")
+                    .font(FitFont.body(size: 16, weight: .bold))
+                    .foregroundColor(isWarmup ? FitTheme.textSecondary : FitTheme.cardWorkoutAccent)
             }
         }
+        .padding(.trailing, 14)
+    }
+
+    private var setMeta: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(isWarmup ? "Warm-up" : "Set \(index)")
+                .font(FitFont.body(size: 12, weight: .medium))
+                .foregroundColor(isComplete ? FitTheme.success : FitTheme.textSecondary)
+            if isDropSet {
+                Text("DROP SET")
+                    .font(FitFont.body(size: 9, weight: .bold))
+                    .foregroundColor(FitTheme.accent)
+                    .tracking(0.5)
+            }
+        }
+        .frame(width: 65, alignment: .leading)
+    }
+
+    private var rowWidthReader: some View {
+        GeometryReader { proxy in
+            Color.clear
+                .onAppear {
+                    rowWidth = proxy.size.width
+                }
+                .onChange(of: proxy.size.width) { newValue in
+                    rowWidth = newValue
+                }
+        }
+    }
+
+    private var swipeGesture: some Gesture {
+        DragGesture()
+            .onChanged { value in
+                if dragAxis == nil {
+                    let isHorizontal = abs(value.translation.width) > abs(value.translation.height)
+                    dragAxis = isHorizontal ? .horizontal : .vertical
+                }
+                guard dragAxis == .horizontal else { return }
+                let translation = value.translation.width
+                if showDeleteButton {
+                    if translation > 0 {
+                        swipeOffset = min(0, -deleteButtonWidth + translation)
+                    }
+                    return
+                }
+                if translation < 0 {
+                    swipeOffset = max(translation, -deleteButtonWidth - 20)
+                    didTriggerLogHaptic = false
+                } else if translation > 0 {
+                    guard canLog else {
+                        swipeOffset = 0
+                        didTriggerLogHaptic = false
+                        return
+                    }
+                    swipeOffset = min(translation, maxLogSwipe)
+                    let reachedThreshold = swipeOffset >= logThreshold
+                    if reachedThreshold && !didTriggerLogHaptic {
+                        Haptics.success()
+                        didTriggerLogHaptic = true
+                    } else if !reachedThreshold {
+                        didTriggerLogHaptic = false
+                    }
+                }
+            }
+            .onEnded { value in
+                defer { dragAxis = nil }
+                guard dragAxis == .horizontal else { return }
+                withAnimation(.spring(response: 0.3)) {
+                    if showDeleteButton && value.translation.width > 0 {
+                        swipeOffset = 0
+                        showDeleteButton = false
+                        didTriggerLogHaptic = false
+                    } else if value.translation.width < -40 {
+                        swipeOffset = -deleteButtonWidth
+                        showDeleteButton = true
+                    } else if value.translation.width >= logThreshold && canLog {
+                        swipeOffset = 0
+                        showDeleteButton = false
+                        didTriggerLogHaptic = false
+                        setCompletion(true, triggerHaptics: false)
+                    } else {
+                        swipeOffset = 0
+                        showDeleteButton = false
+                        didTriggerLogHaptic = false
+                    }
+                }
+            }
     }
 
     private func rowBackground(isComplete: Bool, isWarmup: Bool, isDropSet: Bool) -> Color {
         if isComplete {
-            return FitTheme.success.opacity(0.18)
+            return FitTheme.success.opacity(0.08)
         }
         if isDropSet {
             return FitTheme.accentMuted
         }
         if isWarmup {
-            return FitTheme.accentSoft
+            return FitTheme.cardBackground.opacity(0.6)
         }
-        return FitTheme.cardHighlight
+        return FitTheme.cardBackground
+    }
+    
+    private func setNumberBackground(isComplete: Bool, isWarmup: Bool) -> Color {
+        if isComplete {
+            return FitTheme.success
+        }
+        if isWarmup {
+            return FitTheme.cardStroke
+        }
+        return FitTheme.cardWorkoutAccent.opacity(0.15)
     }
 
     private func setField(title: String, value: Binding<String>, field: Field) -> some View {
@@ -2714,12 +4330,44 @@ private struct WorkoutSetRow: View {
         }
         .frame(width: 70)
     }
+    
+    private func setFieldModern(title: String, value: Binding<String>, field: Field, isComplete: Bool) -> some View {
+        VStack(alignment: .center, spacing: 4) {
+            Text(title)
+                .font(FitFont.body(size: 10, weight: .medium))
+                .foregroundColor(FitTheme.textSecondary.opacity(0.7))
+            
+            TextField("—", text: value)
+                .keyboardType(.numberPad)
+                .font(FitFont.heading(size: 18))
+                .foregroundColor(isComplete ? FitTheme.success : FitTheme.textPrimary)
+                .multilineTextAlignment(.center)
+                .focused($focusedField, equals: field)
+                .submitLabel(.done)
+                .frame(width: 55)
+                .padding(.vertical, 6)
+                .padding(.horizontal, 8)
+                .background(isComplete ? FitTheme.success.opacity(0.08) : FitTheme.cardHighlight)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .toolbar {
+                    ToolbarItemGroup(placement: .keyboard) {
+                        Spacer()
+                        Button("Done") {
+                            focusedField = nil
+                        }
+                        .foregroundColor(FitTheme.accent)
+                    }
+                }
+        }
+    }
 
-    private func setCompletion(_ value: Bool) {
+    private func setCompletion(_ value: Bool, triggerHaptics: Bool = true) {
         guard setEntry.isComplete != value else { return }
+        // Dismiss keyboard when completing a set
+        focusedField = nil
         setEntry.isComplete = value
         onComplete(value)
-        if value {
+        if value && triggerHaptics {
             Haptics.light()
         }
     }
@@ -2742,6 +4390,7 @@ struct ExerciseDetailView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     header
+                    movementVideoCard
 
                     if isLoading {
                         Text("Loading history…")
@@ -2778,6 +4427,41 @@ struct ExerciseDetailView: View {
                 .font(FitFont.body(size: 13))
                 .foregroundColor(FitTheme.textSecondary)
         }
+    }
+
+    private var movementVideoCard: some View {
+        if let url = ExerciseVideoLibrary.url(for: exerciseName) {
+            return AnyView(
+                WorkoutDetailCard {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Movement video")
+                            .font(FitFont.body(size: 14))
+                            .foregroundColor(FitTheme.textSecondary)
+                        VideoPlayer(player: AVPlayer(url: url))
+                            .frame(height: 200)
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
+                }
+            )
+        }
+        return AnyView(
+            WorkoutDetailCard {
+                HStack(spacing: 12) {
+                    Image(systemName: "play.rectangle.fill")
+                        .font(.system(size: 18))
+                        .foregroundColor(FitTheme.cardWorkoutAccent)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Movement video")
+                            .font(FitFont.body(size: 14, weight: .semibold))
+                            .foregroundColor(FitTheme.textPrimary)
+                        Text("Add a video source to show form demos.")
+                            .font(FitFont.body(size: 12))
+                            .foregroundColor(FitTheme.textSecondary)
+                    }
+                    Spacer()
+                }
+            }
+        )
     }
 
     private func statCard(history: ExerciseHistoryResponse) -> some View {

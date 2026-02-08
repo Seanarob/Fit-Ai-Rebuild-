@@ -10,6 +10,8 @@ struct FoodItem: Decodable, Identifiable {
     let carbs: Double
     let fats: Double
     let calories: Double
+    let servingOptions: [ServingOptionPayload]?
+    
     enum CodingKeys: String, CodingKey {
         case id
         case fdcId = "fdc_id"
@@ -20,6 +22,46 @@ struct FoodItem: Decodable, Identifiable {
         case carbs
         case fats
         case calories
+        case servingOptions = "serving_options"
+    }
+    
+    /// Convert serving options to the model struct
+    var parsedServingOptions: [ServingOption] {
+        guard let options = servingOptions else { return [] }
+        return options.compactMap { opt in
+            ServingOption(
+                id: opt.id ?? UUID().uuidString,
+                description: opt.description ?? "1 serving",
+                metricGrams: opt.metricGrams,
+                numberOfUnits: opt.numberOfUnits ?? 1.0,
+                calories: opt.calories ?? 0,
+                protein: opt.protein ?? 0,
+                carbs: opt.carbs ?? 0,
+                fats: opt.fats ?? 0
+            )
+        }
+    }
+}
+
+struct ServingOptionPayload: Decodable {
+    let id: String?
+    let description: String?
+    let metricGrams: Double?
+    let numberOfUnits: Double?
+    let calories: Double?
+    let protein: Double?
+    let carbs: Double?
+    let fats: Double?
+    
+    enum CodingKeys: String, CodingKey {
+        case id
+        case description
+        case metricGrams = "metric_grams"
+        case numberOfUnits = "number_of_units"
+        case calories
+        case protein
+        case carbs
+        case fats
     }
 }
 
@@ -29,6 +71,7 @@ struct NutritionSearchResponse: Decodable {
 
 struct MealPhotoScanResult {
     let food: FoodItem?
+    let items: [String]
     let photoUrl: String?
     let query: String?
     let message: String?
@@ -50,15 +93,29 @@ struct MacroTargets {
     }
 }
 
-struct MealPlanMeal: Identifiable {
+struct MealPlanMeal: Identifiable, Hashable {
     let id = UUID()
-    let name: String
-    let macros: MacroTotals
-    let items: [String]
+    var name: String
+    var macros: MacroTotals
+    var items: [String]
+    
+    // Convenience computed properties for direct macro access
+    var calories: Int { Int(macros.calories) }
+    var protein: Int { Int(macros.protein) }
+    var carbs: Int { Int(macros.carbs) }
+    var fats: Int { Int(macros.fats) }
+    
+    static func == (lhs: MealPlanMeal, rhs: MealPlanMeal) -> Bool {
+        lhs.id == rhs.id
+    }
+    
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
 }
 
 struct MealPlanSnapshot {
-    let meals: [MealPlanMeal]
+    var meals: [MealPlanMeal]
     let totals: MacroTotals?
     let notes: String?
 }
@@ -120,6 +177,30 @@ struct NutritionAPIService {
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         let payload = try decoder.decode(NutritionSearchResponse.self, from: data)
         return payload.results
+    }
+    
+    /// Lightweight autocomplete for food name suggestions while typing.
+    /// Returns just string suggestions, not full food items.
+    func autocompleteFoods(query: String, maxResults: Int = 10) async throws -> [String] {
+        guard query.count >= 2 else { return [] }
+        
+        let url = BackendConfig.baseURL.appendingPathComponent("nutrition/fatsecret/autocomplete")
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        components?.queryItems = [
+            URLQueryItem(name: "query", value: query),
+            URLQueryItem(name: "max_results", value: String(maxResults)),
+        ]
+        guard let finalURL = components?.url else {
+            return []
+        }
+
+        let (data, response) = try await session.data(from: finalURL)
+        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            return []
+        }
+
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        return json?["suggestions"] as? [String] ?? []
     }
 
     func fetchFoodByBarcode(code: String, userId: String? = nil) async throws -> FoodItem {
@@ -391,16 +472,158 @@ private extension NutritionAPIService {
         let photoUrl = json?["photo_url"] as? String
         let query = json?["query"] as? String
         let message = (json?["message"] as? String) ?? (json?["ai_result"] as? String) ?? (json?["result"] as? String)
+        var items = extractMealItems(from: json)
+
+        if items.isEmpty, let aiResult = json?["ai_result"] as? String {
+            items = parseMealItems(from: aiResult)
+        }
+
+        if items.isEmpty, let query, !query.isEmpty {
+            items = parseMealItems(from: query)
+        }
 
         if let match = json?["match"] as? [String: Any] {
             let matchData = try JSONSerialization.data(withJSONObject: match, options: [])
             let decoder = JSONDecoder()
             decoder.keyDecodingStrategy = .convertFromSnakeCase
             let food = try decoder.decode(FoodItem.self, from: matchData)
-            return MealPhotoScanResult(food: food, photoUrl: photoUrl, query: query, message: message)
+            return MealPhotoScanResult(food: food, items: items, photoUrl: photoUrl, query: query, message: message)
         }
 
-        return MealPhotoScanResult(food: nil, photoUrl: photoUrl, query: query, message: message ?? "Scan complete.")
+        return MealPhotoScanResult(food: nil, items: items, photoUrl: photoUrl, query: query, message: message ?? "Scan complete.")
+    }
+
+    func extractMealItems(from json: [String: Any]?) -> [String] {
+        guard let json else { return [] }
+        if let items = json["items"] as? [String] { return normalizeMealItems(items) }
+        if let items = json["foods"] as? [String] { return normalizeMealItems(items) }
+        if let items = json["detected_items"] as? [String] { return normalizeMealItems(items) }
+        if let items = json["recognized_items"] as? [String] { return normalizeMealItems(items) }
+        if let items = json["meal_items"] as? [String] { return normalizeMealItems(items) }
+        if let items = json["food_items"] as? [String] { return normalizeMealItems(items) }
+        if let items = json["ingredients"] as? [String] { return normalizeMealItems(items) }
+        if let items = json["items"] as? [[String: Any]] {
+            let names = items.compactMap { $0["name"] as? String ?? $0["item"] as? String ?? $0["food"] as? String }
+            return normalizeMealItems(names)
+        }
+        if let items = json["foods"] as? [[String: Any]] {
+            let names = items.compactMap { $0["name"] as? String ?? $0["item"] as? String ?? $0["food"] as? String }
+            return normalizeMealItems(names)
+        }
+        if let items = json["detected_items"] as? [[String: Any]] {
+            let names = items.compactMap { $0["name"] as? String ?? $0["item"] as? String ?? $0["food"] as? String }
+            return normalizeMealItems(names)
+        }
+        if let query = json["query"] as? String {
+            return parseMealItems(from: query)
+        }
+        return []
+    }
+
+    func extractMealItems(from array: [Any]) -> [String] {
+        var names: [String] = []
+        for value in array {
+            if let string = value as? String {
+                names.append(string)
+                continue
+            }
+            if let dict = value as? [String: Any] {
+                if let name = dict["name"] as? String ?? dict["item"] as? String ?? dict["food"] as? String {
+                    names.append(name)
+                    continue
+                }
+                if let nested = dict["items"] as? [String] {
+                    names.append(contentsOf: nested)
+                }
+            }
+        }
+        return normalizeMealItems(names)
+    }
+
+    func parseMealItems(from text: String) -> [String] {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+
+        if let jsonItems = extractItemsFromEmbeddedJSON(in: trimmed) {
+            return jsonItems
+        }
+
+        var cleanedText = trimmed
+        cleanedText = cleanedText.replacingOccurrences(of: "•", with: "\n")
+        cleanedText = cleanedText.replacingOccurrences(of: " - ", with: "\n")
+
+        if cleanedText.range(of: " and ", options: .caseInsensitive) != nil && !cleanedText.contains(",") {
+            cleanedText = cleanedText.replacingOccurrences(of: " and ", with: ",", options: .caseInsensitive)
+        }
+
+        let separators = CharacterSet(charactersIn: ",;\n")
+        let pieces = cleanedText.components(separatedBy: separators)
+        if pieces.count > 1 {
+            return normalizeMealItems(pieces)
+        }
+
+        let lines = cleanedText.split(separator: "\n").map { String($0) }
+        if lines.count > 1 {
+            return normalizeMealItems(lines)
+        }
+
+        return normalizeMealItems([cleanedText])
+    }
+
+    func extractItemsFromEmbeddedJSON(in text: String) -> [String]? {
+        let data = text.data(using: .utf8)
+        if let data {
+            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                let items = extractMealItems(from: json)
+                if !items.isEmpty {
+                    return items
+                }
+            }
+            if let array = try? JSONSerialization.jsonObject(with: data) as? [Any] {
+                let items = extractMealItems(from: array)
+                if !items.isEmpty {
+                    return items
+                }
+            }
+        }
+
+        guard let startIndex = text.firstIndex(of: "{"),
+              let endIndex = text.lastIndex(of: "}") else {
+            return nil
+        }
+
+        let substring = String(text[startIndex...endIndex])
+        guard let data = substring.data(using: .utf8) else {
+            return nil
+        }
+
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            let items = extractMealItems(from: json)
+            return items.isEmpty ? nil : items
+        }
+
+        if let array = try? JSONSerialization.jsonObject(with: data) as? [Any] {
+            let items = extractMealItems(from: array)
+            return items.isEmpty ? nil : items
+        }
+
+        return nil
+    }
+
+    func normalizeMealItems(_ items: [String]) -> [String] {
+        var result: [String] = []
+        var seen: Set<String> = []
+        for item in items {
+            var cleaned = item.trimmingCharacters(in: .whitespacesAndNewlines)
+            cleaned = cleaned.replacingOccurrences(of: #"^\s*[-•*\d\.\)\]]+\s*"#, with: "", options: .regularExpression)
+            cleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleaned.isEmpty else { continue }
+            let key = cleaned.lowercased()
+            guard !seen.contains(key) else { continue }
+            seen.insert(key)
+            result.append(cleaned)
+        }
+        return result
     }
 }
 

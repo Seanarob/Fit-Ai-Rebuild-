@@ -6,6 +6,8 @@ import Supabase
 enum SupabaseError: LocalizedError {
     case missingConfiguration
     case missingRedirectURL
+    case invalidAuthCallback
+    case oauthFailure(String)
 
     var errorDescription: String? {
         switch self {
@@ -13,6 +15,10 @@ enum SupabaseError: LocalizedError {
             return "Supabase is not configured. Update Supabase.plist with your project URL and anon key."
         case .missingRedirectURL:
             return "Supabase redirect URL is missing. Add SUPABASE_REDIRECT_URL to Supabase.plist."
+        case .invalidAuthCallback:
+            return "The sign-in callback did not include an auth code or access token."
+        case .oauthFailure(let message):
+            return message
         }
     }
 }
@@ -21,6 +27,7 @@ final class SupabaseService {
     static let shared = SupabaseService()
 
     private let client: SupabaseClient?
+    private let implicitClient: SupabaseClient?
 
     private init() {
         guard
@@ -28,10 +35,15 @@ final class SupabaseService {
             let key = SupabaseConfig.anonKey
         else {
             client = nil
+            implicitClient = nil
             return
         }
 
-        client = SupabaseClient(supabaseURL: url, supabaseKey: key)
+        let pkceOptions = SupabaseClientOptions(auth: .init(flowType: .pkce))
+        client = SupabaseClient(supabaseURL: url, supabaseKey: key, options: pkceOptions)
+
+        let implicitOptions = SupabaseClientOptions(auth: .init(flowType: .implicit))
+        implicitClient = SupabaseClient(supabaseURL: url, supabaseKey: key, options: implicitOptions)
     }
 
     private func requireClient() throws -> SupabaseClient {
@@ -71,11 +83,59 @@ final class SupabaseService {
 
     func handleAuthCallback(url: URL) async throws -> Session {
         let client = try requireClient()
-        return try await client.auth.session(from: url)
+        let params = extractOAuthParams(from: url)
+
+        if let errorDescription = params["error_description"] ?? params["error"] {
+            throw SupabaseError.oauthFailure(errorDescription.replacingOccurrences(of: "+", with: " "))
+        }
+
+        if params["code"] != nil {
+            return try await client.auth.session(from: url)
+        }
+
+        if params["access_token"] != nil {
+            guard let implicitClient else {
+                throw SupabaseError.invalidAuthCallback
+            }
+            return try await implicitClient.auth.session(from: url)
+        }
+
+        throw SupabaseError.invalidAuthCallback
     }
     
     func getUserId(from session: Session) -> String {
         return session.user.id.uuidString
+    }
+
+    private func extractOAuthParams(from url: URL) -> [String: String] {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return [:]
+        }
+
+        if let fragment = components.fragment {
+            return parseParams(from: fragment)
+        }
+
+        if let queryItems = components.queryItems {
+            var params: [String: String] = [:]
+            for item in queryItems {
+                params[item.name] = item.value ?? ""
+            }
+            return params
+        }
+
+        return [:]
+    }
+
+    private func parseParams(from fragment: String) -> [String: String] {
+        var params: [String: String] = [:]
+        let pairs = fragment.split(separator: "&").map { $0.split(separator: "=") }
+        for pair in pairs where pair.count == 2 {
+            let rawValue = String(pair[1]).replacingOccurrences(of: "+", with: " ")
+            let value = rawValue.removingPercentEncoding ?? rawValue
+            params[String(pair[0])] = value
+        }
+        return params
     }
 }
 

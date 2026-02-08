@@ -42,6 +42,16 @@ struct OnboardingSubmissionResponse: Decodable {
     }
 }
 
+struct OnboardingStateResponse: Decodable {
+    let state: OnboardingState?
+}
+
+struct OnboardingState: Decodable {
+    let stepIndex: Int?
+    let isComplete: Bool?
+    let data: OnboardingForm?
+}
+
 struct OnboardingAPIService {
     static let shared = OnboardingAPIService()
 
@@ -106,4 +116,37 @@ struct OnboardingAPIService {
             return OnboardingSubmissionResponse(userId: nil, workoutPlan: nil)
         }
     }
+
+    func fetchState(userId: String) async throws -> OnboardingForm? {
+        var components = URLComponents(url: BackendConfig.baseURL.appendingPathComponent("onboarding/state"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [URLQueryItem(name: "user_id", value: userId)]
+        guard let url = components?.url else {
+            throw OnboardingAPIError.missingBaseURL
+        }
+
+        let (data, response) = try await session.data(from: url)
+        guard let http = response as? HTTPURLResponse else {
+            throw OnboardingAPIError.invalidResponse
+        }
+        if http.statusCode == 404 {
+            return nil
+        }
+        guard (200...299).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw OnboardingAPIError.serverError(statusCode: http.statusCode, body: body)
+        }
+
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let responsePayload = try decoder.decode(OnboardingStateResponse.self, from: data)
+        guard var form = responsePayload.state?.data else { return nil }
+        if form.userId == nil || form.userId?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true {
+            form.userId = userId
+        }
+        return form
+    }
 }
+
+
+
+

@@ -16,18 +16,32 @@ class OnboardingRequest(BaseModel):
     full_name: str
     age: str
     sex: str
+    height_unit: str | None = None
     height_feet: str
     height_inches: str
     weight_lbs: str
+    goal_weight_lbs: str | None = None
+    birthday_timestamp: float | None = None
+    target_date_timestamp: float | None = None
     goal: str
+    activity_level: str | None = None
     training_level: str
     workout_days_per_week: int
     workout_duration_minutes: int
     equipment: str
+    weekly_weight_loss_lbs: float | None = None
+    health_kit_sync_enabled: bool | None = None
+    special_considerations_array: list[str] | None = None
+    additional_notes: str | None = None
     food_allergies: str = ""
     food_dislikes: str = ""
     diet_style: str = ""
     checkin_day: str
+    macro_protein: str | None = None
+    macro_carbs: str | None = None
+    macro_fats: str | None = None
+    macro_calories: str | None = None
+    photos_pending: bool | None = None
 
 
 class OnboardingResponse(BaseModel):
@@ -53,6 +67,15 @@ def _parse_float(value: str | None) -> float | None:
         return None
 
 
+def _parse_timestamp(value: float | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return None
+
+
 def _height_cm(feet: str | None, inches: str | None) -> float | None:
     feet_value = _parse_int(feet)
     inches_value = _parse_int(inches)
@@ -68,6 +91,13 @@ def _weight_kg(pounds: str | None) -> float | None:
     if pounds_value is None:
         return None
     return round(pounds_value * 0.45359237, 2)
+
+
+def _macro_value(value: str | None) -> int | None:
+    parsed = _parse_int(value)
+    if parsed is None or parsed <= 0:
+        return None
+    return parsed
 
 
 def _hash_password(password: str) -> str:
@@ -120,14 +150,39 @@ async def submit_onboarding(payload: OnboardingRequest):
     payload_dict = payload.dict(by_alias=True, exclude={"user_id", "email", "password"})
 
     try:
-        supabase.table("onboarding_states").insert(
-            {
-                "user_id": user_id,
-                "step_index": 5,
-                "data": payload_dict,
-                "is_complete": True,
-            }
-        ).execute()
+        existing_state = (
+            supabase.table("onboarding_states")
+            .select("id")
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+            .data
+        )
+        if existing_state:
+            supabase.table("onboarding_states").update(
+                {
+                    "step_index": 5,
+                    "data": payload_dict,
+                    "is_complete": True,
+                }
+            ).eq("user_id", user_id).execute()
+        else:
+            supabase.table("onboarding_states").insert(
+                {
+                    "user_id": user_id,
+                    "step_index": 5,
+                    "data": payload_dict,
+                    "is_complete": True,
+                }
+            ).execute()
+
+        macros = {
+            "calories": _macro_value(payload.macro_calories),
+            "protein": _macro_value(payload.macro_protein),
+            "carbs": _macro_value(payload.macro_carbs),
+            "fats": _macro_value(payload.macro_fats),
+        }
+        macros = {key: value for key, value in macros.items() if value is not None}
 
         profile_payload = {
             "user_id": user_id,
@@ -141,13 +196,26 @@ async def submit_onboarding(payload: OnboardingRequest):
                 "workout_days_per_week": payload.workout_days_per_week,
                 "workout_duration_minutes": payload.workout_duration_minutes,
                 "equipment": payload.equipment,
+                "weekly_weight_loss_lbs": payload.weekly_weight_loss_lbs,
+                "apple_health_sync": payload.health_kit_sync_enabled,
                 "food_allergies": payload.food_allergies,
                 "food_dislikes": payload.food_dislikes,
                 "diet_style": payload.diet_style,
                 "checkin_day": payload.checkin_day,
+                "gender": payload.sex,
                 "sex": payload.sex,
+                "activity_level": payload.activity_level,
+                "goal_weight_lbs": payload.goal_weight_lbs,
+                "birthday_timestamp": _parse_timestamp(payload.birthday_timestamp),
+                "target_date_timestamp": _parse_timestamp(payload.target_date_timestamp),
+                "special_considerations": payload.special_considerations_array,
+                "additional_notes": payload.additional_notes,
+                "height_unit": payload.height_unit,
+                "photos_pending": payload.photos_pending,
             },
         }
+        if macros:
+            profile_payload["macros"] = macros
 
         supabase.table("profiles").upsert(
             profile_payload, on_conflict="user_id"

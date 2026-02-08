@@ -122,8 +122,11 @@ def run_prompt(name: str, user_id=None, inputs=None):
         else:
             user_content = json.dumps(input_payload)
         client = _get_client()
+        # Use gpt-4o for check-in analysis (better image analysis for progress photos)
+        # Use gpt-4o-mini for other prompts (faster and cheaper)
+        model = "gpt-4o" if name == "weekly_checkin_analysis" else "gpt-4o-mini"
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=model,
             messages=[
                 {"role": "system", "content": prompt["template"]},
                 {"role": "user", "content": user_content},

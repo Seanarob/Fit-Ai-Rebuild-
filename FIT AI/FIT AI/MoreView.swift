@@ -8,6 +8,7 @@ struct MoreView: View {
     let userId: String
 
     @StateObject private var viewModel: MoreViewModel
+    @StateObject private var healthSyncState = HealthSyncState.shared
 
     private var macroSummary: String {
         let entries = [
@@ -56,25 +57,43 @@ struct MoreView: View {
                                     heightFeet: $viewModel.heightFeet,
                                     heightInches: $viewModel.heightInches,
                                     weightLbs: $viewModel.weightLbs,
-                                    sex: $viewModel.sex
+                                    sex: $viewModel.sex,
+                                    statusMessage: viewModel.profileStatusMessage,
+                                    isSaveEnabled: viewModel.hasUnsavedChanges && !viewModel.isSavingProfile,
+                                    isSaving: viewModel.isSavingProfile,
+                                    onSave: {
+                                        Task { await viewModel.saveProfile() }
+                                    }
                                 )
                             } label: {
                                 SettingsCard(
-                                    title: "Body details",
+                                    title: "Body Details",
                                     subtitle: "Age, height, weight, gender",
-                                    value: profileSummary
+                                    value: profileSummary,
+                                    icon: "figure.stand",
+                                    iconColor: .cyan
                                 )
                             }
                         }
 
                         SettingsSection(title: "Plan") {
                             NavigationLink {
-                                GoalsDetailView(goal: $viewModel.goal)
+                                GoalsDetailView(
+                                    goal: $viewModel.goal,
+                                    statusMessage: viewModel.profileStatusMessage,
+                                    isSaveEnabled: viewModel.hasUnsavedChanges && !viewModel.isSavingProfile,
+                                    isSaving: viewModel.isSavingProfile,
+                                    onSave: {
+                                        Task { await viewModel.saveProfile() }
+                                    }
+                                )
                             } label: {
                                 SettingsCard(
                                     title: "Goals",
                                     subtitle: "Cut, bulk, or maintain",
-                                    value: viewModel.goal.title
+                                    value: viewModel.goal.title,
+                                    icon: "target",
+                                    iconColor: .orange
                                 )
                             }
 
@@ -83,35 +102,78 @@ struct MoreView: View {
                                     protein: $viewModel.macroProtein,
                                     carbs: $viewModel.macroCarbs,
                                     fats: $viewModel.macroFats,
-                                    calories: $viewModel.macroCalories
+                                    calories: $viewModel.macroCalories,
+                                    statusMessage: viewModel.profileStatusMessage,
+                                    isSaveEnabled: viewModel.hasUnsavedChanges && !viewModel.isSavingProfile,
+                                    isSaving: viewModel.isSavingProfile,
+                                    onSave: {
+                                        Task { await viewModel.saveProfile() }
+                                    }
                                 )
                             } label: {
                                 SettingsCard(
-                                    title: "Macro targets",
+                                    title: "Macro Targets",
                                     subtitle: "Daily nutrition targets",
-                                    value: macroSummary
+                                    value: macroSummary,
+                                    icon: "chart.pie.fill",
+                                    iconColor: .green
+                                )
+                            }
+                        }
+
+                        SettingsSection(title: "Integrations") {
+                            NavigationLink {
+                                HealthSyncDetailView()
+                            } label: {
+                                SettingsCard(
+                                    title: "Apple Health",
+                                    subtitle: "Sync workouts automatically",
+                                    value: healthSyncState.isEnabled ? "On" : "Off",
+                                    icon: "heart.fill",
+                                    iconColor: .red
                                 )
                             }
                         }
 
                         SettingsSection(title: "Check-ins") {
                             NavigationLink {
-                                CheckInDayDetailView(selectedDay: $viewModel.checkinDay)
+                                CheckInDayDetailView(
+                                    selectedDay: $viewModel.checkinDay,
+                                    statusMessage: viewModel.profileStatusMessage,
+                                    isSaveEnabled: viewModel.hasUnsavedChanges && !viewModel.isSavingProfile,
+                                    isSaving: viewModel.isSavingProfile,
+                                    onSave: {
+                                        Task { await viewModel.saveProfile() }
+                                    }
+                                )
                             } label: {
                                 SettingsCard(
-                                    title: "Check-in day",
+                                    title: "Check-in Day",
                                     subtitle: "Weekly progress review",
-                                    value: viewModel.checkinDay
+                                    value: viewModel.checkinDay,
+                                    icon: "calendar.badge.checkmark",
+                                    iconColor: .purple
                                 )
                             }
 
                             NavigationLink {
-                                StartingPhotosDetailView(userId: userId, photos: $viewModel.startingPhotos)
+                                StartingPhotosDetailView(
+                                    userId: userId,
+                                    photos: $viewModel.startingPhotos,
+                                    statusMessage: viewModel.profileStatusMessage,
+                                    isSaveEnabled: viewModel.hasUnsavedChanges && !viewModel.isSavingProfile,
+                                    isSaving: viewModel.isSavingProfile,
+                                    onSave: {
+                                        Task { await viewModel.saveProfile() }
+                                    }
+                                )
                             } label: {
                                 SettingsCard(
-                                    title: "Starting photos",
+                                    title: "Starting Photos",
                                     subtitle: "Front, side, back",
-                                    value: viewModel.startingPhotos.summary
+                                    value: viewModel.startingPhotos.summary,
+                                    icon: "camera.fill",
+                                    iconColor: .pink
                                 )
                             }
                         }
@@ -121,9 +183,11 @@ struct MoreView: View {
                                 WalkthroughReplayView(onReplay: viewModel.replayWalkthrough)
                             } label: {
                                 SettingsCard(
-                                    title: "Replay walkthrough",
+                                    title: "Replay Walkthrough",
                                     subtitle: "Run the guided tour again",
-                                    value: "Placeholder"
+                                    value: "Tap to start",
+                                    icon: "play.circle.fill",
+                                    iconColor: .indigo
                                 )
                             }
                         }
@@ -144,14 +208,16 @@ struct MoreView: View {
                                 SettingsCard(
                                     title: "Account",
                                     subtitle: viewModel.email,
-                                    value: "Plan: \(viewModel.subscriptionStatus)"
+                                    value: viewModel.subscriptionStatus,
+                                    icon: "person.crop.circle.fill",
+                                    iconColor: .blue
                                 )
                             }
                         }
                     }
                     .padding(.horizontal, 20)
                     .padding(.top, 12)
-                    .padding(.bottom, 32)
+                    .padding(.bottom, 12)
                 }
             }
         }
@@ -212,51 +278,76 @@ private struct SettingsCard: View {
     let title: String
     let subtitle: String
     let value: String
+    var icon: String = "gearshape.fill"
+    var iconColor: Color = FitTheme.accent
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            VStack(alignment: .leading, spacing: 6) {
+        HStack(spacing: 14) {
+            // Icon badge (similar to check-in numbered badge)
+            ZStack {
+                Circle()
+                    .fill(iconColor.opacity(0.15))
+                    .frame(width: 44, height: 44)
+                
+                Image(systemName: icon)
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundColor(iconColor)
+            }
+            
+            VStack(alignment: .leading, spacing: 4) {
                 Text(title)
-                    .font(FitFont.body(size: 18))
+                    .font(FitFont.body(size: 17, weight: .semibold))
                     .foregroundColor(FitTheme.textPrimary)
 
-                Text(subtitle)
-                    .font(FitFont.body(size: 14))
+                Text(value)
+                    .font(FitFont.body(size: 13))
                     .foregroundColor(FitTheme.textSecondary)
+                    .lineLimit(1)
             }
 
             Spacer()
 
-            VStack(alignment: .trailing, spacing: 6) {
-                Text(value)
-                    .font(FitFont.body(size: 14))
-                    .foregroundColor(FitTheme.textPrimary)
-                    .multilineTextAlignment(.trailing)
-
+            // Chevron in subtle circle
+            ZStack {
+                Circle()
+                    .fill(FitTheme.cardHighlight)
+                    .frame(width: 32, height: 32)
+                
                 Image(systemName: "chevron.right")
-                    .font(FitFont.body(size: 12, weight: .semibold))
+                    .font(.system(size: 12, weight: .bold))
                     .foregroundColor(FitTheme.textSecondary)
             }
         }
-        .padding(18)
+        .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(FitTheme.cardBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 24))
+        .clipShape(RoundedRectangle(cornerRadius: 20))
         .overlay(
-            RoundedRectangle(cornerRadius: 24)
-                .stroke(FitTheme.cardStroke, lineWidth: 1)
+            RoundedRectangle(cornerRadius: 20)
+                .stroke(iconColor.opacity(0.2), lineWidth: 1.5)
         )
-        .shadow(color: FitTheme.shadow, radius: 16, x: 0, y: 8)
+        .shadow(color: FitTheme.shadow.opacity(0.5), radius: 12, x: 0, y: 6)
     }
 }
 
 private struct GoalsDetailView: View {
     @Binding var goal: OnboardingForm.Goal
+    let statusMessage: String?
+    let isSaveEnabled: Bool
+    let isSaving: Bool
+    let onSave: () -> Void
 
     private let columns = [GridItem(.adaptive(minimum: 140), spacing: 12)]
 
     var body: some View {
-        DetailContainer(title: "Goals", subtitle: "Pick the primary focus for your plan.") {
+        DetailContainer(
+            title: "Goals",
+            subtitle: "Pick the primary focus for your plan.",
+            statusMessage: statusMessage,
+            isSaveEnabled: isSaveEnabled,
+            isSaving: isSaving,
+            onSave: onSave
+        ) {
             LazyVGrid(columns: columns, alignment: .leading, spacing: 12) {
                 ForEach(OnboardingForm.Goal.allCases) { item in
                     Button {
@@ -280,9 +371,20 @@ private struct ProfileDetailView: View {
     @Binding var heightInches: String
     @Binding var weightLbs: String
     @Binding var sex: OnboardingForm.Sex
+    let statusMessage: String?
+    let isSaveEnabled: Bool
+    let isSaving: Bool
+    let onSave: () -> Void
 
     var body: some View {
-        DetailContainer(title: "Body Details", subtitle: "Update profile metrics used in your plan.") {
+        DetailContainer(
+            title: "Body Details",
+            subtitle: "Update profile metrics used in your plan.",
+            statusMessage: statusMessage,
+            isSaveEnabled: isSaveEnabled,
+            isSaving: isSaving,
+            onSave: onSave
+        ) {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 12) {
                     DetailField(title: "Age", text: $age, placeholder: "Years")
@@ -316,9 +418,20 @@ private struct MacroTargetsDetailView: View {
     @Binding var carbs: String
     @Binding var fats: String
     @Binding var calories: String
+    let statusMessage: String?
+    let isSaveEnabled: Bool
+    let isSaving: Bool
+    let onSave: () -> Void
 
     var body: some View {
-        DetailContainer(title: "Macro Targets", subtitle: "Update daily nutrition targets.") {
+        DetailContainer(
+            title: "Macro Targets",
+            subtitle: "Update daily nutrition targets.",
+            statusMessage: statusMessage,
+            isSaveEnabled: isSaveEnabled,
+            isSaving: isSaving,
+            onSave: onSave
+        ) {
             VStack(spacing: 12) {
                 HStack(spacing: 12) {
                     MacroField(title: "Protein", value: $protein, unit: "g")
@@ -336,10 +449,21 @@ private struct MacroTargetsDetailView: View {
 
 private struct CheckInDayDetailView: View {
     @Binding var selectedDay: String
+    let statusMessage: String?
+    let isSaveEnabled: Bool
+    let isSaving: Bool
+    let onSave: () -> Void
     private let columns = [GridItem(.adaptive(minimum: 110), spacing: 12)]
 
     var body: some View {
-        DetailContainer(title: "Check-in Day", subtitle: "Choose the day for weekly progress reviews.") {
+        DetailContainer(
+            title: "Check-in Day",
+            subtitle: "Choose the day for weekly progress reviews.",
+            statusMessage: statusMessage,
+            isSaveEnabled: isSaveEnabled,
+            isSaving: isSaving,
+            onSave: onSave
+        ) {
             LazyVGrid(columns: columns, alignment: .leading, spacing: 12) {
                 ForEach(OnboardingForm.checkinDays, id: \.self) { day in
                     Button {
@@ -357,9 +481,20 @@ private struct CheckInDayDetailView: View {
 private struct StartingPhotosDetailView: View {
     let userId: String
     @Binding var photos: StartingPhotosState
+    let statusMessage: String?
+    let isSaveEnabled: Bool
+    let isSaving: Bool
+    let onSave: () -> Void
 
     var body: some View {
-        DetailContainer(title: "Starting Photos", subtitle: "Capture or select front, side, and back photos.") {
+        DetailContainer(
+            title: "Starting Photos",
+            subtitle: "Capture or select front, side, and back photos.",
+            statusMessage: statusMessage,
+            isSaveEnabled: isSaveEnabled,
+            isSaving: isSaving,
+            onSave: onSave
+        ) {
             VStack(spacing: 12) {
                 ForEach(StartingPhotoType.allCases) { type in
                     StartingPhotoPickerRow(userId: userId, type: type, photos: $photos)
@@ -437,7 +572,29 @@ private struct AccountDetailView: View {
 private struct DetailContainer<Content: View>: View {
     let title: String
     let subtitle: String
+    let statusMessage: String?
+    let isSaveEnabled: Bool
+    let isSaving: Bool
+    let onSave: (() -> Void)?
     @ViewBuilder let content: Content
+
+    init(
+        title: String,
+        subtitle: String,
+        statusMessage: String? = nil,
+        isSaveEnabled: Bool = false,
+        isSaving: Bool = false,
+        onSave: (() -> Void)? = nil,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.title = title
+        self.subtitle = subtitle
+        self.statusMessage = statusMessage
+        self.isSaveEnabled = isSaveEnabled
+        self.isSaving = isSaving
+        self.onSave = onSave
+        self.content = content()
+    }
 
     var body: some View {
         ZStack {
@@ -459,6 +616,21 @@ private struct DetailContainer<Content: View>: View {
 
                     CardContainer {
                         content
+                    }
+
+                    if let onSave {
+                        Button(isSaving ? "Saving…" : "Save Changes") {
+                            onSave()
+                        }
+                        .buttonStyle(PrimaryActionButton())
+                        .disabled(!isSaveEnabled || isSaving)
+                        .opacity(isSaveEnabled && !isSaving ? 1 : 0.6)
+                    }
+
+                    if let statusMessage, !statusMessage.isEmpty {
+                        Text(statusMessage)
+                            .font(FitFont.body(size: 12))
+                            .foregroundColor(FitTheme.textSecondary)
                     }
                 }
                 .padding(.horizontal, 20)

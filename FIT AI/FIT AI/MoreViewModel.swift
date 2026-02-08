@@ -4,51 +4,52 @@ import Foundation
 @MainActor
 final class MoreViewModel: ObservableObject {
     @Published var goal: OnboardingForm.Goal = .maintain {
-        didSet { persistOnboarding(); scheduleProfileSync() }
+        didSet { persistOnboarding(); markDirty() }
     }
     @Published var macroProtein: String = "" {
-        didSet { persistOnboarding(); scheduleProfileSync() }
+        didSet { persistOnboarding(); markDirty() }
     }
     @Published var macroCarbs: String = "" {
-        didSet { persistOnboarding(); scheduleProfileSync() }
+        didSet { persistOnboarding(); markDirty() }
     }
     @Published var macroFats: String = "" {
-        didSet { persistOnboarding(); scheduleProfileSync() }
+        didSet { persistOnboarding(); markDirty() }
     }
     @Published var macroCalories: String = "" {
-        didSet { persistOnboarding(); scheduleProfileSync() }
+        didSet { persistOnboarding(); markDirty() }
     }
     @Published var checkinDay: String = OnboardingForm.checkinDays.first ?? "Monday" {
-        didSet { persistOnboarding(); scheduleProfileSync() }
+        didSet { persistOnboarding(); markDirty() }
     }
     @Published var age: String = "" {
-        didSet { persistOnboarding(); scheduleProfileSync() }
+        didSet { persistOnboarding(); markDirty() }
     }
     @Published var heightFeet: String = "" {
-        didSet { persistOnboarding(); scheduleProfileSync() }
+        didSet { persistOnboarding(); markDirty() }
     }
     @Published var heightInches: String = "" {
-        didSet { persistOnboarding(); scheduleProfileSync() }
+        didSet { persistOnboarding(); markDirty() }
     }
     @Published var weightLbs: String = "" {
-        didSet { persistOnboarding(); scheduleProfileSync() }
+        didSet { persistOnboarding(); markDirty() }
     }
     @Published var sex: OnboardingForm.Sex = .male {
-        didSet { persistOnboarding(); scheduleProfileSync() }
+        didSet { persistOnboarding(); markDirty() }
     }
     @Published var startingPhotos = StartingPhotosState() {
-        didSet { persistStartingPhotos(); scheduleProfileSync() }
+        didSet { persistStartingPhotos(); markDirty() }
     }
     @Published var email: String = "Add email"
     @Published var subscriptionStatus: String = "Free"
     @Published var profileStatusMessage: String?
+    @Published var hasUnsavedChanges: Bool = false
+    @Published var isSavingProfile: Bool = false
 
     private let userId: String
     private let onboardingKey = "fitai.onboarding.form"
     private let walkthroughReplayKey = "fitai.walkthrough.replayRequested"
     private var onboardingForm = OnboardingForm()
     private var didLoad = false
-    private var syncTask: Task<Void, Never>?
     private var isApplyingProfile = false
     private var profilePreferences: [String: Any] = [:]
     private var profileMacros: [String: Any] = [:]
@@ -78,6 +79,16 @@ final class MoreViewModel: ObservableObject {
             await MainActor.run {
                 profileStatusMessage = error.localizedDescription
             }
+        }
+    }
+
+    func saveProfile() async {
+        guard hasUnsavedChanges else { return }
+        profileStatusMessage = nil
+        isSavingProfile = true
+        await syncProfile()
+        await MainActor.run {
+            isSavingProfile = false
         }
     }
 
@@ -116,6 +127,7 @@ final class MoreViewModel: ObservableObject {
         onboardingForm.heightInches = heightInches
         onboardingForm.weightLbs = weightLbs
         onboardingForm.sex = sex
+        onboardingForm.healthKitSyncEnabled = HealthSyncState.shared.isEnabled
         if onboardingForm.userId == nil {
             onboardingForm.userId = userId
         }
@@ -129,13 +141,9 @@ final class MoreViewModel: ObservableObject {
         NotificationCenter.default.post(name: .fitAIStartingPhotosUpdated, object: nil)
     }
 
-    private func scheduleProfileSync() {
+    private func markDirty() {
         guard didLoad, !isApplyingProfile else { return }
-        syncTask?.cancel()
-        syncTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 400_000_000)
-            await self?.syncProfile()
-        }
+        hasUnsavedChanges = true
     }
 
     private func syncProfile() async {
@@ -148,8 +156,11 @@ final class MoreViewModel: ObservableObject {
             )
             await MainActor.run {
                 applyProfile(profile)
+                hasUnsavedChanges = false
                 profileStatusMessage = "Profile saved."
             }
+            NotificationCenter.default.post(name: .fitAIMacrosUpdated, object: nil)
+            NotificationCenter.default.post(name: .fitAIProfileUpdated, object: nil)
         } catch {
             await MainActor.run {
                 profileStatusMessage = error.localizedDescription
@@ -180,6 +191,9 @@ final class MoreViewModel: ObservableObject {
         var preferences = profilePreferences
         preferences["checkin_day"] = checkinDay
         preferences["gender"] = sex.rawValue
+        preferences["sex"] = sex.rawValue
+        preferences["apple_health_sync"] = HealthSyncState.shared.isEnabled
+        preferences["weekly_weight_loss_lbs"] = onboardingForm.weeklyWeightLossLbs
         if !startingPhotos.isEmpty {
             preferences["starting_photos"] = startingPhotos.asDictionary()
         }
@@ -235,8 +249,15 @@ final class MoreViewModel: ObservableObject {
             if let checkin = preferences["checkin_day"] as? String, !checkin.isEmpty {
                 checkinDay = checkin
             }
+            if let appleHealth = preferences["apple_health_sync"] as? Bool {
+                HealthSyncState.shared.isEnabled = appleHealth
+                onboardingForm.healthKitSyncEnabled = appleHealth
+            }
             if let gender = preferences["gender"] as? String,
                let parsed = OnboardingForm.Sex(rawValue: gender) {
+                sex = parsed
+            } else if let gender = preferences["sex"] as? String,
+                      let parsed = OnboardingForm.Sex(rawValue: gender) {
                 sex = parsed
             }
             if let starting = preferences["starting_photos"],
@@ -260,6 +281,8 @@ final class MoreViewModel: ObservableObject {
         } else if let weightKg = profile["weight_kg"] as? NSNumber {
             weightLbs = String(format: "%.0f", weightKg.doubleValue * 2.20462)
         }
+        updateCheckinDayStorage(checkinDay)
+        hasUnsavedChanges = false
     }
 
     private static func stringValue(_ value: Any?, fallback: String) -> String {
@@ -298,10 +321,17 @@ final class MoreViewModel: ObservableObject {
         heightFeet = "\(feet)"
         heightInches = "\(inches)"
     }
+
+    private func updateCheckinDayStorage(_ day: String) {
+        if let index = OnboardingForm.checkinDays.firstIndex(of: day) {
+            UserDefaults.standard.set(index, forKey: "checkinDay")
+        }
+    }
 }
 
 extension Notification.Name {
     static let fitAIWalkthroughReplayRequested = Notification.Name("fitai.walkthrough.replayRequested")
     static let fitAIStartingPhotosUpdated = Notification.Name("fitai.startingPhotos.updated")
     static let fitAIMacrosUpdated = Notification.Name("fitai.macros.updated")
+    static let fitAIProfileUpdated = Notification.Name("fitai.profile.updated")
 }

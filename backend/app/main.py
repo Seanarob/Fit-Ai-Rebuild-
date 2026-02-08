@@ -18,6 +18,7 @@ from .routers import (
     scan,
     progress,
     chat,
+    daily_checkin,
 )
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env")
@@ -37,3 +38,4 @@ app.include_router(users.router, prefix="/users", tags=["users"])
 app.include_router(scan.router, prefix="/scan", tags=["scan"])
 app.include_router(progress.router, prefix="/progress", tags=["progress"])
 app.include_router(chat.router, prefix="/chat", tags=["chat"])
+app.include_router(daily_checkin.router, prefix="/streaks", tags=["streaks"])

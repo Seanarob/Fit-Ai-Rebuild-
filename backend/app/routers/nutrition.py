@@ -149,32 +149,71 @@ def _normalize_fatsecret_search_item(food: dict) -> dict:
     }
 
 
-def _normalize_fatsecret_detail(food: dict) -> dict:
-    servings = (food.get("servings") or {}).get("serving")
-    if isinstance(servings, list):
-        serving = servings[0]
-    elif isinstance(servings, dict):
-        serving = servings
-    else:
-        serving = {}
+def _parse_serving_option(serving: dict) -> dict | None:
+    """Parse a single serving option from FatSecret API."""
+    if not serving:
+        return None
+    
+    serving_id = serving.get("serving_id")
     serving_desc = serving.get("serving_description") or ""
     metric_amount = serving.get("metric_serving_amount")
     metric_unit = serving.get("metric_serving_unit")
-    serving_text = None
+    number_of_units = serving.get("number_of_units")
+    
+    # Build display text
+    display_text = serving_desc
+    if not display_text and metric_amount and metric_unit:
+        display_text = f"{metric_amount} {metric_unit}"
+    
+    # Calculate metric grams for conversion
+    metric_grams = None
     if metric_amount and metric_unit:
-        serving_text = f"{metric_amount} {metric_unit}"
-    elif serving_desc:
-        serving_text = serving_desc
+        try:
+            metric_grams = float(metric_amount) if metric_unit == "g" else None
+        except (TypeError, ValueError):
+            pass
+    
+    return {
+        "id": str(serving_id) if serving_id else None,
+        "description": display_text or "1 serving",
+        "metric_grams": metric_grams,
+        "number_of_units": float(number_of_units) if number_of_units else 1.0,
+        "calories": _fatsecret_serving_value(serving, "calories"),
+        "protein": _fatsecret_serving_value(serving, "protein"),
+        "carbs": _fatsecret_serving_value(serving, "carbohydrate"),
+        "fats": _fatsecret_serving_value(serving, "fat"),
+    }
+
+
+def _normalize_fatsecret_detail(food: dict) -> dict:
+    servings_data = (food.get("servings") or {}).get("serving")
+    
+    # Parse all serving options
+    all_servings = []
+    if isinstance(servings_data, list):
+        for s in servings_data:
+            parsed = _parse_serving_option(s)
+            if parsed:
+                all_servings.append(parsed)
+    elif isinstance(servings_data, dict):
+        parsed = _parse_serving_option(servings_data)
+        if parsed:
+            all_servings.append(parsed)
+    
+    # Use first serving for default values
+    default_serving = all_servings[0] if all_servings else {}
+    serving_text = default_serving.get("description", "1 serving")
 
     return {
         "id": str(food.get("food_id") or ""),
         "source": "fatsecret",
         "name": (food.get("food_name") or "Food").title(),
-        "serving": serving_text or "1 serving",
-        "protein": _fatsecret_serving_value(serving, "protein"),
-        "carbs": _fatsecret_serving_value(serving, "carbohydrate"),
-        "fats": _fatsecret_serving_value(serving, "fat"),
-        "calories": _fatsecret_serving_value(serving, "calories"),
+        "serving": serving_text,
+        "protein": default_serving.get("protein", 0),
+        "carbs": default_serving.get("carbs", 0),
+        "fats": default_serving.get("fats", 0),
+        "calories": default_serving.get("calories", 0),
+        "serving_options": all_servings,  # All available serving sizes
         "metadata": {
             "food_id": str(food.get("food_id") or ""),
             "brand": food.get("brand_name"),
@@ -234,6 +273,32 @@ async def usda_food_detail(fdc_id: str, user_id: str | None = None):
     except Exception:
         pass
     return normalized
+
+
+@router.get("/fatsecret/autocomplete")
+async def fatsecret_autocomplete(query: str, max_results: int = 10):
+    """
+    Lightweight autocomplete endpoint for food name suggestions.
+    Returns just food names/IDs without full nutrition details.
+    Optimized for real-time typing suggestions.
+    """
+    if len(query) < 2:
+        return {"suggestions": []}
+    
+    payload = fatsecret_request(
+        "foods.autocomplete", {"expression": query, "max_results": min(max_results, 20)}
+    )
+    if payload.get("error"):
+        raise HTTPException(status_code=502, detail=payload.get("error"))
+    
+    suggestions_raw = payload.get("suggestions") or {}
+    suggestion_list = suggestions_raw.get("suggestion") or []
+    
+    # Handle single item returned as dict
+    if isinstance(suggestion_list, str):
+        suggestion_list = [suggestion_list]
+    
+    return {"suggestions": suggestion_list}
 
 
 @router.get("/fatsecret/search")

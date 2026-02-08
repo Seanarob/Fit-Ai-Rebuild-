@@ -5,10 +5,26 @@ public struct OnboardingStep {
     public let summary: String
 }
 
-public struct OnboardingForm: Codable {
+    public struct OnboardingForm: Codable {
+    public enum PrimaryTrainingGoal: String, CaseIterable, Codable, Identifiable {
+        case strength
+        case hypertrophy
+        case fatLoss
+
+        public var id: String { rawValue }
+        public var title: String {
+            switch self {
+            case .strength: return "Strength"
+            case .hypertrophy: return "Hypertrophy"
+            case .fatLoss: return "Fat loss + muscle"
+            }
+        }
+    }
+
     public enum Goal: String, CaseIterable, Codable, Identifiable {
         case gainWeight = "gain_weight"
         case loseWeight = "lose_weight"
+        case loseWeightFast = "lose_weight_fast"
         case maintain = "maintain"
 
         public var id: String { rawValue }
@@ -16,6 +32,7 @@ public struct OnboardingForm: Codable {
             switch self {
             case .gainWeight: return "Gain weight"
             case .loseWeight: return "Lose weight"
+            case .loseWeightFast: return "Lose weight faster"
             case .maintain: return "Maintain"
             }
         }
@@ -130,6 +147,7 @@ public struct OnboardingForm: Codable {
     public var goalWeightLbs: String = ""
     public var targetDate: Date? = nil
     public var goal: Goal = .maintain
+    public var primaryTrainingGoal: PrimaryTrainingGoal = .hypertrophy
     public var activityLevel: ActivityLevel = .moderatelyActive
     public var trainingLevel: TrainingLevel = .intermediate
     public var workoutDaysPerWeek: Int = 3
@@ -146,14 +164,37 @@ public struct OnboardingForm: Codable {
     public var macroFats: String = ""
     public var macroCalories: String = ""
     public var photosPending: Bool = true
+    public var weeklyWeightLossLbs: Double = 1.0
+    public var healthKitSyncEnabled: Bool = false
+    public var physiqueFocus: [String] = []
+    public var weakPoints: [String] = []
+    public var trainingDaysOfWeek: [String] = []
+    public var habitsSleep: String = ""
+    public var habitsNutrition: String = ""
+    public var habitsStress: String = ""
+    public var habitsRecovery: String = ""
+    public var pastFailures: [String] = []
+    public var pastFailuresNote: String = ""
+    public var checkinEnergy: Int = 0
+    public var checkinReadiness: Int = 0
+    public var checkinSoreness: Int = 0
+    public var checkinWeight: String = ""
+    public var lastSeenGap: String = ""
+    public var coachSignals: [String] = []
     
     // Custom encoding/decoding for Date and Set
     enum CodingKeys: String, CodingKey {
         case userId, fullName, age, sex, heightFeet, heightInches, heightUnit
-        case weightLbs, goalWeightLbs, goal, activityLevel, trainingLevel
+        case weightLbs, goalWeightLbs, goal, primaryTrainingGoal, activityLevel, trainingLevel
         case workoutDaysPerWeek, workoutDurationMinutes, equipment
         case foodAllergies, foodDislikes, dietStyle, checkinDay
         case macroProtein, macroCarbs, macroFats, macroCalories, photosPending
+        case weeklyWeightLossLbs, healthKitSyncEnabled
+        case physiqueFocus, weakPoints, trainingDaysOfWeek
+        case habitsSleep, habitsNutrition, habitsStress, habitsRecovery
+        case pastFailures, pastFailuresNote
+        case checkinEnergy, checkinReadiness, checkinSoreness, checkinWeight
+        case lastSeenGap, coachSignals
         case birthdayTimestamp, targetDateTimestamp, specialConsiderationsArray, additionalNotes
     }
     
@@ -173,6 +214,7 @@ public struct OnboardingForm: Codable {
         weightLbs = try container.decodeIfPresent(String.self, forKey: .weightLbs) ?? ""
         goalWeightLbs = try container.decodeIfPresent(String.self, forKey: .goalWeightLbs) ?? ""
         goal = try container.decodeIfPresent(Goal.self, forKey: .goal) ?? .maintain
+        primaryTrainingGoal = try container.decodeIfPresent(PrimaryTrainingGoal.self, forKey: .primaryTrainingGoal) ?? .hypertrophy
         activityLevel = try container.decodeIfPresent(ActivityLevel.self, forKey: .activityLevel) ?? .moderatelyActive
         trainingLevel = try container.decodeIfPresent(TrainingLevel.self, forKey: .trainingLevel) ?? .intermediate
         workoutDaysPerWeek = try container.decodeIfPresent(Int.self, forKey: .workoutDaysPerWeek) ?? 3
@@ -188,6 +230,23 @@ public struct OnboardingForm: Codable {
         macroCalories = try container.decodeIfPresent(String.self, forKey: .macroCalories) ?? ""
         photosPending = try container.decodeIfPresent(Bool.self, forKey: .photosPending) ?? true
         additionalNotes = try container.decodeIfPresent(String.self, forKey: .additionalNotes) ?? ""
+        weeklyWeightLossLbs = try container.decodeIfPresent(Double.self, forKey: .weeklyWeightLossLbs) ?? 1.0
+        healthKitSyncEnabled = try container.decodeIfPresent(Bool.self, forKey: .healthKitSyncEnabled) ?? false
+        physiqueFocus = try container.decodeIfPresent([String].self, forKey: .physiqueFocus) ?? []
+        weakPoints = try container.decodeIfPresent([String].self, forKey: .weakPoints) ?? []
+        trainingDaysOfWeek = try container.decodeIfPresent([String].self, forKey: .trainingDaysOfWeek) ?? []
+        habitsSleep = try container.decodeIfPresent(String.self, forKey: .habitsSleep) ?? ""
+        habitsNutrition = try container.decodeIfPresent(String.self, forKey: .habitsNutrition) ?? ""
+        habitsStress = try container.decodeIfPresent(String.self, forKey: .habitsStress) ?? ""
+        habitsRecovery = try container.decodeIfPresent(String.self, forKey: .habitsRecovery) ?? ""
+        pastFailures = try container.decodeIfPresent([String].self, forKey: .pastFailures) ?? []
+        pastFailuresNote = try container.decodeIfPresent(String.self, forKey: .pastFailuresNote) ?? ""
+        checkinEnergy = try container.decodeIfPresent(Int.self, forKey: .checkinEnergy) ?? 0
+        checkinReadiness = try container.decodeIfPresent(Int.self, forKey: .checkinReadiness) ?? 0
+        checkinSoreness = try container.decodeIfPresent(Int.self, forKey: .checkinSoreness) ?? 0
+        checkinWeight = try container.decodeIfPresent(String.self, forKey: .checkinWeight) ?? ""
+        lastSeenGap = try container.decodeIfPresent(String.self, forKey: .lastSeenGap) ?? ""
+        coachSignals = try container.decodeIfPresent([String].self, forKey: .coachSignals) ?? []
         
         // Decode dates from timestamps
         if let timestamp = try container.decodeIfPresent(TimeInterval.self, forKey: .birthdayTimestamp) {
@@ -215,6 +274,7 @@ public struct OnboardingForm: Codable {
         try container.encode(weightLbs, forKey: .weightLbs)
         try container.encode(goalWeightLbs, forKey: .goalWeightLbs)
         try container.encode(goal, forKey: .goal)
+        try container.encode(primaryTrainingGoal, forKey: .primaryTrainingGoal)
         try container.encode(activityLevel, forKey: .activityLevel)
         try container.encode(trainingLevel, forKey: .trainingLevel)
         try container.encode(workoutDaysPerWeek, forKey: .workoutDaysPerWeek)
@@ -230,6 +290,23 @@ public struct OnboardingForm: Codable {
         try container.encode(macroCalories, forKey: .macroCalories)
         try container.encode(photosPending, forKey: .photosPending)
         try container.encode(additionalNotes, forKey: .additionalNotes)
+        try container.encode(weeklyWeightLossLbs, forKey: .weeklyWeightLossLbs)
+        try container.encode(healthKitSyncEnabled, forKey: .healthKitSyncEnabled)
+        try container.encode(physiqueFocus, forKey: .physiqueFocus)
+        try container.encode(weakPoints, forKey: .weakPoints)
+        try container.encode(trainingDaysOfWeek, forKey: .trainingDaysOfWeek)
+        try container.encode(habitsSleep, forKey: .habitsSleep)
+        try container.encode(habitsNutrition, forKey: .habitsNutrition)
+        try container.encode(habitsStress, forKey: .habitsStress)
+        try container.encode(habitsRecovery, forKey: .habitsRecovery)
+        try container.encode(pastFailures, forKey: .pastFailures)
+        try container.encode(pastFailuresNote, forKey: .pastFailuresNote)
+        try container.encode(checkinEnergy, forKey: .checkinEnergy)
+        try container.encode(checkinReadiness, forKey: .checkinReadiness)
+        try container.encode(checkinSoreness, forKey: .checkinSoreness)
+        try container.encode(checkinWeight, forKey: .checkinWeight)
+        try container.encode(lastSeenGap, forKey: .lastSeenGap)
+        try container.encode(coachSignals, forKey: .coachSignals)
         
         // Encode dates as timestamps
         if let birthday = birthday {

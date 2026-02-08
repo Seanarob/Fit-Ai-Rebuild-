@@ -46,6 +46,10 @@ final class NutritionViewModel: ObservableObject {
             object: nil,
             userInfo: ["macros": macroDictionary(from: totals)]
         )
+        
+        // Check nutrition streak after logging
+        checkNutritionStreak()
+        
         do {
             try await NutritionAPIService.shared.logManualItem(
                 userId: userId,
@@ -60,12 +64,96 @@ final class NutritionViewModel: ObservableObject {
             return false
         }
     }
+    
+    /// Check if macros are hit and update streak
+    func checkNutritionStreak() {
+        // Get macro targets from profile or UserDefaults
+        let targets = getMacroTargets()
+        guard targets != .zero else { return }
+        
+        // Check streak using StreakStore
+        Task { @MainActor in
+            StreakStore.shared.checkNutritionStreak(logged: totals, target: targets)
+        }
+    }
+    
+    private func getMacroTargets() -> MacroTotals {
+        // Try to get from locally saved onboarding form
+        guard let data = UserDefaults.standard.data(forKey: "fitai.onboarding.form"),
+              let form = try? JSONDecoder().decode(OnboardingForm.self, from: data) else {
+            return .zero
+        }
+        
+        let calories = Double(form.macroCalories) ?? 0
+        let protein = Double(form.macroProtein) ?? 0
+        let carbs = Double(form.macroCarbs) ?? 0
+        let fats = Double(form.macroFats) ?? 0
+        
+        return MacroTotals(
+            calories: calories,
+            protein: protein,
+            carbs: carbs,
+            fats: fats
+        )
+    }
 
     private func applyLocalLog(_ item: LoggedFoodItem, mealType: MealType) {
         var updated = dailyMeals
         updated[mealType, default: []].append(item)
         dailyMeals = updated
         totals = totals.adding(item.macros)
+    }
+
+    /// Update a logged food item with new values
+    func updateLoggedItem(original: LoggedFoodItem, updated: LoggedFoodItem, mealType: MealType, date: Date) async {
+        // Update local state immediately for responsive UI
+        var meals = dailyMeals
+        if var items = meals[mealType] {
+            if let index = items.firstIndex(where: { $0.id == original.id }) {
+                // Subtract old macros and add new ones
+                totals = totals.subtracting(items[index].macros)
+                items[index] = updated
+                totals = totals.adding(updated.macros)
+                meals[mealType] = items
+                dailyMeals = meals
+            }
+        }
+        
+        Haptics.success()
+        NotificationCenter.default.post(
+            name: .fitAINutritionLogged,
+            object: nil,
+            userInfo: ["macros": macroDictionary(from: totals)]
+        )
+        
+        // TODO: Sync update to backend when API supports it
+        // For now, just reload to ensure consistency
+        await loadDailyLogs(date: date, silently: true)
+    }
+    
+    /// Delete a logged food item
+    func deleteLoggedItem(item: LoggedFoodItem, mealType: MealType, date: Date) async {
+        // Update local state immediately
+        var meals = dailyMeals
+        if var items = meals[mealType] {
+            if let index = items.firstIndex(where: { $0.id == item.id }) {
+                totals = totals.subtracting(items[index].macros)
+                items.remove(at: index)
+                meals[mealType] = items
+                dailyMeals = meals
+            }
+        }
+        
+        Haptics.medium()
+        NotificationCenter.default.post(
+            name: .fitAINutritionLogged,
+            object: nil,
+            userInfo: ["macros": macroDictionary(from: totals)]
+        )
+        
+        // TODO: Sync deletion to backend when API supports it
+        // For now, just reload to ensure consistency
+        await loadDailyLogs(date: date, silently: true)
     }
 
     private func macroDictionary(from totals: MacroTotals) -> [String: Any] {
@@ -142,10 +230,10 @@ final class NutritionViewModel: ObservableObject {
         )
         let name = item.name ?? (item.raw == nil ? "Logged item" : "Scan result")
         let detail: String
-        if portionValue > 0 {
-            detail = "\(Int(portionValue)) \(portionUnit.title)"
-        } else if let serving = item.serving, !serving.isEmpty {
+        if let serving = item.serving, !serving.isEmpty {
             detail = serving
+        } else if portionValue > 0 {
+            detail = "\(formattedPortionValue(portionValue)) \(portionUnit.title)"
         } else {
             detail = "Logged"
         }
@@ -156,6 +244,14 @@ final class NutritionViewModel: ObservableObject {
             macros: macros,
             detail: detail
         )
+    }
+
+    private func formattedPortionValue(_ value: Double, maxFractionDigits: Int = 2) -> String {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.minimumFractionDigits = 0
+        formatter.maximumFractionDigits = maxFractionDigits
+        return formatter.string(from: NSNumber(value: value)) ?? String(value)
     }
 }
 

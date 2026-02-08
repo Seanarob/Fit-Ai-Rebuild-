@@ -25,16 +25,23 @@ struct WorkoutView: View {
     @State private var isGenerating = false
     @State private var isGeneratedSwapPresented = false
     @State private var generatedSwapIndex: Int?
+    @State private var editingGeneratedIndex: Int?
     @State private var templates: [WorkoutTemplate] = []
     @State private var isLoading = false
     @State private var loadError: String?
     @State private var templateSearch = ""
     @State private var selectedTemplate: WorkoutTemplate?
     @State private var isTemplateActionsPresented = false
+    @State private var isTemplatePreviewPresented = false
+    @State private var previewTemplate: WorkoutTemplate?
+    @State private var previewExercises: [WorkoutTemplateExercise] = []
+    @State private var isPreviewLoading = false
+    @State private var previewError: String?
     @State private var isExercisePickerPresented = false
     @State private var draftName = ""
     @State private var draftExercises: [WorkoutExerciseDraft] = []
     @State private var activeSession: SessionDraft?
+    @State private var showActiveSession = false
     @State private var isSavingDraft = false
     @State private var editingTemplateId: String?
     @State private var pendingDeleteTemplate: WorkoutTemplate?
@@ -46,6 +53,14 @@ struct WorkoutView: View {
     @State private var alertMessage = ""
     @State private var showTunePlanSheet = false
     @State private var todaysWorkout: WorkoutCompletion?
+    @State private var showRecoveryAlert = false
+    @State private var recoveryInfo: (title: String, exerciseCount: Int, elapsed: Int, savedAt: Date)?
+    @State private var coachPickTemplateId: String?
+    @State private var coachPickTitle: String?
+    @State private var coachPickExercises: [WorkoutExerciseSession] = []
+    @State private var splitSnapshot = SplitSnapshot()
+    @State private var selectedWeeklyDay: WeeklyDayDetail?
+    @State private var weekOffset: Int = 0
 
     let userId: String
 
@@ -61,39 +76,10 @@ struct WorkoutView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    WorkoutStreakHeader(streakCount: WorkoutStreakStore.current())
+                    WorkoutStreakBadge(goalOverride: splitSnapshot.daysPerWeek, goalLabel: "session")
 
-                    WorkoutSpotlightCard(
-                        title: "Today's Training",
-                        subtitle: spotlightSubtitle,
-                        durationMinutes: estimateWorkoutMinutes(spotlightExercises),
-                        exercises: spotlightExercises.map { $0.name },
-                        completedExercises: todaysWorkout?.exercises ?? [],
-                        isCompleted: todaysWorkout != nil,
-                        onStart: {
-                            Task {
-                                await startSession(
-                                    title: "Today's Training",
-                                    templateId: nil,
-                                    exercises: spotlightExercises
-                                )
-                            }
-                        },
-                        onSwap: {
-                            isSwapSheetPresented = true
-                        }
-                    )
-
-                    ModePicker(mode: $mode)
-
-                    switch mode {
-                    case .generate:
-                        generateSection
-                    case .saved:
-                        savedSection
-                    case .create:
-                        createSection
-                    }
+                    weeklySplitHeader
+                    workoutBuilderSection
 
                     if let loadError {
                         Text(loadError)
@@ -103,12 +89,25 @@ struct WorkoutView: View {
                 }
                 .padding(.horizontal, 20)
                 .padding(.top, 12)
-                .padding(.bottom, 32)
+                .padding(.bottom, 12)
             }
         }
         .task {
             await loadWorkouts()
             todaysWorkout = WorkoutCompletionStore.todaysCompletion()
+            refreshSplitSnapshot()
+            
+            // Check for recoverable workout session
+            if WorkoutSessionStore.hasRecoverableSession() {
+                recoveryInfo = WorkoutSessionStore.getRecoveryInfo()
+                showRecoveryAlert = true
+            }
+        }
+        .onAppear {
+            Task {
+                await loadWorkouts()
+            }
+            refreshSplitSnapshot()
         }
         .onReceive(NotificationCenter.default.publisher(for: .fitAIWorkoutCompleted)) { notification in
             if let completion = notification.userInfo?["completion"] as? WorkoutCompletion {
@@ -119,9 +118,6 @@ struct WorkoutView: View {
         }
         .sheet(isPresented: $isExercisePickerPresented) {
             ExercisePickerModal(
-                onSearch: { query in
-                    await searchExercises(query: query)
-                },
                 selectedNames: Set(draftExercises.map { $0.name }),
                 onAdd: { exercise in
                     let newExercise = WorkoutExerciseDraft(
@@ -141,18 +137,16 @@ struct WorkoutView: View {
         }
         .sheet(isPresented: $isGeneratedSwapPresented) {
             ExercisePickerModal(
-                onSearch: { query in
-                    await searchExercises(query: query)
-                },
                 selectedNames: Set(generatedExercises.map { $0.name }),
                 onAdd: { exercise in
                     guard let index = generatedSwapIndex else { return }
                     let restSeconds = isCompoundExercise(exercise.name) ? 90 : 60
-                    let replacement = WorkoutExerciseSession(
+                    var replacement = WorkoutExerciseSession(
                         name: exercise.name,
                         sets: WorkoutSetEntry.batch(reps: "10", weight: "", count: 4),
                         restSeconds: restSeconds
                     )
+                    replacement.warmupRestSeconds = min(60, replacement.restSeconds)
                     if generatedExercises.indices.contains(index) {
                         generatedExercises[index] = replacement
                     }
@@ -162,37 +156,78 @@ struct WorkoutView: View {
             )
             .presentationDetents([.large])
         }
+        .sheet(
+            isPresented: Binding(
+                get: { editingGeneratedIndex != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        editingGeneratedIndex = nil
+                    }
+                }
+            )
+        ) {
+            if let index = editingGeneratedIndex, generatedExercises.indices.contains(index) {
+                GeneratedExerciseEditor(
+                    exercise: $generatedExercises[index],
+                    onClose: { editingGeneratedIndex = nil }
+                )
+                .presentationDetents([.medium, .large])
+            } else {
+                EmptyView()
+            }
+        }
         .sheet(isPresented: $isTemplateActionsPresented) {
             if let template = selectedTemplate {
                 WorkoutTemplateActionsSheet(
                     template: template,
                     onStart: {
-                        Task {
+                        Task { @MainActor in
                             await startSession(from: template)
                         }
-                        isTemplateActionsPresented = false
                     },
                     onEdit: {
-                        Task {
+                        Task { @MainActor in
                             await loadTemplateForEditing(template)
                         }
-                        isTemplateActionsPresented = false
                     },
                     onDuplicate: {
-                        Task {
+                        Task { @MainActor in
                             await duplicateTemplate(template)
                         }
-                        isTemplateActionsPresented = false
                     },
                     onDelete: {
                         pendingDeleteTemplate = template
                         showDeleteAlert = true
-                        isTemplateActionsPresented = false
                     }
                 )
                 .presentationDetents([.medium])
+                .presentationDragIndicator(.hidden)
             } else {
-                EmptyView()
+                Text("Loading...")
+                    .foregroundColor(FitTheme.textSecondary)
+            }
+        }
+        .sheet(isPresented: $isTemplatePreviewPresented) {
+            if let template = previewTemplate {
+                WorkoutTemplatePreviewSheet(
+                    template: template,
+                    exercises: previewExercises,
+                    isLoading: isPreviewLoading,
+                    errorMessage: previewError,
+                    onStart: {
+                        isTemplatePreviewPresented = false
+                        Task {
+                            await startSessionFromPreview()
+                        }
+                    },
+                    onClose: {
+                        isTemplatePreviewPresented = false
+                    }
+                )
+                .presentationDetents([.medium, .large])
+            } else {
+                Text("Loading...")
+                    .foregroundColor(FitTheme.textSecondary)
             }
         }
         .sheet(isPresented: $showTunePlanSheet) {
@@ -203,13 +238,38 @@ struct WorkoutView: View {
             )
             .presentationDetents([.large])
         }
-        .fullScreenCover(item: $activeSession) { session in
-            WorkoutSessionView(
-                userId: userId,
-                title: session.title,
-                sessionId: session.sessionId,
-                exercises: session.exercises
-            )
+        .fullScreenCover(isPresented: $showActiveSession) {
+            Group {
+                if let session = activeSession, !session.exercises.isEmpty {
+                    WorkoutSessionView(
+                        userId: userId,
+                        title: session.title,
+                        sessionId: session.sessionId,
+                        exercises: session.exercises
+                    )
+                } else {
+                    // Fallback view if session is invalid
+                    VStack(spacing: 20) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.system(size: 48))
+                            .foregroundColor(.orange)
+                        Text("Unable to load workout")
+                            .font(FitFont.heading(size: 20))
+                            .foregroundColor(FitTheme.textPrimary)
+                        Text("Please try again")
+                            .font(FitFont.body(size: 14))
+                            .foregroundColor(FitTheme.textSecondary)
+                        Button("Dismiss") {
+                            showActiveSession = false
+                            activeSession = nil
+                        }
+                        .foregroundColor(FitTheme.accent)
+                        .padding(.top, 20)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(FitTheme.backgroundGradient.ignoresSafeArea())
+                }
+            }
         }
         .sheet(isPresented: $isSwapSheetPresented) {
             WorkoutSwapSheet(
@@ -252,6 +312,33 @@ struct WorkoutView: View {
         } message: {
             Text(alertMessage)
         }
+        .alert("Resume Workout?", isPresented: $showRecoveryAlert) {
+            Button("Resume") {
+                recoverSavedSession()
+            }
+            Button("Discard", role: .destructive) {
+                WorkoutSessionStore.clear()
+                recoveryInfo = nil
+            }
+        } message: {
+            if let info = recoveryInfo {
+                let elapsed = formatRecoveryTime(info.elapsed)
+                Text("You have an unfinished workout: \"\(info.title)\" with \(info.exerciseCount) exercises (\(elapsed) elapsed). Would you like to continue?")
+            } else {
+                Text("You have an unfinished workout. Would you like to continue?")
+            }
+        }
+        .onChange(of: generatedExercises) { exercises in
+            if exercises.isEmpty {
+                generatedEstimatedMinutes = 0
+                return
+            }
+            let estimate = estimateWorkoutMinutes(exercises)
+            generatedEstimatedMinutes = clampedEstimateMinutes(
+                estimate,
+                targetMinutes: selectedDurationMinutes
+            )
+        }
         .onChange(of: intent) { newValue in
             guard let newValue else { return }
             Task {
@@ -260,21 +347,162 @@ struct WorkoutView: View {
         }
     }
 
+    private var weeklySplitHeader: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .center, spacing: 12) {
+                Text("Weekly Split")
+                    .font(FitFont.body(size: 12, weight: .semibold))
+                    .foregroundColor(FitTheme.textSecondary)
+                    .textCase(.uppercase)
+                    .tracking(0.6)
+
+                Spacer()
+
+                Button(action: { }) {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(FitTheme.textSecondary)
+                        .frame(width: 34, height: 34)
+                        .background(FitTheme.cardHighlight)
+                        .clipShape(Circle())
+                }
+                .buttonStyle(.plain)
+            }
+
+            weeklySplitWeekView
+        }
+        .padding(.top, 4)
+    }
+
+    private var weeklySplitWeekView: some View {
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                let palette = weeklyAccentPalette
+                ForEach(Array(weekDates.enumerated()), id: \.element) { index, date in
+                    let label = splitLabel(for: date)
+                    let status = weeklyDayStatus(for: date)
+                    let dayNumber = Calendar.current.component(.day, from: date)
+                    let detailId = dateKey(for: date)
+                    let isSelected = selectedWeeklyDay?.id == detailId
+                        || (selectedWeeklyDay == nil && Calendar.current.isDateInToday(date))
+                    let accentColor = palette[index % palette.count]
+                    WeeklySplitDayCell(
+                        daySymbol: shortWeekdaySymbol(for: date),
+                        dayNumber: dayNumber,
+                        status: status,
+                        isSelected: isSelected,
+                        isTrainingDay: label != nil,
+                        accentColor: accentColor,
+                        action: {
+                            let detail = weeklyDayDetail(for: date)
+                            if selectedWeeklyDay?.id == detail.id {
+                                selectedWeeklyDay = nil
+                            } else {
+                                selectedWeeklyDay = detail
+                            }
+                        }
+                    )
+                    .contextMenu {
+                        Button("Edit Day") {
+                            showTunePlanSheet = true
+                        }
+                        Button("Swap Workout") {
+                            isSwapSheetPresented = true
+                        }
+                    }
+                }
+            }
+            .padding(10)
+            .background(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(FitTheme.cardBackground)
+                    .shadow(color: FitTheme.shadow.opacity(0.35), radius: 10, x: 0, y: 6)
+            )
+            .gesture(
+                DragGesture(minimumDistance: 20)
+                    .onEnded { value in
+                        let horizontal = value.translation.width
+                        let vertical = value.translation.height
+                        guard abs(horizontal) > abs(vertical), abs(horizontal) > 40 else { return }
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            if horizontal < 0 {
+                                weekOffset += 1
+                            } else {
+                                weekOffset -= 1
+                            }
+                        }
+                        selectedWeeklyDay = nil
+                    }
+            )
+
+            if let day = selectedWeeklyDay {
+                WeeklySplitInlineDetailCard(
+                    day: day,
+                    completion: WorkoutCompletionStore.completion(on: day.date),
+                    onPrimaryAction: {
+                        if day.isTrainingDay {
+                            Task {
+                                await startWeeklySplitSession(for: day.date)
+                            }
+                        } else {
+                            mode = .generate
+                            Task {
+                                await generateWorkout()
+                            }
+                        }
+                    },
+                    onSwap: {
+                        isSwapSheetPresented = true
+                    },
+                    onGenerate: {
+                        mode = .generate
+                        Task {
+                            await generateWorkout()
+                        }
+                    }
+                )
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private var workoutBuilderSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            todaysTrainingCard
+
+            Text("Workout Builder")
+                .font(FitFont.body(size: 14, weight: .semibold))
+                .foregroundColor(FitTheme.textSecondary)
+
+            ModePicker(mode: $mode)
+
+            switch mode {
+            case .generate:
+                generateSection
+            case .saved:
+                savedSection
+            case .create:
+                createSection
+            }
+        }
+        .padding(.top, 8)
+    }
+
     private var generateSection: some View {
         VStack(spacing: 18) {
-            WorkoutHeroCard {
+            WorkoutHeroCard(onTap: { showTunePlanSheet = true }) {
                 VStack(alignment: .leading, spacing: 14) {
                     HStack(alignment: .top, spacing: 12) {
                         VStack(alignment: .leading, spacing: 6) {
                             Text("AI Workout Builder")
                                 .font(FitFont.heading(size: 22))
                                 .foregroundColor(FitTheme.textPrimary)
-                            Text("Build a plan around your focus, equipment, and time.")
+                            Text("Tap to customize your workout plan")
                                 .font(FitFont.body(size: 13))
                                 .foregroundColor(FitTheme.textSecondary)
                         }
                         Spacer()
-                        WorkoutIconBadge(symbol: "sparkles")
+                        WorkoutIconBadge(symbol: "sparkles", accentColor: FitTheme.cardWorkoutAccent)
                     }
 
                     LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
@@ -305,8 +533,12 @@ struct WorkoutView: View {
                 }
             }
 
-            if !generatedExercises.isEmpty {
-                WorkoutCard {
+            if isGenerating {
+                WorkoutGeneratingCard()
+            }
+            
+            if !generatedExercises.isEmpty && !isGenerating {
+                WorkoutCard(isAccented: true) {
                     VStack(alignment: .leading, spacing: 14) {
                         HStack(alignment: .top) {
                             VStack(alignment: .leading, spacing: 4) {
@@ -328,7 +560,12 @@ struct WorkoutView: View {
                                 let detail = repsText.isEmpty
                                     ? "\(exercise.sets.count) sets"
                                     : "\(exercise.sets.count) x \(repsText)"
-                                ExerciseRow(name: exercise.name, detail: detail, badgeText: "\(index + 1)")
+                                ExerciseRow(
+                                    name: exercise.name,
+                                    detail: detail,
+                                    badgeText: "\(index + 1)",
+                                    onTap: { editingGeneratedIndex = index }
+                                )
                                     .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                                         Button(role: .destructive) {
                                             generatedExercises.remove(at: index)
@@ -437,6 +674,9 @@ struct WorkoutView: View {
                             title: template.title,
                             subtitle: template.mode.uppercased(),
                             detail: template.description ?? "Saved workout template",
+                            onPreview: {
+                                presentTemplatePreview(template)
+                            },
                             onStart: {
                                 Task {
                                     await startSession(from: template)
@@ -548,7 +788,7 @@ struct WorkoutView: View {
 
     private var sampleSessionExercises: [WorkoutExerciseSession] {
         [
-            WorkoutExerciseSession(
+            withWarmupRest(WorkoutExerciseSession(
                 name: "Bench Press",
                 sets: [
                     WorkoutSetEntry(reps: "8", weight: "185", isComplete: false),
@@ -556,8 +796,8 @@ struct WorkoutView: View {
                     WorkoutSetEntry(reps: "6", weight: "195", isComplete: false)
                 ],
                 restSeconds: 90
-            ),
-            WorkoutExerciseSession(
+            )),
+            withWarmupRest(WorkoutExerciseSession(
                 name: "Incline Dumbbell Press",
                 sets: [
                     WorkoutSetEntry(reps: "10", weight: "65", isComplete: false),
@@ -565,8 +805,8 @@ struct WorkoutView: View {
                     WorkoutSetEntry(reps: "8", weight: "70", isComplete: false)
                 ],
                 restSeconds: 75
-            ),
-            WorkoutExerciseSession(
+            )),
+            withWarmupRest(WorkoutExerciseSession(
                 name: "Cable Fly",
                 sets: [
                     WorkoutSetEntry(reps: "12", weight: "40", isComplete: false),
@@ -574,7 +814,7 @@ struct WorkoutView: View {
                     WorkoutSetEntry(reps: "12", weight: "40", isComplete: false)
                 ],
                 restSeconds: 60
-            )
+            ))
         ]
     }
 
@@ -583,11 +823,215 @@ struct WorkoutView: View {
     }
 
     private var spotlightExercises: [WorkoutExerciseSession] {
-        generatedExercises.isEmpty ? defaultRecommendedExercises : generatedExercises
+        if !coachPickExercises.isEmpty {
+            return coachPickExercises
+        }
+        return generatedExercises.isEmpty ? defaultRecommendedExercises : generatedExercises
     }
 
-    private var spotlightSubtitle: String {
-        generatedExercises.isEmpty ? "Upper Strength" : generatedTitle
+    private var trainingPreviewExercises: [String] {
+        let names = spotlightExercises.map { $0.name }.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        return Array(names.prefix(3))
+    }
+
+    private var todaysTrainingCard: some View {
+        let label = splitLabel(for: Date())
+        let completion = todaysWorkout ?? WorkoutCompletionStore.completion(on: Date())
+        let isCompleted = completion != nil
+        let isCoachPick = coachPickTemplateId != nil && !coachPickExercises.isEmpty
+        let titleText = coachPickTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let displayTitle = (titleText?.isEmpty == false ? titleText! : "Today's Training")
+            .replacingOccurrences(of: "Coach's Pick: ", with: "")
+            .replacingOccurrences(of: "Coaches Pick: ", with: "")
+        let subtitle = isCoachPick ? "Coaches Pick" : (label ?? "Push Day")
+        let statusText = isCompleted ? "Completed" : (isCoachPick ? "" : subtitle)
+
+        let displayList: [String]
+        if let completion, !completion.exercises.isEmpty {
+            displayList = completion.exercises
+        } else {
+            displayList = trainingPreviewExercises
+        }
+        let previewList = Array(displayList.prefix(2))
+
+        return WorkoutCard(isAccented: true) {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 8) {
+                            Image(systemName: isCoachPick ? "sparkles" : "figure.run")
+                                .font(.system(size: 14))
+                                .foregroundColor(isCoachPick ? FitTheme.accent : FitTheme.cardWorkoutAccent)
+                            Text(displayTitle)
+                                .font(FitFont.body(size: 18))
+                                .fontWeight(.semibold)
+                                .foregroundColor(FitTheme.textPrimary)
+                        }
+
+                        HStack(spacing: 8) {
+                            if !isCompleted {
+                                Text("~\(selectedDurationMinutes) min")
+                                    .font(FitFont.body(size: 12))
+                                    .foregroundColor(FitTheme.textSecondary)
+
+                                Text("•")
+                                    .font(FitFont.body(size: 12))
+                                    .foregroundColor(FitTheme.textSecondary)
+                            }
+
+                            if !statusText.isEmpty {
+                                Text(statusText)
+                                    .font(FitFont.body(size: 12))
+                                    .foregroundColor(isCompleted ? FitTheme.success : FitTheme.cardWorkoutAccent)
+                            }
+
+                            if isCoachPick {
+                                WorkoutCoachPickPill()
+                            }
+                        }
+                    }
+
+                    Spacer()
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(previewList, id: \.self) { item in
+                        HStack(spacing: 8) {
+                            Circle()
+                                .fill(FitTheme.cardWorkoutAccent)
+                                .frame(width: 6, height: 6)
+                            Text(item)
+                                .font(FitFont.body(size: 14))
+                                .foregroundColor(FitTheme.textSecondary)
+                        }
+                    }
+
+                    if displayList.count > previewList.count {
+                        Text("+\(displayList.count - previewList.count) more exercises")
+                            .font(FitFont.body(size: 12))
+                            .foregroundColor(FitTheme.cardWorkoutAccent)
+                    }
+                }
+
+                if !isCompleted {
+                    HStack(spacing: 12) {
+                        ActionButton(title: "Start Workout", style: .primary) {
+                            Task {
+                                await startWeeklySplitSession(for: Date())
+                            }
+                        }
+                        ActionButton(title: "Swap", style: .secondary) {
+                            isSwapSheetPresented = true
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private let splitPreferencesKey = "fitai.onboarding.split.preferences"
+    private let onboardingFormKey = "fitai.onboarding.form"
+
+    private var weekDates: [Date] {
+        var calendar = Calendar.current
+        calendar.firstWeekday = 1
+        let today = Date()
+        let baseWeekStart = calendar.date(from: calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: today)) ?? today
+        let weekStart = calendar.date(byAdding: .day, value: weekOffset * 7, to: baseWeekStart) ?? baseWeekStart
+        return (0..<7).compactMap { calendar.date(byAdding: .day, value: $0, to: weekStart) }
+    }
+
+    private var splitDayRows: [String] {
+        defaultSplitDayNames(for: splitSnapshot.daysPerWeek)
+    }
+
+    private var weeklyAccentPalette: [Color] {
+        [
+            FitTheme.accent, // streak purple
+            Color(red: 0.10, green: 0.85, blue: 0.45), // bright green
+            Color(red: 0.95, green: 0.36, blue: 0.22), // vivid orange
+            Color(red: 0.10, green: 0.75, blue: 0.95), // bright cyan
+            Color(red: 0.97, green: 0.22, blue: 0.62), // hot pink
+            Color(red: 0.98, green: 0.76, blue: 0.20), // bright amber
+            Color(red: 0.27, green: 0.52, blue: 1.00)  // electric blue
+        ]
+    }
+
+    private var weekRangeLabel: String {
+        guard let start = weekDates.first, let end = weekDates.last else { return "This Week" }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d"
+        return "\(formatter.string(from: start)) - \(formatter.string(from: end))"
+    }
+
+    private func completionPreview(_ exercises: [String]) -> String {
+        let trimmed = exercises.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        guard !trimmed.isEmpty else { return "Session logged" }
+        let preview = trimmed.prefix(3)
+        let base = preview.joined(separator: " • ")
+        if trimmed.count > 3 {
+            return "\(base) +\(trimmed.count - 3) more"
+        }
+        return base
+    }
+
+    private func shortWeekdaySymbol(for date: Date) -> String {
+        let calendar = Calendar.current
+        let symbols = calendar.veryShortWeekdaySymbols.isEmpty ? calendar.shortWeekdaySymbols : calendar.veryShortWeekdaySymbols
+        let index = max(0, min(symbols.count - 1, calendar.component(.weekday, from: date) - 1))
+        return symbols[index].uppercased()
+    }
+
+    private func weeklyDayStatus(for date: Date) -> WeeklyDayStatus {
+        let label = splitLabel(for: date)
+        guard label != nil else { return .rest }
+
+        if Calendar.current.isDateInToday(date) {
+            if todaysWorkout != nil || WorkoutCompletionStore.hasCompletion(on: date) {
+                return .completed
+            }
+            return .today
+        }
+
+        if WorkoutCompletionStore.hasCompletion(on: date) {
+            return .completed
+        }
+
+        return .upcoming
+    }
+
+    private func weeklyDayDetail(for date: Date) -> WeeklyDayDetail {
+        let label = splitLabel(for: date)
+        let status = weeklyDayStatus(for: date)
+        let isTrainingDay = label != nil
+        let estimatedMinutes = isTrainingDay ? max(30, selectedDurationMinutes) : 0
+        let workoutName = label ?? "Rest"
+        return WeeklyDayDetail(
+            id: dateKey(for: date),
+            date: date,
+            workoutName: workoutName,
+            focus: splitSnapshot.focus,
+            estimatedMinutes: estimatedMinutes,
+            status: status,
+            isTrainingDay: isTrainingDay
+        )
+    }
+
+    private func startWeeklySplitSession(for date: Date) async {
+        let title = splitLabel(for: date) ?? "Today's Training"
+        if let coachId = coachPickTemplateId, !coachPickExercises.isEmpty {
+            await startSession(
+                title: title,
+                templateId: coachId,
+                exercises: coachPickExercises
+            )
+        } else {
+            await startSession(
+                title: title,
+                templateId: nil,
+                exercises: spotlightExercises
+            )
+        }
     }
 
     private func handleIntent(_ intent: WorkoutTabIntent) async {
@@ -606,9 +1050,198 @@ struct WorkoutView: View {
             if templates.isEmpty {
                 await loadWorkouts()
             }
+        case .startCoachPick(let templateId):
+            // Start a coach-generated workout
+            do {
+                let detail = try await WorkoutAPIService.shared.fetchTemplateDetail(templateId: templateId)
+                let exercises = detail.exercises.map { ex in
+                    let session = WorkoutExerciseSession(
+                        name: ex.name,
+                        sets: WorkoutSetEntry.batch(
+                            reps: "\(ex.reps ?? 10)",
+                            weight: "",
+                            count: ex.sets ?? 3
+                        ),
+                        restSeconds: ex.restSeconds ?? 60,
+                        notes: ex.notes ?? ""
+                    )
+                    return withWarmupRest(session)
+                }
+                await startSession(
+                    title: detail.template.title,
+                    templateId: templateId,
+                    exercises: exercises
+                )
+            } catch {
+                await MainActor.run {
+                    loadError = "Failed to load Coaches Pick workout."
+                    Haptics.error()
+                }
+            }
         }
         await MainActor.run {
             self.intent = nil
+        }
+    }
+
+    private func refreshSplitSnapshot() {
+        let calendar = Calendar.current
+        var mode: SplitCreationMode = .ai
+        var daysPerWeek = 3
+        var trainingDays: [String] = []
+        var focus = "Strength"
+
+        if let data = UserDefaults.standard.data(forKey: splitPreferencesKey),
+           let decoded = try? JSONDecoder().decode(SplitSetupPreferences.self, from: data) {
+            mode = SplitCreationMode(rawValue: decoded.mode) ?? .ai
+            daysPerWeek = min(max(decoded.daysPerWeek, 2), 7)
+            trainingDays = normalizedTrainingDays(decoded.trainingDays, targetCount: daysPerWeek)
+        } else if let data = UserDefaults.standard.data(forKey: onboardingFormKey),
+                  let form = try? JSONDecoder().decode(OnboardingForm.self, from: data) {
+            daysPerWeek = min(max(form.workoutDaysPerWeek, 2), 7)
+            trainingDays = normalizedTrainingDays([], targetCount: daysPerWeek)
+            focus = focusForGoal(form.goal)
+        } else {
+            trainingDays = normalizedTrainingDays([], targetCount: daysPerWeek)
+        }
+
+        if let data = UserDefaults.standard.data(forKey: onboardingFormKey),
+           let form = try? JSONDecoder().decode(OnboardingForm.self, from: data) {
+            focus = focusForGoal(form.goal)
+        }
+
+        if trainingDays.isEmpty {
+            let weekdays = calendar.weekdaySymbols
+            trainingDays = weekdays.prefix(daysPerWeek).map { $0 }
+        }
+
+        let name = splitDisplayName(daysPerWeek: daysPerWeek, mode: mode)
+        splitSnapshot = SplitSnapshot(
+            mode: mode,
+            daysPerWeek: daysPerWeek,
+            trainingDays: trainingDays,
+            focus: focus,
+            name: name
+        )
+    }
+
+    private func focusForGoal(_ goal: OnboardingForm.Goal?) -> String {
+        switch goal {
+        case .gainWeight:
+            return "Hypertrophy"
+        case .loseWeight, .loseWeightFast:
+            return "Fat loss + muscle"
+        case .maintain:
+            return "Strength"
+        case .none:
+            return "Strength"
+        }
+    }
+
+    private func splitDisplayName(daysPerWeek: Int, mode: SplitCreationMode) -> String {
+        if mode == .custom {
+            return "Custom Split"
+        }
+        switch daysPerWeek {
+        case 2:
+            return "Upper / Lower"
+        case 3:
+            return "Full Body"
+        case 4:
+            return "Upper / Lower"
+        case 5:
+            return "Hybrid Split"
+        case 6:
+            return "Push / Pull / Legs"
+        default:
+            return "Full Body"
+        }
+    }
+
+    private func defaultSplitDayNames(for daysPerWeek: Int) -> [String] {
+        switch daysPerWeek {
+        case 2:
+            return ["Upper", "Lower"]
+        case 3:
+            return ["Full Body A", "Full Body B", "Full Body C"]
+        case 4:
+            return ["Upper", "Lower", "Upper", "Lower"]
+        case 5:
+            return ["Push", "Pull", "Legs", "Upper", "Lower"]
+        case 6:
+            return ["Push", "Pull", "Legs", "Push", "Pull", "Legs"]
+        case 7:
+            return ["Full Body", "Full Body", "Full Body", "Full Body", "Full Body", "Full Body", "Full Body"]
+        default:
+            return ["Full Body"]
+        }
+    }
+
+    private func splitLabel(for date: Date) -> String? {
+        let weekday = weekdaySymbol(for: date)
+        guard let index = splitSnapshot.trainingDays.firstIndex(of: weekday) else {
+            return nil
+        }
+        let rows = splitDayRows
+        return index < rows.count ? rows[index] : rows.last
+    }
+
+    private func weekdaySymbol(for date: Date) -> String {
+        let calendar = Calendar.current
+        let index = max(0, min(calendar.weekdaySymbols.count - 1, calendar.component(.weekday, from: date) - 1))
+        return calendar.weekdaySymbols[index]
+    }
+
+    private func dateKey(for date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        return formatter.string(from: date)
+    }
+
+    private func normalizedTrainingDays(_ days: [String], targetCount: Int) -> [String] {
+        let availableDays = Calendar.current.weekdaySymbols
+        let filtered = days.filter { availableDays.contains($0) }
+        var ordered = availableDays.filter { filtered.contains($0) }
+
+        if ordered.count > targetCount {
+            ordered = Array(ordered.prefix(targetCount))
+        }
+
+        if ordered.count < targetCount {
+            for day in availableDays where !ordered.contains(day) {
+                ordered.append(day)
+                if ordered.count == targetCount {
+                    break
+                }
+            }
+        }
+
+        return ordered
+    }
+
+    private func presentTemplatePreview(_ template: WorkoutTemplate) {
+        previewTemplate = template
+        previewExercises = []
+        previewError = nil
+        isPreviewLoading = true
+        isTemplatePreviewPresented = true
+        Task {
+            do {
+                let detail = try await WorkoutAPIService.shared.fetchTemplateDetail(templateId: template.id)
+                await MainActor.run {
+                    previewTemplate = detail.template
+                    previewExercises = detail.exercises
+                    isPreviewLoading = false
+                }
+            } catch {
+                await MainActor.run {
+                    previewExercises = []
+                    previewError = "Unable to load workout preview."
+                    isPreviewLoading = false
+                }
+            }
         }
     }
 
@@ -616,13 +1249,20 @@ struct WorkoutView: View {
         guard !userId.isEmpty else {
             await MainActor.run {
                 loadError = "Missing user session. Please log in again."
+                Haptics.error()
             }
             return
         }
+        
+        await MainActor.run {
+            isLoading = true
+        }
+        
         do {
             let detail = try await WorkoutAPIService.shared.fetchTemplateDetail(templateId: template.id)
             guard !detail.exercises.isEmpty else {
                 await MainActor.run {
+                    isLoading = false
                     showPlaceholderAlert(
                         title: "Empty workout",
                         message: "This workout template has no exercises. Please edit it to add exercises."
@@ -631,12 +1271,27 @@ struct WorkoutView: View {
                 return
             }
             let exercises = sessionExercises(from: detail.exercises)
+            await MainActor.run {
+                isLoading = false
+            }
             await startSession(title: template.title, templateId: template.id, exercises: exercises)
         } catch {
             await MainActor.run {
+                isLoading = false
                 loadError = "Unable to start workout. \(error.localizedDescription)"
+                Haptics.error()
             }
         }
+    }
+
+    private func startSessionFromPreview() async {
+        guard let template = previewTemplate else { return }
+        if previewExercises.isEmpty {
+            await startSession(from: template)
+            return
+        }
+        let exercises = sessionExercises(from: previewExercises)
+        await startSession(title: template.title, templateId: template.id, exercises: exercises)
     }
 
     private func startSession(
@@ -644,7 +1299,8 @@ struct WorkoutView: View {
         templateId: String?,
         exercises: [WorkoutExerciseSession]
     ) async {
-        guard !exercises.isEmpty else {
+        let resolvedExercises = exercises.isEmpty ? defaultRecommendedExercises : exercises
+        guard !resolvedExercises.isEmpty else {
             await MainActor.run {
                 showPlaceholderAlert(
                     title: "No exercises",
@@ -654,36 +1310,33 @@ struct WorkoutView: View {
             return
         }
 
-        guard !userId.isEmpty else {
-            await MainActor.run {
-                activeSession = SessionDraft(
-                    sessionId: nil,
-                    title: title,
-                    exercises: exercises
-                )
-            }
-            return
+        await MainActor.run {
+            activeSession = SessionDraft(
+                sessionId: nil as String?,
+                title: title,
+                exercises: resolvedExercises
+            )
+            showActiveSession = true
         }
+
+        guard !userId.isEmpty else { return }
         do {
             let sessionId = try await WorkoutAPIService.shared.startSession(
                 userId: userId,
                 templateId: templateId
             )
             await MainActor.run {
+                guard showActiveSession else { return }
                 activeSession = SessionDraft(
                     sessionId: sessionId,
                     title: title,
-                    exercises: exercises
+                    exercises: resolvedExercises
                 )
             }
         } catch {
             await MainActor.run {
-                activeSession = SessionDraft(
-                    sessionId: nil,
-                    title: title,
-                    exercises: exercises
-                )
-                loadError = "Unable to connect to the server. Session started locally."
+                // Clear any error - session still works locally
+                loadError = nil
             }
         }
     }
@@ -744,20 +1397,14 @@ struct WorkoutView: View {
                 templates.insert(newTemplate, at: 0)
             }
             await loadWorkouts()
-            let exercises = draftExercises.map { exercise in
-                let repsValue = exercise.reps > 0 ? "\(exercise.reps)" : ""
-                return WorkoutExerciseSession(
-                    name: exercise.name,
-                    sets: WorkoutSetEntry.batch(reps: repsValue, weight: "", count: max(exercise.sets, 1)),
-                    restSeconds: exercise.restSeconds
-                )
-            }
-            await startSession(title: trimmedName, templateId: templateId, exercises: exercises)
             await MainActor.run {
                 draftName = ""
                 draftExercises = []
                 isSavingDraft = false
+                mode = .saved
                 Haptics.success()
+                // Show success message
+                showPlaceholderAlert(title: "Workout Saved!", message: "Your template has been saved. You can start it anytime from the Saved tab.")
             }
         } catch {
             await MainActor.run {
@@ -849,6 +1496,32 @@ struct WorkoutView: View {
         loadError = nil
     }
 
+    private func recoverSavedSession() {
+        guard let savedSession = WorkoutSessionStore.load() else {
+            recoveryInfo = nil
+            return
+        }
+        
+        let exercises = savedSession.exercises.map { $0.toWorkoutExerciseSession() }
+        
+        activeSession = SessionDraft(
+            sessionId: savedSession.sessionId,
+            title: savedSession.title,
+            exercises: exercises
+        )
+        showActiveSession = true
+        recoveryInfo = nil
+    }
+    
+    private func formatRecoveryTime(_ seconds: Int) -> String {
+        let hours = seconds / 3600
+        let minutes = (seconds % 3600) / 60
+        if hours > 0 {
+            return "\(hours)h \(minutes)m"
+        }
+        return "\(minutes)m"
+    }
+
     private var hasDraftChanges: Bool {
         !draftName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
         !draftExercises.isEmpty ||
@@ -859,21 +1532,31 @@ struct WorkoutView: View {
         guard !userId.isEmpty else {
             await MainActor.run {
                 loadError = "Missing user session. Please log in again."
+                Haptics.error()
             }
             return
         }
+        
+        await MainActor.run {
+            isLoading = true
+        }
+        
         do {
             let detail = try await WorkoutAPIService.shared.fetchTemplateDetail(templateId: template.id)
             await MainActor.run {
+                isLoading = false
                 editingTemplateId = template.id
                 draftName = detail.template.title
                 draftExercises = draftExercises(from: detail.exercises)
                 mode = .create
                 loadError = nil
+                Haptics.light()
             }
         } catch {
             await MainActor.run {
+                isLoading = false
                 loadError = "Unable to load template. \(error.localizedDescription)"
+                Haptics.error()
             }
         }
     }
@@ -909,13 +1592,6 @@ struct WorkoutView: View {
         }
     }
 
-    private func searchExercises(query: String) async -> [ExerciseDefinition] {
-        do {
-            return try await WorkoutAPIService.shared.searchExercises(query: query)
-        } catch {
-            return []
-        }
-    }
 
     private func draftExercises(from exercises: [WorkoutTemplateExercise]) -> [WorkoutExerciseDraft] {
         let sorted = exercises.sorted { ($0.position ?? 0) < ($1.position ?? 0) }
@@ -938,7 +1614,7 @@ struct WorkoutView: View {
             let setCount = normalizedSetCount(exercise.sets)
             let repsText = normalizedRepsText(exercise.reps)
             let restSeconds = normalizedRestSeconds(exercise.restSeconds)
-            return WorkoutExerciseSession(
+            let session = WorkoutExerciseSession(
                 name: exercise.name,
                 sets: WorkoutSetEntry.batch(
                     reps: repsText,
@@ -947,6 +1623,7 @@ struct WorkoutView: View {
                 ),
                 restSeconds: restSeconds
             )
+            return withWarmupRest(session)
         }
     }
 
@@ -978,16 +1655,94 @@ struct WorkoutView: View {
     private struct GeneratedExercise: Decodable {
         let name: String?
         let exercise: String?
+        let exerciseName: String?
         let sets: Int?
-        let reps: Int?
+        let reps: String?
         let restSeconds: Int?
         let rest: Int?
         let notes: String?
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: DynamicCodingKey.self)
+            name = Self.decodeLossyString(from: container, keys: ["name"])
+            exercise = Self.decodeLossyString(from: container, keys: ["exercise"])
+            exerciseName = Self.decodeLossyString(
+                from: container,
+                keys: ["exercise_name", "exerciseName", "movement", "movement_name", "movementName"]
+            )
+            sets = Self.decodeLossyInt(from: container, keys: ["sets", "set_count", "setCount"])
+            reps = Self.decodeLossyString(
+                from: container,
+                keys: ["reps", "rep_range", "repRange", "repetitions", "rep_count", "repCount"]
+            )
+            restSeconds = Self.decodeLossyInt(
+                from: container,
+                keys: ["rest_seconds", "restSeconds", "rest_time_seconds", "restTimeSeconds", "rest_time", "restTime", "rest"]
+            )
+            rest = Self.decodeLossyInt(from: container, keys: ["rest", "rest_seconds", "restSeconds"])
+            notes = Self.decodeLossyString(from: container, keys: ["notes", "note", "coaching_cues", "cues"])
+        }
+
+        private struct DynamicCodingKey: CodingKey {
+            let stringValue: String
+            let intValue: Int? = nil
+
+            init?(stringValue: String) {
+                self.stringValue = stringValue
+            }
+
+            init?(intValue: Int) {
+                return nil
+            }
+        }
+
+        private static func decodeLossyInt(
+            from container: KeyedDecodingContainer<DynamicCodingKey>,
+            keys: [String]
+        ) -> Int? {
+            for key in keys {
+                guard let codingKey = DynamicCodingKey(stringValue: key) else { continue }
+                if let value = try? container.decodeIfPresent(Int.self, forKey: codingKey) {
+                    return value
+                }
+                if let value = try? container.decodeIfPresent(String.self, forKey: codingKey) {
+                    if let number = firstNumber(in: value) {
+                        return number
+                    }
+                }
+            }
+            return nil
+        }
+
+        private static func decodeLossyString(
+            from container: KeyedDecodingContainer<DynamicCodingKey>,
+            keys: [String]
+        ) -> String? {
+            for key in keys {
+                guard let codingKey = DynamicCodingKey(stringValue: key) else { continue }
+                if let value = try? container.decodeIfPresent(String.self, forKey: codingKey) {
+                    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty {
+                        return trimmed
+                    }
+                }
+                if let value = try? container.decodeIfPresent(Int.self, forKey: codingKey) {
+                    return "\(value)"
+                }
+            }
+            return nil
+        }
+
+        private static func firstNumber(in value: String) -> Int? {
+            let parts = value.split { !$0.isNumber }
+            guard let first = parts.first else { return nil }
+            return Int(first)
+        }
     }
 
     private func parseGeneratedWorkout(_ text: String) -> ParsedGeneratedWorkout {
         if let payload = decodeGeneratedWorkout(from: text) {
-            let exercises = payload.exercises.flatMap { exercisesFromGenerated($0) } ?? []
+            let exercises = payload.exercises.map { exercisesFromGenerated($0) } ?? []
             if !exercises.isEmpty {
                 return ParsedGeneratedWorkout(
                     title: payload.title ?? "AI Generated Workout",
@@ -1004,7 +1759,28 @@ struct WorkoutView: View {
     }
 
     private func decodeGeneratedWorkout(from text: String) -> GeneratedWorkoutPayload? {
-        guard let data = extractJSONData(from: text) else { return nil }
+        let candidates = extractJSONCandidates(from: text)
+        for candidate in candidates {
+            if let payload = decodeGeneratedWorkoutCandidate(candidate) {
+                return payload
+            }
+        }
+        return nil
+    }
+
+    private func decodeGeneratedWorkoutCandidate(_ candidate: String) -> GeneratedWorkoutPayload? {
+        let sanitized = sanitizeJSONString(candidate)
+        guard let data = sanitized.data(using: .utf8) else { return nil }
+        if let payload = decodeGeneratedWorkout(from: data) {
+            return payload
+        }
+        if let object = try? JSONSerialization.jsonObject(with: data, options: []) {
+            return extractGeneratedPayload(from: object)
+        }
+        return nil
+    }
+
+    private func decodeGeneratedWorkout(from data: Data) -> GeneratedWorkoutPayload? {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
 
@@ -1015,25 +1791,102 @@ struct WorkoutView: View {
         }
 
         if let exercises = try? decoder.decode([GeneratedExercise].self, from: data) {
-            return GeneratedWorkoutPayload(title: nil, exercises: exercises)
+            return GeneratedWorkoutPayload(title: nil as String?, exercises: exercises)
         }
 
         return nil
     }
 
-    private func extractJSONData(from text: String) -> Data? {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.hasPrefix("{") || trimmed.hasPrefix("[") {
-            return trimmed.data(using: .utf8)
+    private func extractGeneratedPayload(from object: Any) -> GeneratedWorkoutPayload? {
+        if let payload = payloadFromJSON(object) {
+            return payload
         }
+        return nil
+    }
 
-        guard let firstBrace = trimmed.firstIndex(of: "{"),
-              let lastBrace = trimmed.lastIndex(of: "}") else {
+    private func payloadFromJSON(_ object: Any) -> GeneratedWorkoutPayload? {
+        if let dict = object as? [String: Any] {
+            if let payload = payloadFromDictionary(dict) {
+                return payload
+            }
+            let nestedKeys = ["workout", "template", "plan", "result", "data"]
+            for key in nestedKeys {
+                if let nested = dict[key], let payload = payloadFromJSON(nested) {
+                    return payload
+                }
+            }
             return nil
         }
+        if let array = object as? [Any],
+           let data = try? JSONSerialization.data(withJSONObject: array, options: []) {
+            return decodeGeneratedWorkout(from: data)
+        }
+        if let string = object as? String {
+            return decodeGeneratedWorkout(from: string)
+        }
+        return nil
+    }
 
-        let jsonSubstring = trimmed[firstBrace...lastBrace]
-        return String(jsonSubstring).data(using: .utf8)
+    private func payloadFromDictionary(_ dict: [String: Any]) -> GeneratedWorkoutPayload? {
+        guard dict["exercises"] != nil || dict["title"] != nil else { return nil }
+        guard let data = try? JSONSerialization.data(withJSONObject: dict, options: []) else {
+            return nil
+        }
+        return decodeGeneratedWorkout(from: data)
+    }
+
+    private func extractJSONCandidates(from text: String) -> [String] {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        var candidates: [String] = []
+
+        let fencePattern = "```(?:json)?\\s*([\\s\\S]*?)```"
+        if let regex = try? NSRegularExpression(pattern: fencePattern, options: []) {
+            let range = NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed)
+            regex.enumerateMatches(in: trimmed, options: [], range: range) { match, _, _ in
+                guard let match, match.numberOfRanges > 1,
+                      let captureRange = Range(match.range(at: 1), in: trimmed) else {
+                    return
+                }
+                let candidate = trimmed[captureRange].trimmingCharacters(in: .whitespacesAndNewlines)
+                if !candidate.isEmpty {
+                    candidates.append(candidate)
+                }
+            }
+        }
+
+        if trimmed.hasPrefix("{") || trimmed.hasPrefix("[") {
+            candidates.append(trimmed)
+        }
+
+        if let firstBrace = trimmed.firstIndex(of: "{"),
+           let lastBrace = trimmed.lastIndex(of: "}") {
+            candidates.append(String(trimmed[firstBrace...lastBrace]))
+        }
+
+        if let firstBracket = trimmed.firstIndex(of: "["),
+           let lastBracket = trimmed.lastIndex(of: "]") {
+            candidates.append(String(trimmed[firstBracket...lastBracket]))
+        }
+
+        var seen = Set<String>()
+        return candidates.filter { candidate in
+            let normalized = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !normalized.isEmpty else { return false }
+            if seen.contains(normalized) {
+                return false
+            }
+            seen.insert(normalized)
+            return true
+        }
+    }
+
+    private func sanitizeJSONString(_ text: String) -> String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(
+                of: #",\s*([}\]])"#,
+                with: "$1",
+                options: .regularExpression
+            )
     }
 
     private func exercisesFromGenerated(_ exercises: [GeneratedExercise]) -> [WorkoutExerciseSession] {
@@ -1042,17 +1895,24 @@ struct WorkoutView: View {
             let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmedName.isEmpty else { return nil }
             let lowerName = trimmedName.lowercased()
-            if lowerName == "rest_seconds" || lowerName == "rest" || lowerName == "reps" || lowerName == "sets" {
+            // Filter out placeholder names and JSON field names that leak through malformed AI responses
+            let invalidNames: Set<String> = [
+                "rest_seconds", "rest", "reps", "sets", "name", "exercise", "exercises",
+                "notes", "title", "exercise_name", "exercisename", "tempo", "duration",
+                "weight", "muscle_groups", "equipment", "workout", "template"
+            ]
+            if invalidNames.contains(lowerName) || lowerName.hasPrefix("\"") || lowerName.hasSuffix("\"") {
                 return nil
             }
             let sets = normalizedSetCount(item.sets)
             let repsText = normalizedRepsText(item.reps)
             let restSeconds = normalizedRestSeconds(item.restSeconds ?? item.rest)
-            return WorkoutExerciseSession(
+            let session = WorkoutExerciseSession(
                 name: trimmedName,
                 sets: WorkoutSetEntry.batch(reps: repsText, weight: "", count: sets),
                 restSeconds: restSeconds
             )
+            return withWarmupRest(session)
         }
     }
 
@@ -1069,7 +1929,7 @@ struct WorkoutView: View {
 
         var exercises: [WorkoutExerciseSession] = []
         for group in selected {
-            if let compound = exerciseLibrary[group]?.compound.first {
+            if let compound = Self.exerciseLibrary[group]?.compound.first {
                 exercises.append(makeSessionExercise(from: compound, sets: config.defaultSets))
             }
         }
@@ -1077,13 +1937,13 @@ struct WorkoutView: View {
         if exercises.count < config.minExercises {
             for group in selected {
                 guard exercises.count < config.minExercises else { break }
-                if let isolation = exerciseLibrary[group]?.isolation.first {
+                if let isolation = Self.exerciseLibrary[group]?.isolation.first {
                     exercises.append(makeSessionExercise(from: isolation, sets: config.defaultSets))
                 }
             }
         }
 
-        let allExtras = exerciseLibrary.values.flatMap { $0.compound + $0.isolation }
+        let allExtras = Self.exerciseLibrary.values.flatMap { $0.compound + $0.isolation }
         var extraIndex = 0
         while exercises.count < config.minExercises && extraIndex < allExtras.count {
             exercises.append(makeSessionExercise(from: allExtras[extraIndex], sets: config.defaultSets))
@@ -1116,7 +1976,7 @@ struct WorkoutView: View {
         exercises = reorderExercises(exercises)
         for group in selected {
             guard !exercises.contains(where: { isExerciseInGroup($0.name, group: group) }) else { continue }
-            if let seed = exerciseLibrary[group]?.compound.first {
+            if let seed = Self.exerciseLibrary[group]?.compound.first {
                 exercises.append(makeSessionExercise(from: seed, sets: config.defaultSets))
             }
         }
@@ -1196,6 +2056,13 @@ struct WorkoutView: View {
         return Int(round(Double(totalSeconds) / 60.0))
     }
 
+    private func clampedEstimateMinutes(_ estimate: Int, targetMinutes: Int) -> Int {
+        guard targetMinutes > 0 else { return max(estimate, 0) }
+        let lower = Int(Double(targetMinutes) * 0.9)
+        let upper = Int(Double(targetMinutes) * 1.1)
+        return min(max(estimate, lower), upper)
+    }
+
     private struct DurationConfig {
         let minExercises: Int
         let maxExercises: Int
@@ -1231,8 +2098,7 @@ struct WorkoutView: View {
         let restSeconds: Int
     }
 
-    private var exerciseLibrary: [String: ExercisePool] {
-        [
+    private static let exerciseLibrary: [String: ExercisePool] = [
             "chest": ExercisePool(
                 compound: [
                     ExerciseSeed(name: "Bench Press", restSeconds: 90),
@@ -1271,14 +2137,17 @@ struct WorkoutView: View {
                     ExerciseSeed(name: "Tricep Pushdown", restSeconds: 60)
                 ]
             ),
-            "legs": ExercisePool(
+            "quads": ExercisePool(
                 compound: [
                     ExerciseSeed(name: "Back Squat", restSeconds: 120),
-                    ExerciseSeed(name: "Leg Press", restSeconds: 90)
+                    ExerciseSeed(name: "Front Squat", restSeconds: 120),
+                    ExerciseSeed(name: "Leg Press", restSeconds: 90),
+                    ExerciseSeed(name: "Hack Squat", restSeconds: 90)
                 ],
                 isolation: [
                     ExerciseSeed(name: "Leg Extension", restSeconds: 60),
-                    ExerciseSeed(name: "Leg Curl", restSeconds: 60)
+                    ExerciseSeed(name: "Sissy Squat", restSeconds: 60),
+                    ExerciseSeed(name: "Walking Lunge", restSeconds: 60)
                 ]
             ),
             "core": ExercisePool(
@@ -1328,14 +2197,15 @@ struct WorkoutView: View {
                 ]
             )
         ]
-    }
 
     private func makeSessionExercise(from seed: ExerciseSeed, sets: Int) -> WorkoutExerciseSession {
-        WorkoutExerciseSession(
+        var session = WorkoutExerciseSession(
             name: seed.name,
             sets: WorkoutSetEntry.batch(reps: "10", weight: "", count: max(sets, 1)),
             restSeconds: normalizedRestSeconds(seed.restSeconds)
         )
+        session.warmupRestSeconds = min(60, session.restSeconds)
+        return session
     }
 
     private func normalizedSetCount(_ value: Int?) -> Int {
@@ -1344,9 +2214,21 @@ struct WorkoutView: View {
     }
 
     private func normalizedRepsText(_ value: Int?) -> String {
-        let reps = value ?? 0
-        if reps > 0 {
-            return "\(reps)"
+        if let value {
+            return normalizedRepsText("\(value)")
+        }
+        return "10"
+    }
+
+    private func normalizedRepsText(_ value: String?) -> String {
+        guard let value else { return "10" }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "10" }
+        if let match = regexMatch(#"(\d+\s*-\s*\d+)"#, in: trimmed, captureCount: 1) {
+            return match.captures[0].replacingOccurrences(of: " ", with: "")
+        }
+        if let match = regexMatch(#"(\d+)"#, in: trimmed, captureCount: 1) {
+            return match.captures[0]
         }
         return "10"
     }
@@ -1356,12 +2238,18 @@ struct WorkoutView: View {
         return min(max(rest, 30), 150)
     }
 
+    private func withWarmupRest(_ session: WorkoutExerciseSession) -> WorkoutExerciseSession {
+        var updated = session
+        updated.warmupRestSeconds = min(60, updated.restSeconds)
+        return updated
+    }
+
     private func ensureSetCount(_ exercise: WorkoutExerciseSession, minSets: Int, maxSets: Int) -> WorkoutExerciseSession {
         let sets = min(max(exercise.sets.count, minSets), maxSets)
         if sets == exercise.sets.count {
             return exercise
         }
-        return WorkoutExerciseSession(
+        var updated = WorkoutExerciseSession(
             name: exercise.name,
             sets: WorkoutSetEntry.batch(
                 reps: exercise.sets.first?.reps ?? "10",
@@ -1370,6 +2258,8 @@ struct WorkoutView: View {
             ),
             restSeconds: exercise.restSeconds
         )
+        updated.warmupRestSeconds = exercise.warmupRestSeconds
+        return updated
     }
 
     private func incrementSets(_ exercise: WorkoutExerciseSession) -> WorkoutExerciseSession {
@@ -1411,7 +2301,7 @@ struct WorkoutView: View {
             : Array(selectedMuscleGroups)
 
         for group in selected {
-            if let pool = exerciseLibrary[group] {
+            if let pool = Self.exerciseLibrary[group] {
                 for seed in pool.isolation + pool.compound {
                     if !existingNames.contains(seed.name) {
                         let config = durationConfig(for: selectedDurationMinutes)
@@ -1433,28 +2323,48 @@ struct WorkoutView: View {
     }
 
     private func isExerciseInGroup(_ name: String, group: String) -> Bool {
-        guard let pool = exerciseLibrary[group] else { return false }
+        guard let pool = Self.exerciseLibrary[group] else { return false }
         let matches = (pool.compound + pool.isolation).map { $0.name.lowercased() }
         return matches.contains(name.lowercased())
     }
 
     private func parseExerciseLine(_ line: String) -> WorkoutExerciseSession? {
         let cleaned = stripBulletPrefix(line)
-        guard !cleaned.isEmpty else { return nil }
-        let lower = cleaned.lowercased()
+        let trimmed = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let lower = trimmed.lowercased()
+        if lower == "{" || lower == "}" || lower == "[" || lower == "]" {
+            return nil
+        }
+        let jsonKeys = [
+            "exercises", "exercise", "name", "notes", "sets", "reps", "rest", "rest_seconds", "title"
+        ]
+        if let separator = trimmed.firstIndex(of: ":") {
+            let keyCandidate = trimmed[..<separator]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+                .lowercased()
+            if jsonKeys.contains(keyCandidate) {
+                return nil
+            }
+        }
+        let lowerKey = lower.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+        if jsonKeys.contains(lowerKey) {
+            return nil
+        }
         if lower.contains("rest_seconds") || lower.hasPrefix("rest:") || lower.hasPrefix("reps:")
             || lower.hasPrefix("sets:") || lower.hasPrefix("rest seconds") {
             return nil
         }
 
-        let parsed = extractSetReps(from: cleaned)
-        let restSeconds = normalizedRestSeconds(extractRest(from: cleaned))
+        let parsed = extractSetReps(from: trimmed)
+        let restSeconds = normalizedRestSeconds(extractRest(from: trimmed))
 
-        var name = cleaned
-        if let range = firstSeparatorRange(in: cleaned) {
-            name = String(cleaned[..<range.lowerBound])
-        } else if let matchRange = parsed.matchRange, let range = Range(matchRange, in: cleaned) {
-            name = cleaned.replacingCharacters(in: range, with: "")
+        var name = trimmed
+        if let range = firstSeparatorRange(in: trimmed) {
+            name = String(trimmed[..<range.lowerBound])
+        } else if let matchRange = parsed.matchRange, let range = Range(matchRange, in: trimmed) {
+            name = trimmed.replacingCharacters(in: range, with: "")
         }
 
         name = name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1463,11 +2373,12 @@ struct WorkoutView: View {
         let setCount = normalizedSetCount(parsed.sets)
         let repsText = parsed.repsText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "10"
 
-        return WorkoutExerciseSession(
+        let session = WorkoutExerciseSession(
             name: name,
             sets: WorkoutSetEntry.batch(reps: repsText, weight: "", count: setCount),
             restSeconds: restSeconds
         )
+        return withWarmupRest(session)
     }
 
     private func stripBulletPrefix(_ line: String) -> String {
@@ -1573,11 +2484,15 @@ struct WorkoutView: View {
                 targetMinutes: selectedDurationMinutes
             )
             let estimate = estimateWorkoutMinutes(adjustedExercises)
+            let clampedEstimate = clampedEstimateMinutes(
+                estimate,
+                targetMinutes: selectedDurationMinutes
+            )
             await MainActor.run {
                 generatedPreview = result.isEmpty ? "Workout generated." : result
                 generatedTitle = parsed.exercises.isEmpty ? "Quick Build" : parsed.title
                 generatedExercises = adjustedExercises
-                generatedEstimatedMinutes = estimate
+                generatedEstimatedMinutes = clampedEstimate
                 if generatedExercises.isEmpty && !result.isEmpty {
                     loadError = "Generated workout couldn't be parsed."
                 }
@@ -1589,10 +2504,14 @@ struct WorkoutView: View {
                 targetMinutes: selectedDurationMinutes
             )
             let estimate = estimateWorkoutMinutes(fallback)
+            let clampedEstimate = clampedEstimateMinutes(
+                estimate,
+                targetMinutes: selectedDurationMinutes
+            )
             await MainActor.run {
                 generatedTitle = "Quick Build"
                 generatedExercises = fallback
-                generatedEstimatedMinutes = estimate
+                generatedEstimatedMinutes = clampedEstimate
                 loadError = "Server unavailable. Using quick build."
                 isGenerating = false
             }
@@ -1611,10 +2530,42 @@ struct WorkoutView: View {
                 self.templates = templates
                 self.isLoading = false
             }
+            await loadCoachPickWorkout(from: templates)
         } catch {
             await MainActor.run {
                 self.loadError = "Unable to load workouts."
                 self.isLoading = false
+            }
+            await MainActor.run {
+                coachPickTemplateId = nil
+                coachPickTitle = nil
+                coachPickExercises = []
+            }
+        }
+    }
+
+    private func loadCoachPickWorkout(from templates: [WorkoutTemplate]) async {
+        guard let coachTemplate = templates.first(where: { $0.mode == "coach" }) else {
+            await MainActor.run {
+                coachPickTemplateId = nil
+                coachPickTitle = nil
+                coachPickExercises = []
+            }
+            return
+        }
+        do {
+            let detail = try await WorkoutAPIService.shared.fetchTemplateDetail(templateId: coachTemplate.id)
+            let exercises = sessionExercises(from: detail.exercises)
+            await MainActor.run {
+                coachPickTemplateId = coachTemplate.id
+                coachPickTitle = coachTemplate.title
+                coachPickExercises = exercises
+            }
+        } catch {
+            await MainActor.run {
+                coachPickTemplateId = nil
+                coachPickTitle = nil
+                coachPickExercises = []
             }
         }
     }
@@ -1625,204 +2576,69 @@ struct WorkoutView: View {
         showAlert = true
     }
 }
-
-private struct WorkoutStreakHeader: View {
-    let streakCount: Int
-
+private struct CoachPickBadge: View {
     var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "flame.fill")
-                .font(FitFont.body(size: 18, weight: .semibold))
-                .foregroundColor(FitTheme.accent)
-                .frame(width: 40, height: 40)
-                .background(FitTheme.cardBackground)
-                .clipShape(Circle())
-                .overlay(
-                    Circle()
-                        .stroke(FitTheme.cardStroke.opacity(0.6), lineWidth: 1)
-                )
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Workout streak")
-                    .font(FitFont.body(size: 12))
-                    .foregroundColor(FitTheme.textSecondary)
-                Text("\(max(streakCount, 0)) days")
-                    .font(FitFont.heading(size: 22))
-                    .foregroundColor(FitTheme.textPrimary)
-            }
-
-            Spacer()
+        HStack(spacing: 4) {
+            Image(systemName: "sparkles")
+                .font(.system(size: 10, weight: .bold))
+            Text("COACHES PICK")
+                .font(FitFont.body(size: 10, weight: .bold))
+                .tracking(0.6)
         }
-        .padding(16)
-        .background(FitTheme.cardBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .stroke(FitTheme.cardStroke.opacity(0.6), lineWidth: 1)
-        )
-        .shadow(color: FitTheme.shadow.opacity(0.8), radius: 12, x: 0, y: 8)
-    }
-}
-
-private struct WorkoutStatCard: View {
-    let title: String
-    let value: String
-    let detail: String
-    let symbol: String
-    let accent: Color
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Image(systemName: symbol)
-                .font(FitFont.body(size: 13, weight: .semibold))
-                .foregroundColor(accent)
-
-            Text(value)
-                .font(FitFont.heading(size: 18, weight: .bold))
-                .foregroundColor(FitTheme.textPrimary)
-
-            Text(title)
-                .font(FitFont.body(size: 12, weight: .semibold))
-                .foregroundColor(FitTheme.textPrimary)
-
-            Text(detail)
-                .font(FitFont.body(size: 11))
-                .foregroundColor(FitTheme.textSecondary)
-        }
-        .padding(12)
-        .frame(width: 150, alignment: .leading)
+        .foregroundColor(.white)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
         .background(
-            ZStack {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(FitTheme.cardBackground)
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(accent.opacity(0.08))
-            }
+            LinearGradient(
+                colors: [FitTheme.cardCoachAccent, FitTheme.cardCoachAccent.opacity(0.6)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
         )
-        .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(FitTheme.cardStroke.opacity(0.6), lineWidth: 1)
-        )
-        .shadow(color: FitTheme.shadow.opacity(0.8), radius: 12, x: 0, y: 8)
-    }
-}
-
-private struct WorkoutSpotlightCard: View {
-    let title: String
-    let subtitle: String
-    let durationMinutes: Int
-    let exercises: [String]
-    let completedExercises: [String]
-    let isCompleted: Bool
-    let onStart: () -> Void
-    let onSwap: () -> Void
-
-    private var previewExercises: [String] {
-        Array((displayExercises).prefix(4))
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .top, spacing: 12) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(title)
-                        .font(FitFont.heading(size: 22))
-                        .foregroundColor(FitTheme.textPrimary)
-                    if isCompleted {
-                        Text("Completed today")
-                            .font(FitFont.body(size: 13))
-                            .foregroundColor(FitTheme.success)
-                    } else {
-                        Text(subtitle)
-                            .font(FitFont.body(size: 13))
-                            .foregroundColor(FitTheme.textSecondary)
-                    }
-                }
-                Spacer()
-                WorkoutIconBadge(symbol: isCompleted ? "checkmark.seal.fill" : "bolt.fill")
-            }
-
-            if !isCompleted {
-                HStack(spacing: 8) {
-                    SummaryPill(title: "Duration", value: "\(durationMinutes) min")
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    SummaryPill(title: "Style", value: "Strength")
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 6) {
-                ForEach(previewExercises, id: \.self) { name in
-                    HStack(spacing: 8) {
-                        Circle()
-                            .fill(FitTheme.accent)
-                            .frame(width: 6, height: 6)
-                        Text(name)
-                            .font(FitFont.body(size: 13))
-                            .foregroundColor(FitTheme.textSecondary)
-                    }
-                }
-                if displayExercises.count > previewExercises.count {
-                    Text("+\(displayExercises.count - previewExercises.count) more")
-                        .font(FitFont.body(size: 12))
-                        .foregroundColor(FitTheme.textSecondary)
-                }
-            }
-
-            if !isCompleted {
-                HStack(spacing: 12) {
-                    ActionButton(title: "Start Session", style: .primary, action: onStart)
-                        .frame(maxWidth: .infinity)
-                    ActionButton(title: "Swap", style: .secondary, action: onSwap)
-                        .frame(maxWidth: .infinity)
-                }
-            }
-        }
-        .padding(20)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            ZStack {
-                RoundedRectangle(cornerRadius: 28, style: .continuous)
-                    .fill(FitTheme.cardBackground)
-                RoundedRectangle(cornerRadius: 28, style: .continuous)
-                    .fill(FitTheme.primaryGradient.opacity(0.12))
-            }
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 28, style: .continuous)
-                .stroke(FitTheme.cardStroke.opacity(0.6), lineWidth: 1)
-        )
-        .shadow(color: FitTheme.shadow, radius: 18, x: 0, y: 10)
-    }
-
-    private var displayExercises: [String] {
-        if isCompleted, !completedExercises.isEmpty {
-            return completedExercises
-        }
-        return exercises
+        .clipShape(Capsule())
+        .shadow(color: FitTheme.cardCoachAccent.opacity(0.25), radius: 6, x: 0, y: 4)
     }
 }
 
 private struct WorkoutHeroCard<Content: View>: View {
+    var onTap: (() -> Void)?
     @ViewBuilder let content: Content
+    
+    init(onTap: (() -> Void)? = nil, @ViewBuilder content: () -> Content) {
+        self.onTap = onTap
+        self.content = content()
+    }
 
     var body: some View {
+        Group {
+            if let onTap = onTap {
+                Button(action: onTap) {
+                    cardContent
+                }
+                .buttonStyle(.plain)
+            } else {
+                cardContent
+            }
+        }
+    }
+    
+    private var cardContent: some View {
         content
             .padding(20)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 ZStack {
                     RoundedRectangle(cornerRadius: 28, style: .continuous)
-                        .fill(FitTheme.cardBackground)
+                        .fill(FitTheme.cardWorkout)
                     RoundedRectangle(cornerRadius: 28, style: .continuous)
-                        .fill(FitTheme.primaryGradient.opacity(0.12))
+                        .fill(FitTheme.cardWorkoutAccent.opacity(0.1))
                 }
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 28, style: .continuous)
-                    .stroke(FitTheme.cardStroke.opacity(0.6), lineWidth: 1)
+                    .stroke(FitTheme.cardWorkoutAccent.opacity(0.3), lineWidth: 1.5)
             )
-            .shadow(color: FitTheme.shadow, radius: 18, x: 0, y: 10)
+            .shadow(color: FitTheme.cardWorkoutAccent.opacity(0.15), radius: 18, x: 0, y: 10)
     }
 }
 
@@ -1880,15 +2696,366 @@ private struct WorkoutTunePlanSheet: View {
 
 private struct WorkoutIconBadge: View {
     let symbol: String
+    var accentColor: Color = FitTheme.accent
 
     var body: some View {
         Image(systemName: symbol)
             .font(FitFont.body(size: 14, weight: .bold))
             .foregroundColor(FitTheme.buttonText)
             .padding(10)
-            .background(FitTheme.primaryGradient)
+            .background(accentColor)
             .clipShape(Circle())
-            .shadow(color: FitTheme.buttonShadow, radius: 10, x: 0, y: 6)
+            .shadow(color: accentColor.opacity(0.4), radius: 10, x: 0, y: 6)
+    }
+}
+
+private struct SplitSnapshot {
+    var mode: SplitCreationMode = .ai
+    var daysPerWeek: Int = 3
+    var trainingDays: [String] = []
+    var focus: String = "Strength"
+    var name: String = "Full Body"
+}
+
+private enum WeeklyDayStatus {
+    case completed
+    case today
+    case upcoming
+    case rest
+
+    var label: String {
+        switch self {
+        case .completed:
+            return "Completed"
+        case .today:
+            return "Today"
+        case .upcoming:
+            return "Upcoming"
+        case .rest:
+            return "Rest"
+        }
+    }
+}
+
+private struct WeeklyDayDetail: Identifiable {
+    let id: String
+    let date: Date
+    let workoutName: String
+    let focus: String
+    let estimatedMinutes: Int
+    let status: WeeklyDayStatus
+    let isTrainingDay: Bool
+}
+
+private struct WeeklySplitDayCell: View {
+    let daySymbol: String
+    let dayNumber: Int
+    let status: WeeklyDayStatus
+    let isSelected: Bool
+    let isTrainingDay: Bool
+    let accentColor: Color
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            ZStack(alignment: .topTrailing) {
+                VStack(spacing: 6) {
+                    Text(daySymbol)
+                        .font(FitFont.body(size: 10, weight: .semibold))
+                        .foregroundColor(topTextColor)
+                    Text("\(dayNumber)")
+                        .font(FitFont.body(size: 18, weight: .bold))
+                        .foregroundColor(mainTextColor)
+                }
+                .frame(maxWidth: .infinity, minHeight: 64)
+                .background(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(backgroundColor)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(borderColor, lineWidth: isSelected ? 0 : 1)
+                )
+                .shadow(color: shadowColor, radius: shadowRadius, x: 0, y: shadowOffsetY)
+
+                if status == .completed {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(FitTheme.textOnAccent)
+                        .padding(6)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var backgroundColor: Color {
+        if isSelected, isTrainingDay {
+            return accentColor
+        }
+        if !isTrainingDay {
+            return isSelected ? FitTheme.cardHighlight.opacity(0.8) : FitTheme.cardHighlight
+        }
+        switch status {
+        case .completed:
+            return accentColor
+        case .today:
+            return accentColor.opacity(0.28)
+        case .upcoming:
+            return accentColor.opacity(0.18)
+        case .rest:
+            return FitTheme.cardHighlight
+        }
+    }
+
+    private var borderColor: Color {
+        if isSelected, isTrainingDay {
+            return accentColor
+        }
+        if isSelected, !isTrainingDay {
+            return FitTheme.cardStroke.opacity(0.7)
+        }
+        switch status {
+        case .today:
+            return accentColor
+        case .upcoming:
+            return accentColor.opacity(0.5)
+        case .rest:
+            return FitTheme.cardStroke.opacity(0.4)
+        case .completed:
+            return accentColor
+        }
+    }
+
+    private var shadowColor: Color {
+        isSelected ? FitTheme.shadow.opacity(0.45) : FitTheme.shadow.opacity(0.25)
+    }
+
+    private var shadowRadius: CGFloat {
+        isSelected ? 10 : 6
+    }
+
+    private var shadowOffsetY: CGFloat {
+        isSelected ? 8 : 4
+    }
+
+    private var topTextColor: Color {
+        if isSelected, isTrainingDay { return FitTheme.textOnAccent.opacity(0.9) }
+        return FitTheme.textSecondary
+    }
+
+    private var mainTextColor: Color {
+        if isSelected, isTrainingDay { return FitTheme.textOnAccent }
+        return FitTheme.textPrimary
+    }
+}
+
+private struct WeeklySplitInlineDetailCard: View {
+    let day: WeeklyDayDetail
+    let completion: WorkoutCompletion?
+    let onPrimaryAction: () -> Void
+    let onSwap: () -> Void
+    let onGenerate: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(dayHeader)
+                        .font(FitFont.body(size: 12, weight: .semibold))
+                        .foregroundColor(FitTheme.textSecondary)
+                    Text(dayTitle)
+                        .font(FitFont.heading(size: 18, weight: .bold))
+                        .foregroundColor(FitTheme.textPrimary)
+                }
+                Spacer()
+                statusPill
+            }
+
+            if let completion, !completion.exercises.isEmpty {
+                Text("Completed: \(completionSummary(completion.exercises))")
+                    .font(FitFont.body(size: 12))
+                    .foregroundColor(FitTheme.textSecondary)
+            } else if day.isTrainingDay {
+                Text("Planned: \(day.workoutName)")
+                    .font(FitFont.body(size: 12))
+                    .foregroundColor(FitTheme.textSecondary)
+            } else {
+                Text("Rest day. Generate a workout if you want to train.")
+                    .font(FitFont.body(size: 12))
+                    .foregroundColor(FitTheme.textSecondary)
+            }
+
+            HStack(spacing: 10) {
+                detailPill(title: "Est. time", value: day.estimatedMinutes > 0 ? "\(day.estimatedMinutes) min" : "Rest")
+                detailPill(title: "Focus", value: day.focus)
+            }
+
+            ActionButton(title: primaryButtonTitle, style: .primary) {
+                onPrimaryAction()
+            }
+            .frame(maxWidth: .infinity)
+
+            HStack(spacing: 10) {
+                ActionButton(title: "Swap", style: .secondary) {
+                    onSwap()
+                }
+                .frame(maxWidth: .infinity)
+
+                if shouldShowGenerateSecondary {
+                    ActionButton(title: "Generate", style: .secondary) {
+                        onGenerate()
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+            }
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(FitTheme.cardWorkout)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(FitTheme.cardStroke.opacity(0.6), lineWidth: 1)
+        )
+    }
+
+    private var dayTitle: String {
+        day.isTrainingDay ? day.workoutName : "Rest"
+    }
+
+    private var dayHeader: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "EEE, MMM d"
+        return formatter.string(from: day.date)
+    }
+
+    private var primaryButtonTitle: String {
+        if day.isTrainingDay, completion == nil {
+            return "Start workout"
+        }
+        if completion != nil {
+            return "Repeat workout"
+        }
+        return "Generate workout"
+    }
+
+    private var shouldShowGenerateSecondary: Bool {
+        day.isTrainingDay
+    }
+
+    @ViewBuilder
+    private var statusPill: some View {
+        Text(day.status.label)
+            .font(FitFont.body(size: 10, weight: .semibold))
+            .foregroundColor(statusColor)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(statusColor.opacity(0.12))
+            .clipShape(Capsule())
+    }
+
+    private var statusColor: Color {
+        switch day.status {
+        case .completed:
+            return FitTheme.success
+        case .today:
+            return FitTheme.accent
+        case .upcoming:
+            return FitTheme.textSecondary
+        case .rest:
+            return FitTheme.textSecondary
+        }
+    }
+
+    private func completionSummary(_ exercises: [String]) -> String {
+        let trimmed = exercises.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        guard !trimmed.isEmpty else { return "Session logged" }
+        let preview = trimmed.prefix(3)
+        let base = preview.joined(separator: " • ")
+        if trimmed.count > 3 {
+            return "\(base) +\(trimmed.count - 3) more"
+        }
+        return base
+    }
+
+    private func detailPill(title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title.uppercased())
+                .font(FitFont.body(size: 9, weight: .semibold))
+                .foregroundColor(FitTheme.textSecondary)
+            Text(value)
+                .font(FitFont.body(size: 12, weight: .semibold))
+                .foregroundColor(FitTheme.textPrimary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(FitTheme.cardBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+}
+
+private struct WeeklySplitDetailSheet: View {
+    let day: WeeklyDayDetail
+    let onStart: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(weekdayLabel)
+                    .font(FitFont.heading(size: 22))
+                    .foregroundColor(FitTheme.textPrimary)
+                Text(day.workoutName)
+                    .font(FitFont.body(size: 16, weight: .semibold))
+                    .foregroundColor(FitTheme.textSecondary)
+            }
+
+            HStack(spacing: 12) {
+                detailPill(title: "Est. time", value: day.estimatedMinutes > 0 ? "\(day.estimatedMinutes) min" : "Rest")
+                detailPill(title: "Focus", value: day.focus)
+            }
+
+            Button(action: onStart) {
+                Text(day.isTrainingDay ? "Start workout" : "No workout scheduled")
+                    .font(FitFont.body(size: 15, weight: .semibold))
+                    .foregroundColor(FitTheme.buttonText)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+                    .background(FitTheme.primaryGradient)
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+            .disabled(!day.isTrainingDay)
+            .opacity(day.isTrainingDay ? 1.0 : 0.4)
+
+            Spacer()
+        }
+        .padding(24)
+    }
+
+    private var weekdayLabel: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "EEEE"
+        return formatter.string(from: day.date)
+    }
+
+    private func detailPill(title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(FitFont.body(size: 11, weight: .semibold))
+                .foregroundColor(FitTheme.textSecondary)
+            Text(value)
+                .font(FitFont.body(size: 14, weight: .semibold))
+                .foregroundColor(FitTheme.textPrimary)
+        }
+        .padding(.vertical, 8)
+        .padding(.horizontal, 12)
+        .background(FitTheme.cardBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(FitTheme.cardStroke.opacity(0.7), lineWidth: 1)
+        )
     }
 }
 
@@ -2011,9 +3178,9 @@ private struct SelectableChip: View {
             .background(
                 Group {
                     if isSelected {
-                        FitTheme.primaryGradient
+                        FitTheme.cardWorkoutAccent
                     } else {
-                        FitTheme.cardBackground
+                        FitTheme.cardWorkout
                     }
                 }
             )
@@ -2046,16 +3213,16 @@ private struct DurationChip: View {
             .background(
                 Group {
                     if isSelected {
-                        FitTheme.primaryGradient
+                        FitTheme.cardWorkoutAccent
                     } else {
-                        FitTheme.cardBackground
+                        FitTheme.cardWorkout
                     }
                 }
             )
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(FitTheme.cardStroke.opacity(0.6), lineWidth: isSelected ? 0 : 1)
+                    .stroke(FitTheme.cardWorkoutAccent.opacity(0.3), lineWidth: isSelected ? 0 : 1)
             )
         }
         .buttonStyle(.plain)
@@ -2228,31 +3395,178 @@ private struct ExerciseRow: View {
     }
 }
 
+private struct GeneratedExerciseEditor: View {
+    @Binding var exercise: WorkoutExerciseSession
+    let onClose: () -> Void
+
+    var body: some View {
+        ZStack {
+            FitTheme.backgroundGradient
+                .ignoresSafeArea()
+
+            VStack(spacing: 16) {
+                header
+
+                ScrollView {
+                    VStack(spacing: 12) {
+                        ForEach(exercise.sets.indices, id: \.self) { index in
+                            GeneratedSetRow(
+                                index: index + 1,
+                                setEntry: $exercise.sets[index],
+                                canRemove: exercise.sets.count > 1,
+                                onRemove: { removeSet(at: index) }
+                            )
+                        }
+
+                        ActionButton(title: "Add set", style: .secondary) {
+                            addSet()
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 24)
+                }
+            }
+        }
+    }
+
+    private var header: some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(exercise.name)
+                    .font(FitFont.heading(size: 22))
+                    .foregroundColor(FitTheme.textPrimary)
+                Text("Adjust reps and weights")
+                    .font(FitFont.body(size: 12))
+                    .foregroundColor(FitTheme.textSecondary)
+            }
+            Spacer()
+            Button(action: onClose) {
+                Image(systemName: "xmark")
+                    .font(FitFont.body(size: 14, weight: .semibold))
+                    .foregroundColor(FitTheme.textPrimary)
+                    .padding(10)
+                    .background(FitTheme.cardBackground)
+                    .clipShape(Circle())
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 12)
+    }
+
+    private func addSet() {
+        let last = exercise.sets.last
+        let entry = WorkoutSetEntry(
+            reps: last?.reps ?? "10",
+            weight: last?.weight ?? "",
+            isComplete: false
+        )
+        exercise.sets.append(entry)
+    }
+
+    private func removeSet(at index: Int) {
+        guard exercise.sets.count > 1 else { return }
+        exercise.sets.remove(at: index)
+    }
+}
+
+private struct GeneratedSetRow: View {
+    let index: Int
+    @Binding var setEntry: WorkoutSetEntry
+    let canRemove: Bool
+    let onRemove: () -> Void
+    @FocusState private var focusedField: Field?
+
+    private enum Field {
+        case reps
+        case weight
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text("Set \(index)")
+                .font(FitFont.body(size: 12, weight: .semibold))
+                .foregroundColor(FitTheme.textSecondary)
+                .frame(width: 50, alignment: .leading)
+
+            setField(title: "Reps", value: $setEntry.reps, field: .reps)
+            setField(title: "Weight", value: $setEntry.weight, field: .weight)
+
+            if canRemove {
+                Button(action: onRemove) {
+                    Image(systemName: "minus.circle.fill")
+                        .foregroundColor(FitTheme.textSecondary)
+                        .font(FitFont.body(size: 16))
+                }
+            }
+        }
+        .padding(12)
+        .background(FitTheme.cardHighlight)
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14)
+                .stroke(FitTheme.cardStroke.opacity(0.5), lineWidth: 1)
+        )
+    }
+
+    private func setField(
+        title: String,
+        value: Binding<String>,
+        field: Field
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(FitFont.body(size: 10))
+                .foregroundColor(FitTheme.textSecondary)
+            TextField("0", text: value)
+                .keyboardType(field == .reps ? .numberPad : .decimalPad)
+                .font(FitFont.body(size: 13))
+                .foregroundColor(FitTheme.textPrimary)
+                .focused($focusedField, equals: field)
+                .submitLabel(.done)
+                .toolbar {
+                    ToolbarItemGroup(placement: .keyboard) {
+                        Spacer()
+                        Button("Done") {
+                            focusedField = nil
+                        }
+                    }
+                }
+        }
+        .frame(width: 70)
+    }
+}
+
 private struct WorkoutPlanCard: View {
     let title: String
     let subtitle: String
     let detail: String
+    let onPreview: () -> Void
     let onStart: () -> Void
     let onMore: () -> Void
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text(title)
-                    .font(FitFont.body(size: 16, weight: .semibold))
-                    .foregroundColor(FitTheme.textPrimary)
-                Text(subtitle)
-                    .font(FitFont.body(size: 11, weight: .semibold))
-                    .foregroundColor(FitTheme.accent)
-                    .padding(.vertical, 4)
-                    .padding(.horizontal, 8)
-                    .background(FitTheme.accentSoft)
-                    .clipShape(Capsule())
-                Text(detail)
-                    .font(FitFont.body(size: 12))
-                    .foregroundColor(FitTheme.textSecondary)
-                    .lineLimit(2)
+            Button(action: onPreview) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(title)
+                        .font(FitFont.body(size: 16, weight: .semibold))
+                        .foregroundColor(FitTheme.textPrimary)
+                    Text(subtitle)
+                        .font(FitFont.body(size: 11, weight: .semibold))
+                        .foregroundColor(FitTheme.accent)
+                        .padding(.vertical, 4)
+                        .padding(.horizontal, 8)
+                        .background(FitTheme.accentSoft)
+                        .clipShape(Capsule())
+                    Text(detail)
+                        .font(FitFont.body(size: 12))
+                        .foregroundColor(FitTheme.textSecondary)
+                        .lineLimit(2)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .buttonStyle(.plain)
             Spacer()
             VStack(spacing: 10) {
                 Button(action: onMore) {
@@ -2278,6 +3592,153 @@ private struct WorkoutPlanCard: View {
                 .stroke(FitTheme.cardStroke.opacity(0.6), lineWidth: 1)
         )
         .shadow(color: FitTheme.shadow, radius: 12, x: 0, y: 8)
+    }
+}
+
+private struct WorkoutTemplatePreviewSheet: View {
+    let template: WorkoutTemplate
+    let exercises: [WorkoutTemplateExercise]
+    let isLoading: Bool
+    let errorMessage: String?
+    let onStart: () -> Void
+    let onClose: () -> Void
+
+    var body: some View {
+        ZStack {
+            FitTheme.backgroundGradient
+                .ignoresSafeArea()
+
+            VStack(spacing: 16) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(template.title)
+                            .font(FitFont.heading(size: 22))
+                            .foregroundColor(FitTheme.textPrimary)
+                        Text("Workout preview")
+                            .font(FitFont.body(size: 12))
+                            .foregroundColor(FitTheme.textSecondary)
+                    }
+                    Spacer()
+                    Button(action: onClose) {
+                        Image(systemName: "xmark")
+                            .font(FitFont.body(size: 12, weight: .bold))
+                            .foregroundColor(FitTheme.textSecondary)
+                            .frame(width: 30, height: 30)
+                            .background(FitTheme.cardHighlight)
+                            .clipShape(Circle())
+                    }
+                }
+                .padding(.top, 12)
+
+                HStack(spacing: 10) {
+                    SummaryPill(title: "Exercises", value: "\(exercises.count)")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    SummaryPill(title: "Mode", value: template.mode.uppercased())
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                if isLoading {
+                    VStack(spacing: 12) {
+                        ProgressView()
+                            .tint(FitTheme.accent)
+                        Text("Loading preview...")
+                            .font(FitFont.body(size: 13))
+                            .foregroundColor(FitTheme.textSecondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(24)
+                    .background(FitTheme.cardBackground)
+                    .clipShape(RoundedRectangle(cornerRadius: 18))
+                } else if let errorMessage {
+                    HStack(spacing: 10) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(FitTheme.cardReminderAccent)
+                        Text(errorMessage)
+                            .font(FitFont.body(size: 12))
+                            .foregroundColor(FitTheme.textSecondary)
+                    }
+                    .padding(14)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(FitTheme.cardReminder)
+                    .clipShape(RoundedRectangle(cornerRadius: 14))
+                } else if exercises.isEmpty {
+                    VStack(spacing: 10) {
+                        Image(systemName: "list.bullet")
+                            .font(.system(size: 24))
+                            .foregroundColor(FitTheme.textSecondary.opacity(0.6))
+                        Text("No exercises in this template")
+                            .font(FitFont.body(size: 14, weight: .semibold))
+                            .foregroundColor(FitTheme.textPrimary)
+                        Text("Edit the template to add exercises.")
+                            .font(FitFont.body(size: 12))
+                            .foregroundColor(FitTheme.textSecondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(24)
+                    .background(FitTheme.cardBackground)
+                    .clipShape(RoundedRectangle(cornerRadius: 18))
+                } else {
+                    ScrollView {
+                        VStack(spacing: 10) {
+                            ForEach(exercises) { exercise in
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text(exercise.name)
+                                        .font(FitFont.body(size: 14, weight: .semibold))
+                                        .foregroundColor(FitTheme.textPrimary)
+                                    Text(exerciseDetail(for: exercise))
+                                        .font(FitFont.body(size: 12))
+                                        .foregroundColor(FitTheme.textSecondary)
+                                    if let notes = exercise.notes, !notes.isEmpty {
+                                        Text(notes)
+                                            .font(FitFont.body(size: 12))
+                                            .foregroundColor(FitTheme.textSecondary)
+                                            .lineLimit(2)
+                                    }
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(12)
+                                .background(FitTheme.cardBackground)
+                                .clipShape(RoundedRectangle(cornerRadius: 16))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 16)
+                                        .stroke(FitTheme.cardStroke.opacity(0.6), lineWidth: 1)
+                                )
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+
+                ActionButton(title: "Start Workout", style: .primary, action: onStart)
+                    .frame(maxWidth: .infinity)
+                    .disabled(isLoading || exercises.isEmpty)
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 24)
+        }
+    }
+
+    private func exerciseDetail(for exercise: WorkoutTemplateExercise) -> String {
+        var parts: [String] = []
+        if let sets = exercise.sets, sets > 0 {
+            parts.append("\(sets) sets")
+        }
+        if let reps = exercise.reps, reps > 0 {
+            parts.append("\(reps) reps")
+        }
+        if let rest = exercise.restSeconds, rest > 0 {
+            parts.append("Rest \(rest)s")
+        }
+        if parts.isEmpty {
+            parts.append("Details unavailable")
+        }
+        if let muscle = exercise.muscleGroups.first, !muscle.isEmpty {
+            parts.append(muscle)
+        }
+        if let equipment = exercise.equipment.first, !equipment.isEmpty {
+            parts.append(equipment)
+        }
+        return parts.joined(separator: " · ")
     }
 }
 
@@ -2412,11 +3873,13 @@ private struct DraftExerciseEditorRow: View {
                         .font(FitFont.body(size: 12))
                         .foregroundColor(FitTheme.textSecondary)
                 }
+                .tint(FitTheme.textPrimary)
                 Stepper(value: $exercise.reps, in: 1...20) {
                     Text("Reps \(exercise.reps)")
                         .font(FitFont.body(size: 12))
                         .foregroundColor(FitTheme.textSecondary)
                 }
+                .tint(FitTheme.textPrimary)
             }
 
             Stepper(value: $exercise.restSeconds, in: 30...240, step: 15) {
@@ -2424,6 +3887,7 @@ private struct DraftExerciseEditorRow: View {
                     .font(FitFont.body(size: 12))
                     .foregroundColor(FitTheme.textSecondary)
             }
+            .tint(FitTheme.textPrimary)
         }
         .padding(14)
         .background(FitTheme.cardBackground)
@@ -2499,20 +3963,123 @@ private struct ActionButton: View {
     }
 }
 
+private struct WorkoutGeneratingCard: View {
+    @State private var animationPhase = 0
+    @State private var iconScale: CGFloat = 1.0
+    
+    private let loadingMessages = [
+        "Analyzing your preferences...",
+        "Building your workout...",
+        "Selecting exercises...",
+        "Optimizing for your goals...",
+        "Almost ready..."
+    ]
+    
+    var body: some View {
+        VStack(spacing: 20) {
+            // Animated icon
+            ZStack {
+                Circle()
+                    .fill(FitTheme.cardWorkoutAccent.opacity(0.15))
+                    .frame(width: 80, height: 80)
+                    .scaleEffect(iconScale)
+                
+                Image(systemName: "sparkles")
+                    .font(.system(size: 32, weight: .medium))
+                    .foregroundColor(FitTheme.cardWorkoutAccent)
+                    .scaleEffect(iconScale)
+            }
+            .onAppear {
+                withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
+                    iconScale = 1.15
+                }
+            }
+            
+            VStack(spacing: 8) {
+                Text("Generating Your Workout")
+                    .font(FitFont.heading(size: 20))
+                    .foregroundColor(FitTheme.textPrimary)
+                
+                Text(loadingMessages[animationPhase % loadingMessages.count])
+                    .font(FitFont.body(size: 14))
+                    .foregroundColor(FitTheme.textSecondary)
+                    .animation(.easeInOut(duration: 0.3), value: animationPhase)
+            }
+            
+            // Progress dots
+            HStack(spacing: 8) {
+                ForEach(0..<5, id: \.self) { index in
+                    Circle()
+                        .fill(index <= animationPhase % 5 ? FitTheme.cardWorkoutAccent : FitTheme.cardWorkoutAccent.opacity(0.3))
+                        .frame(width: 8, height: 8)
+                        .animation(.easeInOut(duration: 0.2).delay(Double(index) * 0.1), value: animationPhase)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 40)
+        .padding(.horizontal, 24)
+        .background(FitTheme.cardWorkout)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(FitTheme.cardWorkoutAccent.opacity(0.3), lineWidth: 1.5)
+        )
+        .shadow(color: FitTheme.cardWorkoutAccent.opacity(0.15), radius: 18, x: 0, y: 10)
+        .onAppear {
+            Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { _ in
+                withAnimation {
+                    animationPhase += 1
+                }
+            }
+        }
+    }
+}
+
 private struct WorkoutCard<Content: View>: View {
+    var isAccented: Bool = false
     @ViewBuilder let content: Content
+    
+    init(isAccented: Bool = false, @ViewBuilder content: () -> Content) {
+        self.isAccented = isAccented
+        self.content = content()
+    }
 
     var body: some View {
         content
             .padding(18)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(FitTheme.cardBackground)
+            .background(isAccented ? FitTheme.cardWorkout : FitTheme.cardBackground)
             .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 24, style: .continuous)
-                    .stroke(FitTheme.cardStroke.opacity(0.6), lineWidth: 1)
+                    .stroke(isAccented ? FitTheme.cardWorkoutAccent.opacity(0.3) : FitTheme.cardStroke.opacity(0.6), lineWidth: isAccented ? 1.5 : 1)
             )
-            .shadow(color: FitTheme.shadow, radius: 18, x: 0, y: 10)
+            .shadow(color: isAccented ? FitTheme.cardWorkoutAccent.opacity(0.15) : FitTheme.shadow, radius: 18, x: 0, y: 10)
+    }
+}
+
+private struct WorkoutCoachPickPill: View {
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "sparkles")
+                .font(.system(size: 10, weight: .bold))
+            Text("COACHES PICK")
+                .font(FitFont.body(size: 10, weight: .bold))
+                .tracking(0.6)
+        }
+        .foregroundColor(.white)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
+        .background(
+            LinearGradient(
+                colors: [FitTheme.cardCoachAccent, FitTheme.cardCoachAccent.opacity(0.6)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        )
+        .clipShape(Capsule())
+        .shadow(color: FitTheme.cardCoachAccent.opacity(0.25), radius: 6, x: 0, y: 4)
     }
 }
 
@@ -2523,11 +4090,11 @@ private enum MuscleGroup: String, CaseIterable, Identifiable {
     case biceps
     case triceps
     case arms
-    case legs
-    case core
-    case glutes
+    case quads
     case hamstrings
+    case glutes
     case calves
+    case core
     case forearms
 
     var id: String { rawValue }
@@ -2559,10 +4126,18 @@ private enum WorkoutEquipment: String, CaseIterable, Identifiable {
 }
 
 private struct SessionDraft: Identifiable {
-    let id = UUID()
+    let id: UUID
     let sessionId: String?
     let title: String
     let exercises: [WorkoutExerciseSession]
+    
+    // Explicit initializer - prevents memberwise initializer and Codable synthesis
+    init(sessionId: String?, title: String, exercises: [WorkoutExerciseSession]) {
+        self.id = UUID()
+        self.sessionId = sessionId
+        self.title = title
+        self.exercises = exercises
+    }
 }
 
 #Preview {

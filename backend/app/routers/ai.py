@@ -23,7 +23,7 @@ class CoachChatRequest(BaseModel):
 def _get_profile(supabase, user_id: str) -> dict | None:
     result = (
         supabase.table("profiles")
-        .select("age,goal,macros,preferences,height_cm,weight_kg")
+        .select("age,goal,macros,preferences,height_cm,weight_kg,sex")
         .eq("user_id", user_id)
         .limit(1)
         .execute()

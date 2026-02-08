@@ -33,7 +33,20 @@ struct CoachChatView: View {
                     .ignoresSafeArea()
 
                 VStack(spacing: 12) {
-                    CoachThreadHeader(thread: viewModel.activeThread, isLoading: viewModel.isLoading)
+                    CoachThreadHeader(
+                        thread: viewModel.activeThread,
+                        isLoading: viewModel.isLoading,
+                        showsActions: !showsCloseButton,
+                        onNewChat: {
+                            Task {
+                                await viewModel.createThread()
+                                Haptics.light()
+                            }
+                        },
+                        onHistory: { showingThreads = true }
+                    )
+                    .padding(.horizontal, 20)
+                    .padding(.top, 6)
 
                     ScrollViewReader { proxy in
                         ScrollView {
@@ -49,9 +62,14 @@ struct CoachChatView: View {
                                     .padding(.top, 16)
                                 }
 
-                                ForEach(viewModel.messages) { message in
+                                ForEach(viewModel.visibleMessages) { message in
                                     CoachMessageRow(message: message)
                                         .id(message.id)
+                                }
+
+                                if let workoutCard = viewModel.workoutCard {
+                                    CoachWorkoutGenerationCard(card: workoutCard)
+                                        .id(workoutCard.id)
                                 }
 
                                 if viewModel.isStreaming,
@@ -70,6 +88,9 @@ struct CoachChatView: View {
                         .onChange(of: viewModel.isStreaming) { _ in
                             scrollToLatest(proxy: proxy)
                         }
+                        .onChange(of: viewModel.workoutCard?.id) { _ in
+                            scrollToLatest(proxy: proxy)
+                        }
                     }
 
                     if let status = viewModel.statusMessage {
@@ -78,6 +99,29 @@ struct CoachChatView: View {
                             showRetry: viewModel.pendingRetry != nil,
                             onRetry: { Task { await viewModel.retryLastMessage() } }
                         )
+                        .padding(.horizontal, 20)
+                    }
+                    
+                    // New Chat button - visible when there are messages
+                    if !viewModel.messages.isEmpty {
+                        Button {
+                            Task {
+                                await viewModel.createThread()
+                                Haptics.light()
+                            }
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: "plus.message.fill")
+                                    .font(.system(size: 14, weight: .semibold))
+                                Text("New Chat")
+                                    .font(FitFont.body(size: 14, weight: .semibold))
+                            }
+                            .foregroundColor(FitTheme.cardCoachAccent)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 10)
+                            .background(FitTheme.cardCoachAccent.opacity(0.12))
+                            .clipShape(Capsule())
+                        }
                         .padding(.horizontal, 20)
                     }
 
@@ -91,7 +135,7 @@ struct CoachChatView: View {
                 }
 
             }
-            .navigationTitle("Coach")
+            .navigationTitle(showsCloseButton ? "Coach" : "")
             .onTapGesture {
                 dismissKeyboard()
             }
@@ -108,11 +152,30 @@ struct CoachChatView: View {
                             .foregroundColor(FitTheme.textPrimary)
                     }
                 }
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("History") { showingThreads = true }
-                        .foregroundColor(FitTheme.textPrimary)
+                if showsCloseButton {
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        HStack(spacing: 16) {
+                            Button {
+                                Task {
+                                    await viewModel.createThread()
+                                    Haptics.light()
+                                }
+                            } label: {
+                                Image(systemName: "plus.message")
+                                    .font(.system(size: 16, weight: .semibold))
+                                    .foregroundColor(FitTheme.accent)
+                            }
+
+                            Button { showingThreads = true } label: {
+                                Image(systemName: "clock.arrow.circlepath")
+                                    .font(.system(size: 16, weight: .semibold))
+                                    .foregroundColor(FitTheme.textPrimary)
+                            }
+                        }
+                    }
                 }
             }
+            .toolbar(showsCloseButton ? .visible : .hidden, for: .navigationBar)
             .sheet(isPresented: $showingThreads) {
                 CoachThreadListView(
                     threads: viewModel.threads,
@@ -155,9 +218,7 @@ struct CoachChatView: View {
 
     private func scrollToLatest(proxy: ScrollViewProxy) {
         guard let lastId = viewModel.messages.last?.id else { return }
-        withAnimation(.easeOut(duration: 0.2)) {
-            proxy.scrollTo(lastId, anchor: .bottom)
-        }
+        proxy.scrollTo(lastId, anchor: .bottom)
     }
 
     private func dismissKeyboard() {
@@ -176,55 +237,99 @@ private struct CoachEmptyStateView: View {
     let onHistory: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 16) {
-                CoachCharacterView(size: 88, showBackground: false, pose: .talking)
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Talk to your AI coach")
-                        .font(FitFont.heading(size: 22))
-                        .foregroundColor(FitTheme.textPrimary)
-                    Text("Ask anything about workouts, nutrition, or recovery.")
-                        .font(FitFont.body(size: 13))
-                        .foregroundColor(FitTheme.textSecondary)
+        VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Image(systemName: "bolt.fill")
+                        .font(.system(size: 10))
+                        .foregroundColor(FitTheme.cardCoachAccent)
+                    Text("QUICK START")
+                        .font(FitFont.body(size: 11, weight: .bold))
+                        .foregroundColor(FitTheme.cardCoachAccent)
+                        .tracking(1)
                 }
-            }
 
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Try asking:")
-                    .font(FitFont.body(size: 13))
-                    .foregroundColor(FitTheme.textSecondary)
-
-                ForEach(prompts, id: \.self) { prompt in
+                ForEach(Array(prompts.enumerated()), id: \.offset) { index, prompt in
                     Button(action: { onPrompt(prompt) }) {
-                        HStack {
+                        HStack(spacing: 12) {
+                            ZStack {
+                                Circle()
+                                    .fill(FitTheme.cardCoachAccent.opacity(0.15))
+                                    .frame(width: 32, height: 32)
+                                Image(systemName: promptIcon(for: index))
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundColor(FitTheme.cardCoachAccent)
+                            }
+                            
                             Text(prompt)
                                 .font(FitFont.body(size: 14))
                                 .foregroundColor(FitTheme.textPrimary)
                                 .fixedSize(horizontal: false, vertical: true)
+                            
                             Spacer()
-                            Image(systemName: "arrow.up.right")
+                            
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 12, weight: .semibold))
                                 .foregroundColor(FitTheme.textSecondary)
                         }
                         .padding(12)
                         .background(FitTheme.cardBackground)
-                        .clipShape(RoundedRectangle(cornerRadius: 16))
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                         .overlay(
-                            RoundedRectangle(cornerRadius: 16)
-                                .stroke(FitTheme.cardStroke, lineWidth: 1)
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .stroke(FitTheme.cardStroke.opacity(0.6), lineWidth: 1)
                         )
                     }
                     .buttonStyle(.plain)
                 }
             }
-
-            Button(action: onHistory) {
-                Text("View past chats")
-                    .font(FitFont.body(size: 13))
-                    .foregroundColor(FitTheme.accent)
-            }
         }
         .padding(.horizontal, 20)
         .padding(.bottom, 8)
+    }
+    
+    private func promptIcon(for index: Int) -> String {
+        switch index {
+        case 0: return "figure.strengthtraining.traditional"
+        case 1: return "calendar"
+        case 2: return "fork.knife"
+        case 3: return "flame.fill"
+        default: return "sparkles"
+        }
+    }
+}
+
+private struct CoachHeroCard: View {
+    var body: some View {
+        VStack(spacing: 16) {
+            CoachCharacterView(size: 140, showBackground: false, pose: .neutral)
+
+            VStack(spacing: 8) {
+                Text("Your Personal Trainer")
+                    .font(FitFont.heading(size: 24))
+                    .foregroundColor(FitTheme.textPrimary)
+                Text("Get personalized workout plans, form tips, nutrition advice, and recovery strategies.")
+                    .font(FitFont.body(size: 14))
+                    .foregroundColor(FitTheme.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 16)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 24)
+        .background(
+            LinearGradient(
+                colors: [FitTheme.cardCoach, FitTheme.cardCoach.opacity(0.8)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(FitTheme.cardCoachAccent.opacity(0.3), lineWidth: 1.5)
+        )
+        .shadow(color: FitTheme.cardCoachAccent.opacity(0.15), radius: 16, x: 0, y: 8)
     }
 }
 
@@ -237,8 +342,10 @@ final class CoachChatViewModel: ObservableObject {
     @Published var isStreaming = false
     @Published var statusMessage: String?
     @Published var pendingRetry: String?
+    @Published var workoutCard: CoachWorkoutCard?
 
     let userId: String
+    private var hiddenAssistantMessageIds: Set<String> = []
 
     init(userId: String) {
         self.userId = userId
@@ -247,40 +354,31 @@ final class CoachChatViewModel: ObservableObject {
     func loadInitialThread() async {
         guard !userId.isEmpty else { return }
         isLoading = true
-        do {
-            let fetched = try await ChatAPIService.shared.fetchThreads(userId: userId)
-            threads = fetched.sorted { threadDate($0) > threadDate($1) }
-            if let latest = threads.first {
-                await selectThread(latest)
-            } else {
-                await startNewSession()
-            }
-        } catch {
-            statusMessage = "Unable to load coach threads."
+        defer { isLoading = false }
+
+        if let activeId = CoachChatSession.shared.activeThreadId {
+            await loadThread(threadId: activeId)
+        } else {
+            await startNewSession()
+            CoachChatSession.shared.activeThreadId = activeThread?.id
         }
-        isLoading = false
+
+        await refreshThreads()
     }
 
     func selectThread(_ thread: ChatThread) async {
         guard !userId.isEmpty else { return }
         isLoading = true
         activeThread = thread
+        CoachChatSession.shared.activeThreadId = thread.id
+        workoutCard = nil
+        hiddenAssistantMessageIds.removeAll()
         do {
             let detail = try await ChatAPIService.shared.fetchThreadDetail(
                 userId: userId,
                 threadId: thread.id
             )
-            messages = detail.messages.compactMap { payload in
-                guard let role = CoachMessageRole(rawValue: payload.role) else { return nil }
-                if role == .system {
-                    return nil
-                }
-                return CoachChatMessage(
-                    id: payload.id,
-                    role: role,
-                    text: payload.content
-                )
-            }
+            applyThreadDetail(detail)
         } catch {
             statusMessage = "Unable to load coach messages."
         }
@@ -293,9 +391,12 @@ final class CoachChatViewModel: ObservableObject {
         do {
             let thread = try await ChatAPIService.shared.createThread(userId: userId, title: title)
             threads.insert(thread, at: 0)
+            CoachChatSession.shared.activeThreadId = thread.id
             if startEmpty {
                 activeThread = thread
                 messages = []
+                workoutCard = nil
+                hiddenAssistantMessageIds.removeAll()
             } else {
                 await selectThread(thread)
             }
@@ -316,6 +417,7 @@ final class CoachChatViewModel: ObservableObject {
         }
         statusMessage = nil
         pendingRetry = nil
+        let isWorkoutRequest = Self.isWorkoutRequest(text)
 
         let userMessage = CoachChatMessage(
             id: UUID().uuidString,
@@ -326,6 +428,10 @@ final class CoachChatViewModel: ObservableObject {
 
         let assistantId = UUID().uuidString
         messages.append(CoachChatMessage(id: assistantId, role: .assistant, text: ""))
+        if isWorkoutRequest {
+            hiddenAssistantMessageIds.insert(assistantId)
+            workoutCard = CoachWorkoutCard(state: .generating)
+        }
         isStreaming = true
 
         do {
@@ -339,8 +445,15 @@ final class CoachChatViewModel: ObservableObject {
                 }
             }
             await refreshThreads()
+            if isWorkoutRequest {
+                updateWorkoutCard(for: assistantId)
+            }
         } catch {
             messages.removeAll { $0.id == assistantId }
+            hiddenAssistantMessageIds.remove(assistantId)
+            if isWorkoutRequest {
+                workoutCard = CoachWorkoutCard(state: .failed("Workout failed. Please try again."))
+            }
             statusMessage = "Message failed. Tap to retry."
             pendingRetry = text
         }
@@ -380,12 +493,92 @@ final class CoachChatViewModel: ObservableObject {
         }
         return Date.distantPast
     }
+
+    private func loadThread(threadId: String) async {
+        guard !userId.isEmpty else { return }
+        do {
+            let detail = try await ChatAPIService.shared.fetchThreadDetail(
+                userId: userId,
+                threadId: threadId
+            )
+            activeThread = detail.thread
+            applyThreadDetail(detail)
+        } catch {
+            statusMessage = "Unable to load coach messages."
+        }
+    }
+
+    private func applyThreadDetail(_ detail: ChatThreadDetailResponse) {
+        messages = detail.messages.compactMap { payload in
+            guard let role = CoachMessageRole(rawValue: payload.role) else { return nil }
+            if role == .system {
+                return nil
+            }
+            return CoachChatMessage(
+                id: payload.id,
+                role: role,
+                text: payload.content
+            )
+        }
+        hiddenAssistantMessageIds.removeAll()
+        workoutCard = nil
+    }
+
+    private func updateWorkoutCard(for assistantId: String) {
+        guard let message = messages.first(where: { $0.id == assistantId })?.text else {
+            workoutCard = CoachWorkoutCard(state: .completed("Workout generated. Check your workout view."))
+            return
+        }
+        let lowered = message.lowercased()
+        if lowered.contains("workout failed") {
+            workoutCard = CoachWorkoutCard(state: .failed("Workout failed. Tell me your goal and equipment."))
+        } else {
+            workoutCard = CoachWorkoutCard(state: .completed("Workout generated. Check your workout view."))
+        }
+    }
+
+    var visibleMessages: [CoachChatMessage] {
+        messages.filter { !hiddenAssistantMessageIds.contains($0.id) }
+    }
+
+    private static let workoutKeywords = ["workout", "routine", "session"]
+    private static let workoutActions = ["build", "create", "make", "generate", "design", "plan"]
+    private static let muscleKeywords = [
+        "glute", "glutes", "booty", "hamstring", "hamstrings", "quad", "quads",
+        "leg", "legs", "calf", "calves", "chest", "pec", "pecs", "back", "lat",
+        "lats", "shoulder", "shoulders", "delt", "delts", "biceps", "triceps",
+        "arms", "core", "abs", "upper", "lower", "push", "pull", "full body", "hiit",
+    ]
+
+    private static func isWorkoutRequest(_ text: String) -> Bool {
+        let lowered = text.lowercased()
+        let hasWorkout = workoutKeywords.contains { lowered.contains($0) }
+        let hasAction = workoutActions.contains { lowered.contains($0) }
+        let hasMuscle = muscleKeywords.contains { lowered.contains($0) }
+        return (hasWorkout && hasAction) || (hasWorkout && hasMuscle) || (hasAction && hasMuscle)
+    }
+}
+
+private final class CoachChatSession {
+    static let shared = CoachChatSession()
+    var activeThreadId: String?
 }
 
 struct CoachChatMessage: Identifiable {
     let id: String
     let role: CoachMessageRole
     var text: String
+}
+
+struct CoachWorkoutCard: Identifiable {
+    enum State: Equatable {
+        case generating
+        case completed(String)
+        case failed(String)
+    }
+
+    let id: String = UUID().uuidString
+    var state: State
 }
 
 enum CoachMessageRole: String {
@@ -397,39 +590,37 @@ enum CoachMessageRole: String {
 private struct CoachThreadHeader: View {
     let thread: ChatThread?
     let isLoading: Bool
-
-    private var title: String {
-        if let title = thread?.title, !title.isEmpty {
-            return title
-        }
-        return "AI Coach"
-    }
-
-    private var subtitle: String {
-        if isLoading {
-            return "Syncing your context..."
-        }
-        return "Quick answers on workouts, food, and recovery."
-    }
+    let showsActions: Bool
+    let onNewChat: () -> Void
+    let onHistory: () -> Void
 
     var body: some View {
-        HStack(alignment: .top, spacing: 16) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text(title)
-                    .font(FitFont.heading(size: 24))
-                    .foregroundColor(FitTheme.textPrimary)
+        ZStack(alignment: .topTrailing) {
+            CoachHeroCard()
 
-                Text(subtitle)
-                    .font(FitFont.body(size: 14))
-                    .foregroundColor(FitTheme.textSecondary)
+            if showsActions {
+                HStack(spacing: 12) {
+                    Button(action: onNewChat) {
+                        Image(systemName: "plus.message")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundColor(FitTheme.textPrimary)
+                            .padding(8)
+                            .background(FitTheme.cardHighlight)
+                            .clipShape(Circle())
+                    }
+
+                    Button(action: onHistory) {
+                        Image(systemName: "clock.arrow.circlepath")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundColor(FitTheme.textPrimary)
+                            .padding(8)
+                            .background(FitTheme.cardHighlight)
+                            .clipShape(Circle())
+                    }
+                }
+                .padding(12)
             }
-
-            Spacer(minLength: 0)
-
-            CoachCharacterView(size: 68, showBackground: false, pose: .neutral)
         }
-        .padding(.horizontal, 20)
-        .padding(.top, 8)
     }
 }
 
@@ -442,42 +633,166 @@ private struct CoachMessageRow: View {
         if message.text.isEmpty {
             EmptyView()
         } else {
-            HStack {
-                if isUser { Spacer(minLength: 40) }
+            HStack(alignment: .top, spacing: 10) {
+                if isUser { Spacer(minLength: 60) }
+                
+                if !isUser {
+                    // Coach avatar
+                    ZStack {
+                        Circle()
+                            .fill(FitTheme.cardCoachAccent.opacity(0.15))
+                            .frame(width: 32, height: 32)
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(FitTheme.cardCoachAccent)
+                    }
+                }
 
-                Text(message.text)
-                    .font(FitFont.body(size: 15))
-                    .foregroundColor(isUser ? FitTheme.buttonText : FitTheme.textPrimary)
-                    .padding(.vertical, 10)
-                    .padding(.horizontal, 14)
-                    .background(isUser ? FitTheme.accent : FitTheme.cardBackground)
-                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 18, style: .continuous)
-                            .stroke(isUser ? FitTheme.accent : FitTheme.cardStroke, lineWidth: 1)
-                    )
+                VStack(alignment: isUser ? .trailing : .leading, spacing: 4) {
+                    Text(message.text)
+                        .font(FitFont.body(size: 15))
+                        .foregroundColor(isUser ? .white : FitTheme.textPrimary)
+                        .padding(.vertical, 12)
+                        .padding(.horizontal, 16)
+                        .background(
+                            isUser 
+                                ? AnyShapeStyle(FitTheme.cardCoachAccent)
+                                : AnyShapeStyle(FitTheme.cardCoach)
+                        )
+                        .clipShape(
+                            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                                .stroke(
+                                    isUser ? Color.clear : FitTheme.cardCoachAccent.opacity(0.2),
+                                    lineWidth: 1
+                                )
+                        )
+                }
 
-                if !isUser { Spacer(minLength: 40) }
+                if !isUser { Spacer(minLength: 60) }
             }
             .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
-            .padding(.horizontal, 6)
         }
     }
 }
 
 private struct CoachTypingRow: View {
     var body: some View {
-        HStack {
-            ProgressView()
-                .progressViewStyle(.circular)
-                .tint(FitTheme.textSecondary)
-            Text("Coach is typing...")
-                .font(FitFont.body(size: 14))
-                .foregroundColor(FitTheme.textSecondary)
+        HStack(alignment: .top, spacing: 10) {
+            // Coach avatar
+            ZStack {
+                Circle()
+                    .fill(FitTheme.cardCoachAccent.opacity(0.15))
+                    .frame(width: 32, height: 32)
+                Image(systemName: "sparkles")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(FitTheme.cardCoachAccent)
+            }
+            
+            HStack(spacing: 6) {
+                ForEach(0..<3, id: \.self) { index in
+                    Circle()
+                        .fill(FitTheme.cardCoachAccent)
+                        .frame(width: 8, height: 8)
+                }
+            }
+            .padding(.vertical, 14)
+            .padding(.horizontal, 18)
+            .background(FitTheme.cardCoach)
+            .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .stroke(FitTheme.cardCoachAccent.opacity(0.2), lineWidth: 1)
+            )
+            
             Spacer()
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 8)
+    }
+}
+
+private struct CoachWorkoutGenerationCard: View {
+    let card: CoachWorkoutCard
+
+    private var title: String {
+        switch card.state {
+        case .generating:
+            return "Generating workout"
+        case .completed:
+            return "Workout ready"
+        case .failed:
+            return "Workout failed"
+        }
+    }
+
+    private var message: String {
+        switch card.state {
+        case .generating:
+            return "Building your plan now."
+        case .completed(let text):
+            return text
+        case .failed(let text):
+            return text
+        }
+    }
+
+    private var accent: Color {
+        switch card.state {
+        case .failed:
+            return Color(red: 0.92, green: 0.30, blue: 0.25)
+        default:
+            return FitTheme.cardCoachAccent
+        }
+    }
+
+    private var isFailed: Bool {
+        if case .failed = card.state { return true }
+        return false
+    }
+
+    private var isGenerating: Bool {
+        if case .generating = card.state { return true }
+        return false
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            ZStack {
+                Circle()
+                    .fill(accent.opacity(0.15))
+                    .frame(width: 36, height: 36)
+                Image(systemName: isFailed ? "exclamationmark.triangle.fill" : "sparkles")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(accent)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(title)
+                    .font(FitFont.body(size: 15, weight: .semibold))
+                    .foregroundColor(FitTheme.textPrimary)
+                Text(message)
+                    .font(FitFont.body(size: 13))
+                    .foregroundColor(FitTheme.textSecondary)
+
+                if isGenerating {
+                    ProgressView()
+                        .progressViewStyle(CircularProgressViewStyle(tint: accent))
+                        .scaleEffect(0.9)
+                        .padding(.top, 4)
+                }
+            }
+
+            Spacer()
+        }
+        .padding(14)
+        .background(FitTheme.cardCoach)
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(accent.opacity(0.3), lineWidth: 1)
+        )
+        .padding(.horizontal, 4)
     }
 }
 
@@ -492,13 +807,13 @@ private struct CoachInputBar: View {
             TextField("Ask your coach...", text: $text, axis: .vertical)
                 .font(FitFont.body(size: 15))
                 .foregroundColor(FitTheme.textPrimary)
-                .padding(.vertical, 10)
-                .padding(.horizontal, 14)
-                .background(FitTheme.cardBackground)
-                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .padding(.vertical, 12)
+                .padding(.horizontal, 16)
+                .background(FitTheme.cardCoach)
+                .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .stroke(FitTheme.cardStroke, lineWidth: 1)
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .stroke(isFocused ? FitTheme.cardCoachAccent : FitTheme.cardCoachAccent.opacity(0.3), lineWidth: isFocused ? 2 : 1)
                 )
                 .focused($isFocused)
                 .submitLabel(.send)
@@ -509,29 +824,21 @@ private struct CoachInputBar: View {
                         Button("Done") {
                             isFocused = false
                         }
+                        .foregroundColor(FitTheme.cardCoachAccent)
                     }
                 }
 
-            Button(action: { isFocused = false }) {
-                Image(systemName: "keyboard.chevron.compact.down")
-                    .font(FitFont.body(size: 14, weight: .semibold))
-                    .foregroundColor(FitTheme.textSecondary)
-                    .padding(10)
-                    .background(FitTheme.cardBackground)
-                    .clipShape(Circle())
-            }
-
             Button(action: onSend) {
-                Image(systemName: "paperplane.fill")
-                    .font(FitFont.body(size: 16, weight: .semibold))
-                    .foregroundColor(FitTheme.buttonText)
-                    .padding(12)
+                Image(systemName: isSending ? "ellipsis" : "paperplane.fill")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(width: 44, height: 44)
                     .background(
                         Group {
                             if isSending {
-                                FitTheme.cardHighlight
+                                FitTheme.cardCoachAccent.opacity(0.6)
                             } else {
-                                FitTheme.primaryGradient
+                                FitTheme.cardCoachAccent
                             }
                         }
                     )
@@ -539,14 +846,14 @@ private struct CoachInputBar: View {
             }
             .disabled(isSending || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
-        .padding(12)
-        .background(FitTheme.cardHighlight)
-        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .padding(10)
+        .background(FitTheme.cardBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .stroke(FitTheme.cardStroke, lineWidth: 1)
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .stroke(FitTheme.cardCoachAccent.opacity(0.2), lineWidth: 1)
         )
-        .shadow(color: FitTheme.shadow, radius: 10, x: 0, y: 6)
+        .shadow(color: FitTheme.cardCoachAccent.opacity(0.1), radius: 12, x: 0, y: 6)
     }
 }
 

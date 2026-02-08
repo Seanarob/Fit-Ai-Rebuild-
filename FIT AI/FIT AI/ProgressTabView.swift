@@ -124,6 +124,12 @@ struct ProgressTabView: View {
     }
 
     let userId: String
+    @Binding private var intent: ProgressTabIntent?
+
+    init(userId: String, intent: Binding<ProgressTabIntent?> = .constant(nil)) {
+        self.userId = userId
+        _intent = intent
+    }
 
     @State private var checkins: [WeeklyCheckin] = []
     @State private var progressPhotos: [ProgressPhoto] = []
@@ -132,6 +138,7 @@ struct ProgressTabView: View {
     @State private var macroRange: WeightRange = .month
     @State private var macroMetric: MacroMetric = .calories
     @State private var workoutSessions: [WorkoutSession] = []
+    @State private var healthWorkoutSessions: [WorkoutSession] = []
     @State private var calendarMonth = Date()
     @State private var selectedWorkoutDate: Date?
     @State private var selectedDaySessions: [WorkoutSession] = []
@@ -146,6 +153,28 @@ struct ProgressTabView: View {
     @State private var showCheckinFlow = false
     @State private var startingPhotos = StartingPhotosStore.load()
     @State private var profileGoal: OnboardingForm.Goal = .maintain
+    @State private var showCheckinLockedSheet = false
+    @AppStorage("checkinDay") private var checkinDay: Int = 0  // 0 = Sunday
+    @StateObject private var healthSyncState = HealthSyncState.shared
+    @State private var isHealthSyncing = false
+    @State private var healthSyncMessage: String?
+    
+    private var checkinDayName: String {
+        let days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+        return days[checkinDay]
+    }
+    
+    private var daysUntilCheckin: Int {
+        let calendar = Calendar.current
+        let today = calendar.component(.weekday, from: Date()) - 1  // 0 = Sunday
+        let targetDay = checkinDay
+        let diff = (targetDay - today + 7) % 7
+        return diff == 0 ? 0 : diff
+    }
+    
+    private var isCheckinUnlocked: Bool {
+        daysUntilCheckin == 0
+    }
 
     var body: some View {
         ZStack {
@@ -155,9 +184,8 @@ struct ProgressTabView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     header
-                    weightTrendCard
-                    workoutCalendarCard
                     checkinCard
+                    workoutCalendarCard
                     photosCard
                     if latestCheckin != nil {
                         resultsCard
@@ -171,14 +199,8 @@ struct ProgressTabView: View {
                 }
                 .padding(.horizontal, 20)
                 .padding(.top, 12)
-                .padding(.bottom, 32)
+                .padding(.bottom, 12)
             }
-
-            CoachCornerPeek(alignment: .bottomTrailing, title: "Coach")
-                .padding(.trailing, 16)
-                .padding(.bottom, 20)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
-                .allowsHitTesting(false)
         }
         .sheet(isPresented: $showPhotos) {
             ProgressPhotoGalleryView(items: photoItems)
@@ -231,6 +253,14 @@ struct ProgressTabView: View {
             guard !isShowing, let pendingCheckin else { return }
             selectedCheckin = pendingCheckin
         }
+        .onChange(of: intent) { newIntent in
+            guard let newIntent else { return }
+            switch newIntent {
+            case .startCheckin:
+                showCheckinFlow = true
+            }
+            intent = nil
+        }
         .onReceive(NotificationCenter.default.publisher(for: .fitAIStartingPhotosUpdated)) { _ in
             startingPhotos = StartingPhotosStore.load()
         }
@@ -243,20 +273,35 @@ struct ProgressTabView: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Progress")
-                .font(FitFont.heading(size: 30))
-                .fontWeight(.semibold)
-                .foregroundColor(FitTheme.textPrimary)
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Progress")
+                    .font(FitFont.heading(size: 30))
+                    .fontWeight(.semibold)
+                    .foregroundColor(FitTheme.textPrimary)
 
-            Text("Track your trends and weekly check-ins.")
-                .font(FitFont.body(size: 15))
-                .foregroundColor(FitTheme.textSecondary)
+                Text("Track your trends and weekly check-ins.")
+                    .font(FitFont.body(size: 15))
+                    .foregroundColor(FitTheme.textSecondary)
+
+                if healthSyncState.isEnabled {
+                    Text(healthHeaderText)
+                        .font(FitFont.body(size: 12))
+                        .foregroundColor(FitTheme.textSecondary)
+                }
+            }
+
+            Spacer()
+
+            VStack(spacing: 10) {
+                CoachCharacterView(size: 72, showBackground: false, pose: .idle)
+                    .allowsHitTesting(false)
+            }
         }
     }
 
     private var weightTrendCard: some View {
-        CardContainer {
+        CardContainer(isAccented: true) {
             VStack(alignment: .leading, spacing: 16) {
                 HStack {
                     VStack(alignment: .leading, spacing: 6) {
@@ -290,17 +335,44 @@ struct ProgressTabView: View {
                         .foregroundColor(FitTheme.textSecondary)
                 } else {
                     Chart(filteredWeightPoints) { point in
+                        // Area fill with gradient (matches onboarding style)
+                        AreaMark(
+                            x: .value("Date", point.date),
+                            y: .value("Weight", point.weight)
+                        )
+                        .foregroundStyle(
+                            LinearGradient(
+                                colors: [
+                                    FitTheme.cardProgressAccent.opacity(0.25),
+                                    FitTheme.cardProgressAccent.opacity(0.05)
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
+                        .interpolationMethod(.catmullRom)
+                        
+                        // Line on top
                         LineMark(
                             x: .value("Date", point.date),
                             y: .value("Weight", point.weight)
                         )
-                        .foregroundStyle(FitTheme.accent)
+                        .foregroundStyle(FitTheme.cardProgressAccent)
+                        .lineStyle(StrokeStyle(lineWidth: 3, lineCap: .round))
+                        .interpolationMethod(.catmullRom)
 
+                        // Point markers
                         PointMark(
                             x: .value("Date", point.date),
                             y: .value("Weight", point.weight)
                         )
-                        .foregroundStyle(FitTheme.accent)
+                        .foregroundStyle(Color.white)
+                        .annotation(position: .overlay) {
+                            Circle()
+                                .stroke(FitTheme.cardProgressAccent, lineWidth: 3)
+                                .frame(width: 10, height: 10)
+                                .background(Circle().fill(Color.white))
+                        }
                     }
                     .chartXAxis {
                         AxisMarks(values: .automatic(desiredCount: 4)) { _ in
@@ -369,6 +441,8 @@ struct ProgressTabView: View {
                     }
                 }
 
+                healthSyncRow
+
                 let columns = Array(repeating: GridItem(.flexible(), spacing: 6), count: 7)
                 LazyVGrid(columns: columns, spacing: 8) {
                     ForEach(Calendar.current.shortWeekdaySymbols, id: \.self) { symbol in
@@ -390,6 +464,77 @@ struct ProgressTabView: View {
                 }
             }
         }
+    }
+
+    private var healthSyncRow: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Image(systemName: "heart.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(width: 24, height: 24)
+                    .background(FitTheme.cardWorkoutAccent)
+                    .clipShape(Circle())
+
+                Text("Apple Health")
+                    .font(FitFont.body(size: 14, weight: .semibold))
+                    .foregroundColor(FitTheme.textPrimary)
+
+                Spacer()
+
+                Button(action: {
+                    Task { await syncHealthWorkoutsWithStatus() }
+                }) {
+                    Text(isHealthSyncing ? "Syncing…" : "Sync now")
+                        .font(FitFont.body(size: 12, weight: .semibold))
+                        .foregroundColor(healthSyncState.isEnabled ? FitTheme.buttonText : FitTheme.textSecondary)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(
+                            healthSyncState.isEnabled
+                                ? FitTheme.primaryGradient
+                                : LinearGradient(
+                                    colors: [FitTheme.cardHighlight, FitTheme.cardHighlight],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                )
+                        )
+                        .clipShape(Capsule())
+                }
+                .disabled(isHealthSyncing || !healthSyncState.isEnabled)
+            }
+
+            Text(healthSyncStatusText)
+                .font(FitFont.body(size: 12))
+                .foregroundColor(FitTheme.textSecondary)
+
+            if let healthSyncMessage {
+                Text(healthSyncMessage)
+                    .font(FitFont.body(size: 12))
+                    .foregroundColor(FitTheme.textSecondary)
+            }
+        }
+        .padding(12)
+        .background(FitTheme.cardHighlight)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private var healthSyncStatusText: String {
+        if !healthSyncState.isEnabled {
+            return "Sync is off. Enable Apple Health in Settings to import workouts."
+        }
+        if let lastSync = healthSyncState.lastSyncDate {
+            return "Last sync: \(lastSync.formatted(date: .abbreviated, time: .shortened))"
+        }
+        return "Not synced yet. Tap Sync now to import workouts."
+    }
+
+    private var healthHeaderText: String {
+        if healthWorkoutSessions.isEmpty {
+            return "Apple Health: no workouts synced yet."
+        }
+        let count = healthWorkoutSessions.count
+        return "Apple Health: \(count) workout\(count == 1 ? "" : "s") synced."
     }
 
     private var macroAdherenceCard: some View {
@@ -477,75 +622,346 @@ struct ProgressTabView: View {
     }
 
     private var checkinCard: some View {
-        CardContainer {
-            VStack(alignment: .leading, spacing: 14) {
-                SectionHeader(title: "Weekly check-in", subtitle: "Log weight, photos, and adherence.")
-
-                HStack(spacing: 14) {
-                    StatBlock(title: "Last check-in", value: latestCheckinDateText)
-                    StatBlock(title: "Weight", value: latestWeightText)
+        let accentColor = isCheckinUnlocked ? FitTheme.cardProgressAccent : Color(red: 0.55, green: 0.55, blue: 0.60)
+        
+        return VStack(alignment: .leading, spacing: 16) {
+            // Header with icon
+            HStack(spacing: 12) {
+                ZStack {
+                    Circle()
+                        .fill(
+                            LinearGradient(
+                                colors: [accentColor, accentColor.opacity(0.7)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .frame(width: 44, height: 44)
+                        .shadow(color: accentColor.opacity(0.3), radius: 6, x: 0, y: 3)
+                    
+                    Image(systemName: isCheckinUnlocked ? "chart.line.uptrend.xyaxis" : "lock.fill")
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundColor(.white)
                 }
-
-                ActionButton(title: "Start check-in", style: .primary) {
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 8) {
+                        Text("Weekly Check-in")
+                            .font(FitFont.heading(size: 18))
+                            .foregroundColor(isCheckinUnlocked ? FitTheme.textPrimary : FitTheme.textSecondary)
+                        
+                        if !isCheckinUnlocked {
+                            Text("LOCKED")
+                                .font(FitFont.body(size: 10, weight: .bold))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(accentColor)
+                                .clipShape(Capsule())
+                        }
+                    }
+                    
+                    if isCheckinUnlocked {
+                        Text("Log weight, photos, and adherence")
+                            .font(FitFont.body(size: 12))
+                            .foregroundColor(FitTheme.textSecondary)
+                    } else {
+                        Text("Available on \(checkinDayName)")
+                            .font(FitFont.body(size: 12))
+                            .foregroundColor(FitTheme.textSecondary)
+                    }
+                }
+                
+                Spacer()
+                
+                if !isCheckinUnlocked {
+                    Image(systemName: "lock.circle.fill")
+                        .font(.system(size: 24))
+                        .foregroundColor(accentColor.opacity(0.6))
+                }
+            }
+            
+            // Stats row
+            HStack(spacing: 12) {
+                HStack(spacing: 8) {
+                    Image(systemName: "calendar")
+                        .font(.system(size: 14))
+                        .foregroundColor(accentColor)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Last check-in")
+                            .font(FitFont.body(size: 11))
+                            .foregroundColor(FitTheme.textSecondary)
+                        Text(latestCheckinDateText)
+                            .font(FitFont.body(size: 14, weight: .semibold))
+                            .foregroundColor(isCheckinUnlocked ? FitTheme.textPrimary : FitTheme.textSecondary)
+                    }
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(accentColor.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                
+                HStack(spacing: 8) {
+                    Image(systemName: "scalemass.fill")
+                        .font(.system(size: 14))
+                        .foregroundColor(accentColor)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Weight")
+                            .font(FitFont.body(size: 11))
+                            .foregroundColor(FitTheme.textSecondary)
+                        Text(latestWeightText)
+                            .font(FitFont.body(size: 14, weight: .semibold))
+                            .foregroundColor(isCheckinUnlocked ? FitTheme.textPrimary : FitTheme.textSecondary)
+                    }
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(accentColor.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+            }
+            
+            // Progress indicator when locked
+            if !isCheckinUnlocked && daysUntilCheckin > 0 {
+                HStack(spacing: 4) {
+                    ForEach(0..<7, id: \.self) { day in
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(day < (7 - daysUntilCheckin) ? accentColor : accentColor.opacity(0.2))
+                            .frame(height: 4)
+                    }
+                }
+            }
+            
+            // Start button
+            Button {
+                if isCheckinUnlocked {
                     showCheckinFlow = true
+                } else {
+                    showCheckinLockedSheet = true
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: isCheckinUnlocked ? "plus.circle.fill" : "lock.fill")
+                        .font(.system(size: 16))
+                    Text(isCheckinUnlocked ? "Start Check-in" : "Locked • \(daysUntilCheckin) day\(daysUntilCheckin == 1 ? "" : "s") until \(checkinDayName)")
+                        .font(FitFont.body(size: 14, weight: .semibold))
+                }
+                .foregroundColor(.white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 14)
+                .background(
+                    LinearGradient(
+                        colors: [accentColor, accentColor.opacity(0.8)],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .shadow(color: accentColor.opacity(isCheckinUnlocked ? 0.3 : 0.15), radius: 8, x: 0, y: 4)
+            }
+            .buttonStyle(.plain)
+            
+            // Hint text when locked
+            if !isCheckinUnlocked {
+                HStack(spacing: 6) {
+                    Image(systemName: "info.circle.fill")
+                        .font(.system(size: 12))
+                        .foregroundColor(FitTheme.textSecondary.opacity(0.6))
+                    Text("Tap to change your check-in day")
+                        .font(FitFont.body(size: 11))
+                        .foregroundColor(FitTheme.textSecondary.opacity(0.6))
                 }
             }
         }
+        .padding(18)
+        .background(isCheckinUnlocked ? FitTheme.cardProgress : FitTheme.cardProgress.opacity(0.7))
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .opacity(isCheckinUnlocked ? 1.0 : 0.9)
+        .sheet(isPresented: $showCheckinLockedSheet) {
+            ProgressCheckinLockedSheet(checkinDayName: checkinDayName, daysUntilCheckin: daysUntilCheckin)
+        }
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(FitTheme.cardProgressAccent.opacity(0.2), lineWidth: 1)
+        )
+        .shadow(color: FitTheme.cardProgressAccent.opacity(0.1), radius: 12, x: 0, y: 6)
     }
 
     private var photosCard: some View {
-        CardContainer {
-            VStack(alignment: .leading, spacing: 12) {
-                SectionHeader(title: "Progress photos", subtitle: "Store your weekly shots.")
-
-                Text("\(photoItems.count) photos logged")
-                    .font(FitFont.body(size: 13))
-                    .foregroundColor(FitTheme.textSecondary)
-
-                ActionButton(title: "View progress photos", style: .secondary) {
-                    showPhotos = true
+        VStack(alignment: .leading, spacing: 16) {
+            // Header with icon
+            HStack(spacing: 12) {
+                ZStack {
+                    Circle()
+                        .fill(
+                            LinearGradient(
+                                colors: [FitTheme.cardNutritionAccent, FitTheme.cardNutritionAccent.opacity(0.7)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .frame(width: 44, height: 44)
+                        .shadow(color: FitTheme.cardNutritionAccent.opacity(0.3), radius: 6, x: 0, y: 3)
+                    
+                    Image(systemName: "photo.on.rectangle.angled")
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundColor(.white)
                 }
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Progress Photos")
+                        .font(FitFont.heading(size: 18))
+                        .foregroundColor(FitTheme.textPrimary)
+                    Text("Store your weekly shots")
+                        .font(FitFont.body(size: 12))
+                        .foregroundColor(FitTheme.textSecondary)
+                }
+                
+                Spacer()
+                
+                Button {
+                    showPhotos = true
+                } label: {
+                    Image(systemName: "arrow.right.circle.fill")
+                        .font(.system(size: 24))
+                        .foregroundColor(FitTheme.cardNutritionAccent)
+                }
+                .buttonStyle(.plain)
             }
+            
+            // Photo count with icon
+            HStack(spacing: 10) {
+                Image(systemName: "photo.stack.fill")
+                    .font(.system(size: 14))
+                    .foregroundColor(FitTheme.cardNutritionAccent)
+                Text("\(photoItems.count) photos logged")
+                    .font(FitFont.body(size: 14))
+                    .foregroundColor(FitTheme.textPrimary)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(FitTheme.cardNutritionAccent.opacity(0.08))
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+        }
+        .padding(18)
+        .background(FitTheme.cardNutrition)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(FitTheme.cardNutritionAccent.opacity(0.2), lineWidth: 1)
+        )
+        .shadow(color: FitTheme.cardNutritionAccent.opacity(0.1), radius: 12, x: 0, y: 6)
+        .onTapGesture {
+            showPhotos = true
         }
     }
 
     private var resultsCard: some View {
-        CardContainer {
-            VStack(alignment: .leading, spacing: 12) {
-                SectionHeader(title: "Coach recap", subtitle: "Latest check-in feedback.")
-
-                let highlights = latestRecapHighlights
-                if !highlights.isEmpty {
-                    VStack(alignment: .leading, spacing: 6) {
-                        ForEach(highlights.indices, id: \.self) { index in
-                            Text("• \(highlights[index])")
-                                .font(FitFont.body(size: 13))
-                                .foregroundColor(FitTheme.textSecondary)
-                        }
-                    }
-                } else {
-                    Text(latestCheckinSummary ?? latestFallbackSummary ?? "Your latest check-in is logged.")
-                        .font(FitFont.body(size: 13))
-                        .foregroundColor(FitTheme.textSecondary)
-                        .lineLimit(4)
+        VStack(alignment: .leading, spacing: 16) {
+            // Header with coach icon
+            HStack(spacing: 12) {
+                ZStack {
+                    Circle()
+                        .fill(
+                            LinearGradient(
+                                colors: [FitTheme.cardCoachAccent, FitTheme.cardCoachAccent.opacity(0.7)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .frame(width: 44, height: 44)
+                        .shadow(color: FitTheme.cardCoachAccent.opacity(0.3), radius: 6, x: 0, y: 3)
+                    
+                    Image(systemName: "brain.head.profile")
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundColor(.white)
                 }
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Coach Recap")
+                        .font(FitFont.heading(size: 18))
+                        .foregroundColor(FitTheme.textPrimary)
+                    Text("Latest check-in feedback")
+                        .font(FitFont.body(size: 12))
+                        .foregroundColor(FitTheme.textSecondary)
+                }
+                
+                Spacer()
+                
+                if latestCheckin != nil {
+                    Button {
+                        if let latest = latestCheckin {
+                            selectedCheckin = latest
+                        }
+                    } label: {
+                        Image(systemName: "arrow.right.circle.fill")
+                            .font(.system(size: 24))
+                            .foregroundColor(FitTheme.cardCoachAccent)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            
+            let highlights = latestRecapHighlights
+            if !highlights.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(highlights.indices, id: \.self) { index in
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(systemName: recapIcon(for: index))
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundColor(FitTheme.cardCoachAccent)
+                                .frame(width: 20)
+                            Text(highlights[index])
+                                .font(FitFont.body(size: 13))
+                                .foregroundColor(FitTheme.textPrimary)
+                        }
+                        .padding(10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(FitTheme.cardCoachAccent.opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                    }
+                }
+            } else {
+                Text(latestCheckinSummary ?? latestFallbackSummary ?? "Your latest check-in is logged.")
+                    .font(FitFont.body(size: 13))
+                    .foregroundColor(FitTheme.textSecondary)
+                    .lineLimit(4)
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(FitTheme.cardHighlight)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+            }
 
-                if let context = latestRecapPhotoContext {
+            if let context = latestRecapPhotoContext {
+                HStack(spacing: 8) {
+                    Image(systemName: "camera.fill")
+                        .font(.system(size: 12))
+                        .foregroundColor(FitTheme.cardCoachAccent)
                     Text(context)
                         .font(FitFont.body(size: 12))
                         .foregroundColor(FitTheme.textSecondary)
                 }
-
-                if let latest = latestCheckin {
-                    MacroUpdateActionRow(userId: userId, checkin: latest, isCompact: true)
-                }
-
-                ActionButton(title: "View full recap", style: .secondary) {
-                    if let latest = latestCheckin {
-                        selectedCheckin = latest
-                    }
-                }
             }
+
+            if let latest = latestCheckin {
+                MacroUpdateActionRow(userId: userId, checkin: latest, isCompact: true)
+            }
+        }
+        .padding(18)
+        .background(FitTheme.cardCoach)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(FitTheme.cardCoachAccent.opacity(0.2), lineWidth: 1)
+        )
+        .shadow(color: FitTheme.cardCoachAccent.opacity(0.1), radius: 12, x: 0, y: 6)
+    }
+    
+    private func recapIcon(for index: Int) -> String {
+        switch index {
+        case 0: return "arrow.up.circle.fill"
+        case 1: return "target"
+        case 2: return "lightbulb.fill"
+        default: return "checkmark.circle.fill"
         }
     }
 
@@ -558,6 +974,27 @@ struct ProgressTabView: View {
             .trimmingCharacters(in: .whitespacesAndNewlines),
             !summary.isEmpty
         else {
+            return lastRecapFallback
+        }
+        // Don't return raw JSON - it shows as gibberish to users
+        let trimmed = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Check for direct JSON
+        if trimmed.first == "{" || trimmed.first == "[" {
+            return lastRecapFallback
+        }
+        // Check for JSON in markdown code blocks
+        if trimmed.hasPrefix("```") {
+            return lastRecapFallback
+        }
+        // Check for JSON-like content patterns
+        if trimmed.contains("\"improvements\":") ||
+           trimmed.contains("\"improvements\"") ||
+           trimmed.contains("\"needs work\":") ||
+           trimmed.contains("\"needs_work\":") ||
+           trimmed.contains("\"photo notes\":") ||
+           trimmed.contains("\"photo_notes\":") ||
+           trimmed.contains("\"targets\":") ||
+           trimmed.contains("\"summary\":") {
             return lastRecapFallback
         }
         return summary
@@ -581,7 +1018,20 @@ struct ProgressTabView: View {
             comparisonSource: latestCheckin.aiSummary?.meta?.comparisonSource
         )
         let highlights = latestRecap.highlights
-        return highlights.isEmpty ? fallback.highlights : highlights
+        
+        // Extra safety: filter out any JSON-looking content that slipped through
+        let safeHighlights = highlights.filter { item in
+            !item.contains("\"improvements\"") &&
+            !item.contains("\"needs work\"") &&
+            !item.contains("\"targets\"") &&
+            !item.contains("\"summary\"") &&
+            !item.contains("```json") &&
+            !item.contains("```") &&
+            !(item.trimmingCharacters(in: .whitespacesAndNewlines).first == "{") &&
+            !(item.trimmingCharacters(in: .whitespacesAndNewlines).first == "[")
+        }
+        
+        return safeHighlights.isEmpty ? fallback.highlights : safeHighlights
     }
 
     private var latestRecapPhotoContext: String? {
@@ -742,7 +1192,8 @@ struct ProgressTabView: View {
     private var workoutSummaryByDay: [Date: WorkoutDaySummary] {
         let calendar = Calendar.current
         var summary: [Date: WorkoutDaySummary] = [:]
-        for session in workoutSessions {
+        // Only show completed workouts on the calendar
+        for session in combinedWorkoutSessions where session.status == "completed" {
             guard let sessionDate = sessionDate(from: session.createdAt) else { continue }
             let dayKey = calendar.startOfDay(for: sessionDate)
             var sessions = summary[dayKey]?.sessions ?? []
@@ -753,6 +1204,10 @@ struct ProgressTabView: View {
             summary[dayKey] = WorkoutDaySummary(sessions: sessions, totalMinutes: totalMinutes)
         }
         return summary
+    }
+
+    private var combinedWorkoutSessions: [WorkoutSession] {
+        workoutSessions + healthWorkoutSessions
     }
 
     private func photoContextText(for source: String?, comparisonPhotoCount: Int) -> String? {
@@ -796,6 +1251,7 @@ struct ProgressTabView: View {
             self.checkins = checkins
             self.progressPhotos = photos
             workoutSessions = (try? await sessionsTask) ?? []
+            _ = await syncHealthWorkouts()
             let profile = try? await profileTask
             if let profile,
                let preferences = profile["preferences"] as? [String: Any],
@@ -818,6 +1274,54 @@ struct ProgressTabView: View {
             loadError = error.localizedDescription
         }
         isLoading = false
+    }
+
+    private func syncHealthWorkouts() async -> [HealthWorkout] {
+        guard HealthSyncState.shared.isEnabled else {
+            await MainActor.run {
+                healthWorkoutSessions = []
+            }
+            return []
+        }
+
+        let newWorkouts = await HealthKitManager.shared.syncWorkoutsIfEnabled()
+        let healthWorkouts = HealthWorkoutStore.allWorkouts()
+        let sessions = healthWorkouts.map { workoutSession(from: $0) }
+        await MainActor.run {
+            healthWorkoutSessions = sessions
+        }
+        return newWorkouts
+    }
+
+    private func syncHealthWorkoutsWithStatus() async {
+        guard healthSyncState.isEnabled else {
+            healthSyncMessage = "Enable Apple Health in Settings to sync workouts."
+            return
+        }
+        isHealthSyncing = true
+        healthSyncMessage = nil
+        let newWorkouts = await syncHealthWorkouts()
+        isHealthSyncing = false
+        if newWorkouts.isEmpty {
+            healthSyncMessage = "No new workouts found."
+        } else if newWorkouts.count == 1 {
+            healthSyncMessage = "Imported 1 workout from Apple Health."
+        } else {
+            healthSyncMessage = "Imported \(newWorkouts.count) workouts from Apple Health."
+        }
+    }
+
+    private func workoutSession(from workout: HealthWorkout) -> WorkoutSession {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return WorkoutSession(
+            id: "health-\(workout.id)",
+            templateId: nil,
+            templateTitle: "Apple Health • \(workout.activityType)",
+            status: "completed",
+            durationSeconds: workout.durationSeconds,
+            createdAt: formatter.string(from: workout.startDate)
+        )
     }
 
     private var comparisonPhotoCount: Int {
@@ -844,6 +1348,7 @@ private struct WorkoutCalendarDayCell: View {
     var body: some View {
         if let date {
             let day = Calendar.current.component(.day, from: date)
+            let hasHealthWorkout = summary?.sessions.contains { $0.isHealthWorkout } == true
             Button(action: { onSelect(date) }) {
                 VStack(spacing: 4) {
                     Text("\(day)")
@@ -871,6 +1376,17 @@ private struct WorkoutCalendarDayCell: View {
                 .background(summary == nil ? FitTheme.cardBackground : FitTheme.success.opacity(0.12))
                 .clipShape(RoundedRectangle(cornerRadius: 10))
             }
+            .overlay(alignment: .topTrailing) {
+                if hasHealthWorkout {
+                    Image(systemName: "heart.fill")
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundColor(.white)
+                        .padding(4)
+                        .background(Color.red)
+                        .clipShape(Circle())
+                        .offset(x: 4, y: -4)
+                }
+            }
             .buttonStyle(.plain)
             .disabled(summary == nil)
         } else {
@@ -887,61 +1403,195 @@ private struct WorkoutDayDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var logsBySession: [String: [WorkoutSessionLogEntry]] = [:]
     @State private var isLoading = false
+    @State private var loadError: String?
+    
+    private var formattedDate: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "EEEE, MMM d"
+        return formatter.string(from: date)
+    }
+    
+    private var totalDuration: Int {
+        sessions.reduce(0) { $0 + ($1.durationSeconds ?? 0) } / 60
+    }
+    
+    private var totalExercises: Int {
+        logsBySession.values.reduce(0) { $0 + $1.count }
+    }
 
     var body: some View {
-        NavigationStack {
-            ZStack {
-                FitTheme.backgroundGradient
-                    .ignoresSafeArea()
+        ZStack {
+            FitTheme.backgroundGradient
+                .ignoresSafeArea()
 
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
-                        if isLoading {
-                            Text("Loading workout logs…")
-                                .font(FitFont.body(size: 13))
-                                .foregroundColor(FitTheme.textSecondary)
-                        }
-
-                        if sessions.isEmpty {
-                            Text("No workouts logged.")
-                                .font(FitFont.body(size: 13))
-                                .foregroundColor(FitTheme.textSecondary)
-                        } else {
-                            ForEach(sessions) { session in
-                                WorkoutSessionDetailCard(
-                                    session: session,
-                                    logs: logsBySession[session.id] ?? []
-                                )
-                            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    // Header
+                    header
+                    
+                    // Stats summary
+                    if !sessions.isEmpty {
+                        statsCard
+                    }
+                    
+                    // Sessions
+                    if isLoading {
+                        loadingCard
+                    } else if sessions.isEmpty {
+                        emptyStateCard
+                    } else {
+                        ForEach(sessions) { session in
+                            WorkoutSessionDetailCard(
+                                session: session,
+                                logs: logsBySession[session.id] ?? []
+                            )
                         }
                     }
-                    .padding(.horizontal, 20)
-                    .padding(.top, 12)
-                    .padding(.bottom, 32)
-                }
-            }
-            .navigationTitle(progressDisplayDateFormatter.string(from: date))
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Close") {
-                        dismiss()
+                    
+                    if let error = loadError {
+                        errorCard(error)
                     }
-                    .foregroundColor(FitTheme.textPrimary)
                 }
-            }
-            .task {
-                await loadLogs()
+                .padding(.horizontal, 20)
+                .padding(.top, 12)
+                .padding(.bottom, 32)
             }
         }
+        .task {
+            await loadLogs()
+        }
+    }
+    
+    private var header: some View {
+        VStack(spacing: 16) {
+            // Close button row
+            HStack {
+                Spacer()
+                Button(action: { dismiss() }) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(FitTheme.textSecondary)
+                        .frame(width: 32, height: 32)
+                        .background(FitTheme.cardHighlight)
+                        .clipShape(Circle())
+                }
+            }
+            
+            // Hero section
+            VStack(spacing: 12) {
+                ZStack {
+                    Circle()
+                        .fill(FitTheme.cardWorkoutAccent.opacity(0.15))
+                        .frame(width: 80, height: 80)
+                    
+                    Image(systemName: "dumbbell.fill")
+                        .font(.system(size: 32, weight: .medium))
+                        .foregroundColor(FitTheme.cardWorkoutAccent)
+                }
+                
+                Text("Workout Log")
+                    .font(FitFont.heading(size: 28))
+                    .fontWeight(.bold)
+                    .foregroundColor(FitTheme.textPrimary)
+                
+                Text(formattedDate)
+                    .font(FitFont.body(size: 14))
+                    .foregroundColor(FitTheme.textSecondary)
+            }
+        }
+    }
+    
+    private var statsCard: some View {
+        HStack(spacing: 12) {
+            statItem(icon: "clock.fill", value: "\(totalDuration)", label: "minutes")
+            statItem(icon: "figure.strengthtraining.traditional", value: "\(sessions.count)", label: sessions.count == 1 ? "session" : "sessions")
+            statItem(icon: "list.bullet", value: "\(totalExercises)", label: "exercises")
+        }
+        .padding(16)
+        .background(FitTheme.cardWorkout)
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(FitTheme.cardWorkoutAccent.opacity(0.2), lineWidth: 1)
+        )
+    }
+    
+    private func statItem(icon: String, value: String, label: String) -> some View {
+        VStack(spacing: 6) {
+            Image(systemName: icon)
+                .font(.system(size: 16))
+                .foregroundColor(FitTheme.cardWorkoutAccent)
+            Text(value)
+                .font(FitFont.heading(size: 20))
+                .foregroundColor(FitTheme.textPrimary)
+            Text(label)
+                .font(FitFont.body(size: 11))
+                .foregroundColor(FitTheme.textSecondary)
+        }
+        .frame(maxWidth: .infinity)
+    }
+    
+    private var loadingCard: some View {
+        VStack(spacing: 16) {
+            ProgressView()
+                .scaleEffect(1.2)
+                .tint(FitTheme.cardWorkoutAccent)
+            Text("Loading workout logs...")
+                .font(FitFont.body(size: 14))
+                .foregroundColor(FitTheme.textSecondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(40)
+        .background(FitTheme.cardBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+    }
+    
+    private var emptyStateCard: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "figure.walk")
+                .font(.system(size: 40))
+                .foregroundColor(FitTheme.textSecondary.opacity(0.5))
+            Text("No workouts logged")
+                .font(FitFont.heading(size: 18))
+                .foregroundColor(FitTheme.textPrimary)
+            Text("Start a workout to see your logs here")
+                .font(FitFont.body(size: 14))
+                .foregroundColor(FitTheme.textSecondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(40)
+        .background(FitTheme.cardBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+    }
+    
+    private func errorCard(_ error: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundColor(FitTheme.cardReminderAccent)
+            Text(error)
+                .font(FitFont.body(size: 13))
+                .foregroundColor(FitTheme.textSecondary)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(FitTheme.cardReminder)
+        .clipShape(RoundedRectangle(cornerRadius: 14))
     }
 
     private func loadLogs() async {
         isLoading = true
+        loadError = nil
         var results: [String: [WorkoutSessionLogEntry]] = [:]
         for session in sessions {
-            if let logs = try? await WorkoutAPIService.shared.fetchSessionLogs(sessionId: session.id) {
+            if session.isHealthWorkout {
+                continue
+            }
+            do {
+                let logs = try await WorkoutAPIService.shared.fetchSessionLogs(sessionId: session.id)
                 results[session.id] = logs
+            } catch {
+                print("Failed to load logs for session \(session.id): \(error)")
+                loadError = "Some workout logs couldn't be loaded"
             }
         }
         await MainActor.run {
@@ -956,53 +1606,129 @@ private struct WorkoutSessionDetailCard: View {
     let logs: [WorkoutSessionLogEntry]
 
     var body: some View {
-        CardContainer {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(session.templateTitle ?? "Workout")
-                            .font(FitFont.body(size: 16))
-                            .foregroundColor(FitTheme.textPrimary)
+        let isHealthWorkout = session.isHealthWorkout
+        VStack(alignment: .leading, spacing: 16) {
+            // Header
+            HStack(spacing: 12) {
+                ZStack {
+                    Circle()
+                        .fill(
+                            LinearGradient(
+                                colors: [FitTheme.cardWorkoutAccent, FitTheme.cardWorkoutAccent.opacity(0.7)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .frame(width: 44, height: 44)
+                        .shadow(color: FitTheme.cardWorkoutAccent.opacity(0.3), radius: 6, x: 0, y: 3)
+                    
+                    Image(systemName: isHealthWorkout ? "heart.fill" : "figure.strengthtraining.traditional")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundColor(.white)
+                }
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(session.templateTitle ?? (isHealthWorkout ? "Apple Health Workout" : "Workout"))
+                        .font(FitFont.heading(size: 18))
+                        .foregroundColor(FitTheme.textPrimary)
+                    HStack(spacing: 8) {
                         Text(sessionTime)
                             .font(FitFont.body(size: 12))
                             .foregroundColor(FitTheme.textSecondary)
-                    }
-
-                    Spacer()
-
-                    if let durationSeconds = session.durationSeconds, durationSeconds > 0 {
-                        Text("\(durationSeconds / 60)m")
-                            .font(FitFont.body(size: 12))
-                            .foregroundColor(FitTheme.textSecondary)
+                        if let durationSeconds = session.durationSeconds, durationSeconds > 0 {
+                            Text("•")
+                                .foregroundColor(FitTheme.textSecondary)
+                            Text("\(durationSeconds / 60) min")
+                                .font(FitFont.body(size: 12))
+                                .foregroundColor(FitTheme.textSecondary)
+                        }
                     }
                 }
+                
+                Spacer()
+                
+                if isHealthWorkout {
+                    Text("Apple Health")
+                        .font(FitFont.body(size: 12, weight: .semibold))
+                        .foregroundColor(FitTheme.cardWorkoutAccent)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(FitTheme.cardWorkoutAccent.opacity(0.12))
+                        .clipShape(Capsule())
+                } else if !logs.isEmpty {
+                    Text("\(logs.count)")
+                        .font(FitFont.body(size: 14, weight: .semibold))
+                        .foregroundColor(FitTheme.cardWorkoutAccent)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(FitTheme.cardWorkoutAccent.opacity(0.15))
+                        .clipShape(Capsule())
+                }
+            }
 
-                if logs.isEmpty {
-                    Text("No exercise logs available.")
-                        .font(FitFont.body(size: 12))
+            // Exercise list
+            if logs.isEmpty {
+                HStack(spacing: 10) {
+                    Image(systemName: "info.circle")
                         .foregroundColor(FitTheme.textSecondary)
-                } else {
+                    Text(isHealthWorkout ? "Logged from Apple Health." : "No exercises logged for this session")
+                        .font(FitFont.body(size: 13))
+                        .foregroundColor(FitTheme.textSecondary)
+                }
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(FitTheme.cardHighlight)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+            } else {
+                VStack(spacing: 8) {
                     ForEach(logs) { log in
                         let isCardio = log.exerciseName.lowercased().hasPrefix("cardio -")
                         let detailText = cardioDetail(for: log, isCardio: isCardio)
-                        HStack {
-                            VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 12) {
+                            // Exercise icon
+                            Image(systemName: isCardio ? "figure.run" : "dumbbell.fill")
+                                .font(.system(size: 14))
+                                .foregroundColor(FitTheme.cardWorkoutAccent)
+                                .frame(width: 28, height: 28)
+                                .background(FitTheme.cardWorkoutAccent.opacity(0.1))
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                            
+                            VStack(alignment: .leading, spacing: 3) {
                                 Text(log.exerciseName)
-                                    .font(FitFont.body(size: 14))
+                                    .font(FitFont.body(size: 14, weight: .medium))
                                     .foregroundColor(FitTheme.textPrimary)
                                 Text(detailText)
-                                    .font(FitFont.body(size: 11))
+                                    .font(FitFont.body(size: 12))
                                     .foregroundColor(FitTheme.textSecondary)
                             }
+                            
                             Spacer()
+                            
+                            // Weight badge for strength exercises
+                            if !isCardio && log.weight > 0 {
+                                Text("\(Int(log.weight)) lb")
+                                    .font(FitFont.body(size: 12, weight: .semibold))
+                                    .foregroundColor(FitTheme.cardWorkoutAccent)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(FitTheme.cardWorkoutAccent.opacity(0.1))
+                                    .clipShape(Capsule())
+                            }
                         }
-                        .padding(10)
+                        .padding(12)
                         .background(FitTheme.cardHighlight)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .clipShape(RoundedRectangle(cornerRadius: 14))
                     }
                 }
             }
         }
+        .padding(18)
+        .background(FitTheme.cardWorkout)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(FitTheme.cardWorkoutAccent.opacity(0.2), lineWidth: 1)
+        )
     }
 
     private var sessionTime: String {
@@ -1025,7 +1751,258 @@ private struct WorkoutSessionDetailCard: View {
             }
             return minutes
         }
-        return "\(log.sets) sets · \(log.reps) reps · \(Int(log.weight)) lb"
+        return "\(log.sets) sets × \(log.reps) reps"
+    }
+}
+
+// MARK: - Progress Check-In Locked Sheet
+private struct ProgressCheckinLockedSheet: View {
+    let checkinDayName: String
+    let daysUntilCheckin: Int
+    
+    @Environment(\.dismiss) private var dismiss
+    @State private var showDayPicker = false
+    
+    var body: some View {
+        ZStack {
+            FitTheme.backgroundGradient
+                .ignoresSafeArea()
+            
+            VStack(spacing: 24) {
+                // Close button
+                HStack {
+                    Spacer()
+                    Button(action: { dismiss() }) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(FitTheme.textSecondary)
+                            .frame(width: 32, height: 32)
+                            .background(FitTheme.cardHighlight)
+                            .clipShape(Circle())
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 20)
+                
+                Spacer()
+                
+                // Lock icon
+                ZStack {
+                    Circle()
+                        .fill(FitTheme.cardProgressAccent.opacity(0.15))
+                        .frame(width: 120, height: 120)
+                    
+                    Image(systemName: "lock.fill")
+                        .font(.system(size: 48, weight: .medium))
+                        .foregroundColor(FitTheme.cardProgressAccent)
+                }
+                
+                // Title
+                Text("Check-In Locked")
+                    .font(FitFont.heading(size: 28))
+                    .fontWeight(.bold)
+                    .foregroundColor(FitTheme.textPrimary)
+                
+                // Message
+                VStack(spacing: 8) {
+                    Text("Your weekly check-in is available on")
+                        .font(FitFont.body(size: 16))
+                        .foregroundColor(FitTheme.textSecondary)
+                    
+                    Text(checkinDayName)
+                        .font(FitFont.heading(size: 24))
+                        .foregroundColor(FitTheme.cardProgressAccent)
+                    
+                    if daysUntilCheckin == 1 {
+                        Text("That's tomorrow!")
+                            .font(FitFont.body(size: 14))
+                            .foregroundColor(FitTheme.textSecondary)
+                    } else {
+                        Text("That's in \(daysUntilCheckin) days")
+                            .font(FitFont.body(size: 14))
+                            .foregroundColor(FitTheme.textSecondary)
+                    }
+                }
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 40)
+                
+                Spacer()
+                
+                // Change day button
+                VStack(spacing: 12) {
+                    Text("Would you like to change your check-in day?")
+                        .font(FitFont.body(size: 14))
+                        .foregroundColor(FitTheme.textSecondary)
+                    
+                    Button(action: {
+                        showDayPicker = true
+                    }) {
+                        HStack(spacing: 10) {
+                            Image(systemName: "calendar")
+                                .font(.system(size: 16, weight: .semibold))
+                            Text("Change Check-In Day")
+                                .font(FitFont.body(size: 16, weight: .semibold))
+                        }
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 16)
+                        .background(
+                            LinearGradient(
+                                colors: [FitTheme.cardProgressAccent, FitTheme.cardProgressAccent.opacity(0.8)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        .shadow(color: FitTheme.cardProgressAccent.opacity(0.4), radius: 12, x: 0, y: 6)
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.bottom, 40)
+            }
+        }
+        .sheet(isPresented: $showDayPicker) {
+            ProgressCheckinDayPickerSheet(onDismissParent: { dismiss() })
+        }
+    }
+}
+
+// MARK: - Progress Check-In Day Picker Sheet
+private struct ProgressCheckinDayPickerSheet: View {
+    let onDismissParent: () -> Void
+    
+    @Environment(\.dismiss) private var dismiss
+    @AppStorage("checkinDay") private var checkinDay: Int = 0
+    @State private var selectedDay: Int = 0
+    @State private var isSaving = false
+    
+    private let days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+    
+    var body: some View {
+        ZStack {
+            FitTheme.backgroundGradient
+                .ignoresSafeArea()
+            
+            VStack(spacing: 20) {
+                // Header
+                HStack {
+                    Button(action: { dismiss() }) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(FitTheme.textSecondary)
+                            .frame(width: 32, height: 32)
+                            .background(FitTheme.cardHighlight)
+                            .clipShape(Circle())
+                    }
+                    
+                    Spacer()
+                    
+                    Text("Check-In Day")
+                        .font(FitFont.heading(size: 18))
+                        .foregroundColor(FitTheme.textPrimary)
+                    
+                    Spacer()
+                    
+                    Color.clear
+                        .frame(width: 32, height: 32)
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 20)
+                
+                // Hero
+                VStack(spacing: 12) {
+                    ZStack {
+                        Circle()
+                            .fill(FitTheme.cardProgressAccent.opacity(0.15))
+                            .frame(width: 80, height: 80)
+                        
+                        Image(systemName: "calendar.badge.clock")
+                            .font(.system(size: 32, weight: .medium))
+                            .foregroundColor(FitTheme.cardProgressAccent)
+                    }
+                    
+                    Text("Choose Your Check-In Day")
+                        .font(FitFont.heading(size: 22))
+                        .foregroundColor(FitTheme.textPrimary)
+                    
+                    Text("Pick the day that works best for your schedule")
+                        .font(FitFont.body(size: 14))
+                        .foregroundColor(FitTheme.textSecondary)
+                        .multilineTextAlignment(.center)
+                }
+                .padding(.top, 8)
+                
+                // Day picker
+                ScrollView {
+                    VStack(spacing: 8) {
+                        ForEach(0..<7, id: \.self) { index in
+                            Button(action: {
+                                selectedDay = index
+                                Haptics.light()
+                            }) {
+                                HStack {
+                                    Text(days[index])
+                                        .font(FitFont.body(size: 16, weight: selectedDay == index ? .semibold : .regular))
+                                        .foregroundColor(selectedDay == index ? .white : FitTheme.textPrimary)
+                                    
+                                    Spacer()
+                                    
+                                    if selectedDay == index {
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .font(.system(size: 20))
+                                            .foregroundColor(.white)
+                                    }
+                                }
+                                .padding(.horizontal, 18)
+                                .padding(.vertical, 16)
+                                .background(selectedDay == index ? FitTheme.cardProgressAccent : FitTheme.cardHighlight)
+                                .clipShape(RoundedRectangle(cornerRadius: 14))
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 20)
+                }
+                
+                // Save button
+                Button(action: saveDay) {
+                    if isSaving {
+                        ProgressView()
+                            .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                    } else {
+                        Text("Save Changes")
+                            .font(FitFont.body(size: 16, weight: .semibold))
+                    }
+                }
+                .foregroundColor(.white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 16)
+                .background(
+                    LinearGradient(
+                        colors: [FitTheme.cardProgressAccent, FitTheme.cardProgressAccent.opacity(0.8)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .shadow(color: FitTheme.cardProgressAccent.opacity(0.4), radius: 12, x: 0, y: 6)
+                .padding(.horizontal, 20)
+                .padding(.bottom, 32)
+            }
+        }
+        .onAppear {
+            selectedDay = checkinDay
+        }
+    }
+    
+    private func saveDay() {
+        isSaving = true
+        checkinDay = selectedDay
+        Haptics.success()
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            dismiss()
+            onDismissParent()
+        }
     }
 }
 
@@ -1104,106 +2081,231 @@ private struct CheckinFlowView: View {
     }
 
     private var header: some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 6) {
+        VStack(spacing: 16) {
+            // Close button row
+            HStack {
+                Spacer()
+                Button(action: { dismiss() }) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(FitTheme.textSecondary)
+                        .frame(width: 32, height: 32)
+                        .background(FitTheme.cardHighlight)
+                        .clipShape(Circle())
+                }
+            }
+            
+            // Hero section
+            VStack(spacing: 12) {
+                ZStack {
+                    Circle()
+                        .fill(FitTheme.cardProgressAccent.opacity(0.15))
+                        .frame(width: 80, height: 80)
+                    
+                    Image(systemName: "chart.line.uptrend.xyaxis")
+                        .font(.system(size: 32, weight: .medium))
+                        .foregroundColor(FitTheme.cardProgressAccent)
+                }
+                
                 Text("Weekly Check-in")
                     .font(FitFont.heading(size: 28))
-                    .fontWeight(.semibold)
+                    .fontWeight(.bold)
                     .foregroundColor(FitTheme.textPrimary)
-
-                Text("Log weight and adherence.")
+                
+                Text("Track your progress and keep the momentum going!")
                     .font(FitFont.body(size: 14))
                     .foregroundColor(FitTheme.textSecondary)
+                    .multilineTextAlignment(.center)
             }
-
-            Spacer()
-
-            Button("Close") {
-                dismiss()
-            }
-            .font(FitFont.body(size: 14))
-            .foregroundColor(FitTheme.textSecondary)
         }
     }
 
     private var basicsCard: some View {
-        CardContainer {
-            VStack(alignment: .leading, spacing: 12) {
-                SectionHeader(title: "Basics", subtitle: "Date and current weight.")
-
-                DatePicker("Check-in date", selection: $checkinDate, displayedComponents: .date)
-                    .datePickerStyle(.compact)
-                    .tint(FitTheme.cardHighlight)
-
-                labeledField("Current weight (lb)", text: $weightText, keyboard: .decimalPad)
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 10) {
+                Image(systemName: "scalemass.fill")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(width: 32, height: 32)
+                    .background(FitTheme.cardProgressAccent)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                
+                Text("Basics")
+                    .font(FitFont.heading(size: 18))
+                    .foregroundColor(FitTheme.textPrimary)
+            }
+            
+            VStack(spacing: 12) {
+                HStack {
+                    Text("Check-in date")
+                        .font(FitFont.body(size: 14))
+                        .foregroundColor(FitTheme.textPrimary)
+                    Spacer()
+                    DatePicker("", selection: $checkinDate, displayedComponents: .date)
+                        .datePickerStyle(.compact)
+                        .labelsHidden()
+                        .tint(FitTheme.accent)
+                }
+                .padding(14)
+                .background(FitTheme.cardHighlight)
+                .clipShape(RoundedRectangle(cornerRadius: 14))
+                
+                HStack {
+                    Text("Current weight")
+                        .font(FitFont.body(size: 14))
+                        .foregroundColor(FitTheme.textPrimary)
+                    Spacer()
+                    TextField("0", text: $weightText)
+                        .keyboardType(.decimalPad)
+                        .multilineTextAlignment(.trailing)
+                        .font(FitFont.body(size: 16, weight: .semibold))
+                        .foregroundColor(FitTheme.textPrimary)
+                        .frame(width: 80)
+                    Text("lbs")
+                        .font(FitFont.body(size: 14))
+                        .foregroundColor(FitTheme.textSecondary)
+                }
+                .padding(14)
+                .background(FitTheme.cardHighlight)
+                .clipShape(RoundedRectangle(cornerRadius: 14))
             }
         }
+        .padding(18)
+        .background(FitTheme.cardProgress)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(FitTheme.cardProgressAccent.opacity(0.2), lineWidth: 1)
+        )
     }
 
     private var adherenceCard: some View {
-        CardContainer {
-            VStack(alignment: .leading, spacing: 12) {
-                SectionHeader(title: "Adherence", subtitle: "How did the week go?")
-
-                CheckinChoicePicker(title: "Workouts hit", selection: $workoutsChoice)
-                CheckinChoicePicker(title: "Calories hit", selection: $caloriesChoice)
-                CheckinChoicePicker(title: "Sleep quality", selection: $sleepChoice)
-                CheckinChoicePicker(title: "Steps hit", selection: $stepsChoice)
-                CheckinChoicePicker(title: "Mood", selection: $moodChoice)
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 10) {
+                Image(systemName: "checkmark.seal.fill")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(width: 32, height: 32)
+                    .background(FitTheme.cardWorkoutAccent)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Weekly Adherence")
+                        .font(FitFont.heading(size: 18))
+                        .foregroundColor(FitTheme.textPrimary)
+                    Text("How did the week go?")
+                        .font(FitFont.body(size: 12))
+                        .foregroundColor(FitTheme.textSecondary)
+                }
+            }
+            
+            VStack(spacing: 10) {
+                CheckinChoiceRow(title: "Workouts hit", icon: "figure.run", selection: $workoutsChoice)
+                CheckinChoiceRow(title: "Calories hit", icon: "fork.knife", selection: $caloriesChoice)
+                CheckinChoiceRow(title: "Sleep quality", icon: "moon.zzz.fill", selection: $sleepChoice)
+                CheckinChoiceRow(title: "Steps hit", icon: "shoeprints.fill", selection: $stepsChoice)
+                CheckinChoiceRow(title: "Mood", icon: "face.smiling.fill", selection: $moodChoice)
             }
         }
+        .padding(18)
+        .background(FitTheme.cardWorkout)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(FitTheme.cardWorkoutAccent.opacity(0.2), lineWidth: 1)
+        )
     }
 
     private var photosCard: some View {
-        CardContainer {
-            VStack(alignment: .leading, spacing: 12) {
-                SectionHeader(title: "Photos", subtitle: "Add up to three check-in photos.")
-
-                if !selectedImages.isEmpty {
-                    photoGrid
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 10) {
+                Image(systemName: "camera.fill")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(width: 32, height: 32)
+                    .background(FitTheme.cardNutritionAccent)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Progress Photos")
+                        .font(FitFont.heading(size: 18))
+                        .foregroundColor(FitTheme.textPrimary)
+                    Text("Add up to 3 photos (optional)")
+                        .font(FitFont.body(size: 12))
+                        .foregroundColor(FitTheme.textSecondary)
                 }
+            }
 
-                HStack(spacing: 12) {
-                    ActionButton(title: "Take photo", style: .secondary) {
-                        if UIImagePickerController.isSourceTypeAvailable(.camera) {
-                            isShowingCamera = true
-                            cameraError = nil
-                        } else {
-                            cameraError = "Camera is not available on this device."
-                        }
-                    }
-                    .disabled(selectedImages.count >= 3)
+            if !selectedImages.isEmpty {
+                photoGrid
+            }
 
-                    PhotosPicker(
-                        selection: $photoSelections,
-                        maxSelectionCount: max(0, 3 - selectedImages.count),
-                        matching: .images
-                    ) {
-                        Text("Choose photos")
-                            .font(FitFont.body(size: 14))
-                            .fontWeight(.semibold)
-                            .foregroundColor(FitTheme.textPrimary)
-                            .padding(.vertical, 10)
-                            .frame(maxWidth: .infinity)
-                            .background(FitTheme.cardHighlight)
-                            .clipShape(Capsule())
+            HStack(spacing: 12) {
+                Button {
+                    if UIImagePickerController.isSourceTypeAvailable(.camera) {
+                        isShowingCamera = true
+                        cameraError = nil
+                    } else {
+                        cameraError = "Camera is not available on this device."
                     }
-                    .disabled(selectedImages.count >= 3)
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "camera")
+                            .font(.system(size: 14, weight: .medium))
+                        Text("Camera")
+                            .font(FitFont.body(size: 14, weight: .semibold))
+                    }
+                    .foregroundColor(FitTheme.textPrimary)
+                    .padding(.vertical, 12)
+                    .frame(maxWidth: .infinity)
+                    .background(FitTheme.cardHighlight)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
                 }
+                .disabled(selectedImages.count >= 3)
 
-                if isLoadingPhotos {
+                PhotosPicker(
+                    selection: $photoSelections,
+                    maxSelectionCount: max(0, 3 - selectedImages.count),
+                    matching: .images
+                ) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "photo.on.rectangle")
+                            .font(.system(size: 14, weight: .medium))
+                        Text("Gallery")
+                            .font(FitFont.body(size: 14, weight: .semibold))
+                    }
+                    .foregroundColor(FitTheme.textPrimary)
+                    .padding(.vertical, 12)
+                    .frame(maxWidth: .infinity)
+                    .background(FitTheme.cardHighlight)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                }
+                .disabled(selectedImages.count >= 3)
+            }
+
+            if isLoadingPhotos {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .scaleEffect(0.8)
                     Text("Loading photos...")
                         .font(FitFont.body(size: 12))
                         .foregroundColor(FitTheme.textSecondary)
                 }
+            }
 
-                if let cameraError {
-                    Text(cameraError)
-                        .font(FitFont.body(size: 12))
-                        .foregroundColor(.red.opacity(0.8))
-                }
+            if let cameraError {
+                Text(cameraError)
+                    .font(FitFont.body(size: 12))
+                    .foregroundColor(.red.opacity(0.8))
             }
         }
+        .padding(18)
+        .background(FitTheme.cardNutrition)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(FitTheme.cardNutritionAccent.opacity(0.2), lineWidth: 1)
+        )
         .onChange(of: photoSelections) { newSelections in
             Task {
                 await loadSelectedPhotos(from: newSelections)
@@ -1215,13 +2317,41 @@ private struct CheckinFlowView: View {
     }
 
     private var submitSection: some View {
-        VStack(spacing: 12) {
-            ActionButton(title: isSubmitting ? "Saving..." : "Submit check-in", style: .primary) {
+        VStack(spacing: 16) {
+            Button {
                 Task {
                     await submit()
                 }
+            } label: {
+                HStack(spacing: 10) {
+                    if isSubmitting {
+                        ProgressView()
+                            .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                            .scaleEffect(0.9)
+                    }
+                    Text(isSubmitting ? "Analyzing..." : "Submit Check-in")
+                        .font(FitFont.body(size: 16, weight: .bold))
+                }
+                .foregroundColor(.white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 16)
+                .background(
+                    LinearGradient(
+                        colors: [FitTheme.accent, FitTheme.accent.opacity(0.8)],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .shadow(color: FitTheme.accent.opacity(0.3), radius: 8, x: 0, y: 4)
             }
             .disabled(isSubmitting)
+            .opacity(isSubmitting ? 0.8 : 1.0)
+            
+            Text("Your AI coach will analyze your progress")
+                .font(FitFont.body(size: 12))
+                .foregroundColor(FitTheme.textSecondary)
+                .multilineTextAlignment(.center)
         }
     }
 
@@ -1490,11 +2620,69 @@ where Choice.RawValue == String {
     }
 }
 
+private struct CheckinChoiceRow<Choice: CaseIterable & Identifiable & RawRepresentable & Hashable>: View
+where Choice.RawValue == String {
+    let title: String
+    let icon: String
+    @Binding var selection: Choice
+    
+    private func colorForChoice(_ choice: Choice) -> Color {
+        switch choice.rawValue {
+        case "Missed", "Low":
+            return Color(red: 0.92, green: 0.30, blue: 0.25)
+        case "On track", "Okay":
+            return FitTheme.cardWorkoutAccent
+        case "Exceeded", "Great":
+            return FitTheme.success
+        default:
+            return FitTheme.textSecondary
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: icon)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(FitTheme.textSecondary)
+                Text(title)
+                    .font(FitFont.body(size: 13))
+                    .foregroundColor(FitTheme.textPrimary)
+            }
+            
+            HStack(spacing: 8) {
+                ForEach(Array(Choice.allCases)) { choice in
+                    Button {
+                        selection = choice
+                        Haptics.light()
+                    } label: {
+                        Text(choice.rawValue)
+                            .font(FitFont.body(size: 12, weight: selection == choice ? .semibold : .regular))
+                            .foregroundColor(selection == choice ? .white : FitTheme.textPrimary)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .frame(maxWidth: .infinity)
+                            .background(selection == choice ? colorForChoice(choice) : FitTheme.cardHighlight)
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .padding(12)
+        .background(FitTheme.cardBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+    }
+}
+
 private struct ProgressPhotoGalleryView: View {
     let items: [ProgressTabView.ProgressPhotoItem]
+    @Environment(\.dismiss) private var dismiss
 
     private let columns = [
-        GridItem(.adaptive(minimum: 110), spacing: 12),
+        GridItem(.flexible(), spacing: 8),
+        GridItem(.flexible(), spacing: 8),
+        GridItem(.flexible(), spacing: 8),
     ]
 
     private enum PhotoCategory: String, CaseIterable, Identifiable {
@@ -1530,9 +2718,18 @@ private struct ProgressPhotoGalleryView: View {
             }
         }
     }
+    
+    private enum ViewMode: String, CaseIterable, Identifiable {
+        case timeline = "Timeline"
+        case grid = "Grid"
+        
+        var id: String { rawValue }
+    }
 
     @State private var selectedCategory: PhotoCategory = .all
     @State private var selectedRange: PhotoRange = .all
+    @State private var viewMode: ViewMode = .timeline
+    @State private var expandedPhoto: ProgressTabView.ProgressPhotoItem?
 
     private var filteredItems: [ProgressTabView.ProgressPhotoItem] {
         let categoryFiltered = items.filter { item in
@@ -1547,10 +2744,39 @@ private struct ProgressPhotoGalleryView: View {
         let cutoff = Calendar.current.date(byAdding: .day, value: -days, to: Date()) ?? Date()
         return categoryFiltered.filter { ($0.date ?? .distantPast) >= cutoff }
     }
+    
+    // Group photos by date for timeline view
+    private var photosByDate: [(date: Date, photos: [ProgressTabView.ProgressPhotoItem])] {
+        let grouped = Dictionary(grouping: filteredItems) { item -> Date in
+            guard let date = item.date else { return Date.distantPast }
+            return Calendar.current.startOfDay(for: date)
+        }
+        return grouped.sorted { $0.key > $1.key }.map { (date: $0.key, photos: $0.value) }
+    }
 
     private func normalizedCategory(_ value: String?) -> String? {
         guard let value = value?.lowercased() else { return nil }
         return value.replacingOccurrences(of: "-", with: "")
+    }
+    
+    private func formatTimelineDate(_ date: Date) -> String {
+        if date == Date.distantPast { return "Unknown Date" }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "EEEE, MMM d, yyyy"
+        return formatter.string(from: date)
+    }
+    
+    private func relativeDate(_ date: Date) -> String {
+        if date == Date.distantPast { return "" }
+        let calendar = Calendar.current
+        let now = Date()
+        let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: date), to: calendar.startOfDay(for: now)).day ?? 0
+        
+        if days == 0 { return "Today" }
+        if days == 1 { return "Yesterday" }
+        if days < 7 { return "\(days) days ago" }
+        if days < 30 { return "\(days / 7) week\(days / 7 == 1 ? "" : "s") ago" }
+        return "\(days / 30) month\(days / 30 == 1 ? "" : "s") ago"
     }
 
     var body: some View {
@@ -1559,61 +2785,322 @@ private struct ProgressPhotoGalleryView: View {
                 .ignoresSafeArea()
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    Text("Progress Photos")
-                        .font(FitFont.heading(size: 26))
-                        .fontWeight(.semibold)
+                VStack(alignment: .leading, spacing: 18) {
+                    // Header
+                    header
+                    
+                    // Filters card
+                    filtersCard
+                    
+                    // View mode picker
+                    viewModePicker
+                    
+                    // Photos content
+                    if viewMode == .timeline {
+                        timelineView
+                    } else {
+                        photosGridCard
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 12)
+                .padding(.bottom, 32)
+            }
+            
+            // Expanded photo overlay
+            if let photo = expandedPhoto {
+                ExpandedPhotoView(photo: photo) {
+                    withAnimation(.spring(response: 0.3)) {
+                        expandedPhoto = nil
+                    }
+                }
+                .transition(.opacity.combined(with: .scale(scale: 0.9)))
+            }
+        }
+        .animation(.spring(response: 0.3), value: expandedPhoto != nil)
+    }
+    
+    private var header: some View {
+        VStack(spacing: 16) {
+            // Close button row
+            HStack {
+                Spacer()
+                Button(action: { dismiss() }) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(FitTheme.textSecondary)
+                        .frame(width: 32, height: 32)
+                        .background(FitTheme.cardHighlight)
+                        .clipShape(Circle())
+                }
+            }
+            
+            // Hero section
+            VStack(spacing: 12) {
+                ZStack {
+                    Circle()
+                        .fill(FitTheme.cardNutritionAccent.opacity(0.15))
+                        .frame(width: 80, height: 80)
+                    
+                    Image(systemName: "photo.on.rectangle.angled")
+                        .font(.system(size: 32, weight: .medium))
+                        .foregroundColor(FitTheme.cardNutritionAccent)
+                }
+                
+                Text("Progress Photos")
+                    .font(FitFont.heading(size: 28))
+                    .fontWeight(.bold)
+                    .foregroundColor(FitTheme.textPrimary)
+                
+                Text("Track your visual progress over time")
+                    .font(FitFont.body(size: 14))
+                    .foregroundColor(FitTheme.textSecondary)
+                    .multilineTextAlignment(.center)
+            }
+        }
+    }
+    
+    private var filtersCard: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 10) {
+                Image(systemName: "line.3.horizontal.decrease.circle.fill")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(width: 32, height: 32)
+                    .background(FitTheme.cardNutritionAccent)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                
+                Text("Filters")
+                    .font(FitFont.heading(size: 18))
+                    .foregroundColor(FitTheme.textPrimary)
+            }
+            
+            VStack(spacing: 12) {
+                Picker("Category", selection: $selectedCategory) {
+                    ForEach(PhotoCategory.allCases) { category in
+                        Text(category.rawValue).tag(category)
+                    }
+                }
+                .pickerStyle(.segmented)
+                
+                Picker("Range", selection: $selectedRange) {
+                    ForEach(PhotoRange.allCases) { range in
+                        Text(range.rawValue).tag(range)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
+        }
+        .padding(18)
+        .background(FitTheme.cardNutrition)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(FitTheme.cardNutritionAccent.opacity(0.2), lineWidth: 1)
+        )
+    }
+    
+    private var viewModePicker: some View {
+        HStack(spacing: 8) {
+            ForEach(ViewMode.allCases) { mode in
+                Button {
+                    withAnimation(.spring(response: 0.3)) {
+                        viewMode = mode
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: mode == .timeline ? "clock.fill" : "square.grid.2x2.fill")
+                            .font(.system(size: 12))
+                        Text(mode.rawValue)
+                            .font(FitFont.body(size: 13, weight: .medium))
+                    }
+                    .foregroundColor(viewMode == mode ? .white : FitTheme.textPrimary)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(viewMode == mode ? FitTheme.cardNutritionAccent : FitTheme.cardHighlight)
+                    .clipShape(Capsule())
+                }
+            }
+            Spacer()
+            
+            Text("\(filteredItems.count) photos")
+                .font(FitFont.body(size: 12))
+                .foregroundColor(FitTheme.textSecondary)
+        }
+    }
+    
+    private var timelineView: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if photosByDate.isEmpty {
+                emptyStateCard
+            } else {
+                ForEach(Array(photosByDate.enumerated()), id: \.element.date) { index, group in
+                    TimelineDateSection(
+                        date: group.date,
+                        formattedDate: formatTimelineDate(group.date),
+                        relativeDate: relativeDate(group.date),
+                        photos: group.photos,
+                        isLast: index == photosByDate.count - 1,
+                        onPhotoTap: { photo in
+                            withAnimation(.spring(response: 0.3)) {
+                                expandedPhoto = photo
+                            }
+                        }
+                    )
+                }
+            }
+        }
+    }
+    
+    private var photosGridCard: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 10) {
+                Image(systemName: "photo.stack.fill")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(width: 32, height: 32)
+                    .background(FitTheme.cardProgressAccent)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Your Photos")
+                        .font(FitFont.heading(size: 18))
                         .foregroundColor(FitTheme.textPrimary)
-
-                    Picker("Category", selection: $selectedCategory) {
-                        ForEach(PhotoCategory.allCases) { category in
-                            Text(category.rawValue).tag(category)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .tint(FitTheme.cardHighlight)
-
-                    Picker("Range", selection: $selectedRange) {
-                        ForEach(PhotoRange.allCases) { range in
-                            Text(range.rawValue).tag(range)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .tint(FitTheme.cardHighlight)
-
                     Text("\(filteredItems.count) photos")
                         .font(FitFont.body(size: 12))
                         .foregroundColor(FitTheme.textSecondary)
-
-                    if filteredItems.isEmpty {
-                        Text("No photos uploaded yet.")
-                            .font(FitFont.body(size: 14))
-                            .foregroundColor(FitTheme.textSecondary)
-                    } else {
-                        LazyVGrid(columns: columns, spacing: 12) {
-                            ForEach(filteredItems) { item in
-                                ProgressPhotoTile(item: item)
+                }
+            }
+            
+            if filteredItems.isEmpty {
+                emptyStateContent
+            } else {
+                LazyVGrid(columns: columns, spacing: 8) {
+                    ForEach(filteredItems) { item in
+                        GridPhotoTile(item: item) {
+                            withAnimation(.spring(response: 0.3)) {
+                                expandedPhoto = item
                             }
                         }
                     }
                 }
-                .padding(.horizontal, 20)
-                .padding(.top, 16)
-                .padding(.bottom, 32)
             }
         }
+        .padding(18)
+        .background(FitTheme.cardProgress)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(FitTheme.cardProgressAccent.opacity(0.2), lineWidth: 1)
+        )
+    }
+    
+    private var emptyStateCard: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "photo.badge.plus")
+                .font(.system(size: 48))
+                .foregroundColor(FitTheme.textSecondary.opacity(0.4))
+            Text("No photos yet")
+                .font(FitFont.heading(size: 18))
+                .foregroundColor(FitTheme.textPrimary)
+            Text("Add photos during your weekly check-in to track your visual progress")
+                .font(FitFont.body(size: 14))
+                .foregroundColor(FitTheme.textSecondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(40)
+        .background(FitTheme.cardBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+    }
+    
+    private var emptyStateContent: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "photo.badge.plus")
+                .font(.system(size: 40))
+                .foregroundColor(FitTheme.textSecondary.opacity(0.5))
+            Text("No photos uploaded yet")
+                .font(FitFont.body(size: 14))
+                .foregroundColor(FitTheme.textSecondary)
+            Text("Add photos during your weekly check-in")
+                .font(FitFont.body(size: 12))
+                .foregroundColor(FitTheme.textSecondary.opacity(0.7))
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 40)
     }
 }
 
-private struct ProgressPhotoTile: View {
-    let item: ProgressTabView.ProgressPhotoItem
-
+// MARK: - Timeline Date Section
+private struct TimelineDateSection: View {
+    let date: Date
+    let formattedDate: String
+    let relativeDate: String
+    let photos: [ProgressTabView.ProgressPhotoItem]
+    let isLast: Bool
+    let onPhotoTap: (ProgressTabView.ProgressPhotoItem) -> Void
+    
+    private let columns = [
+        GridItem(.flexible(), spacing: 8),
+        GridItem(.flexible(), spacing: 8),
+        GridItem(.flexible(), spacing: 8),
+    ]
+    
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        HStack(alignment: .top, spacing: 16) {
+            // Timeline line and dot
+            VStack(spacing: 0) {
+                Circle()
+                    .fill(FitTheme.cardNutritionAccent)
+                    .frame(width: 12, height: 12)
+                
+                if !isLast {
+                    Rectangle()
+                        .fill(FitTheme.cardNutritionAccent.opacity(0.3))
+                        .frame(width: 2)
+                }
+            }
+            
+            // Content
+            VStack(alignment: .leading, spacing: 12) {
+                // Date header
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(formattedDate)
+                        .font(FitFont.heading(size: 16))
+                        .foregroundColor(FitTheme.textPrimary)
+                    if !relativeDate.isEmpty {
+                        Text(relativeDate)
+                            .font(FitFont.body(size: 12))
+                            .foregroundColor(FitTheme.textSecondary)
+                    }
+                }
+                
+                // Photos grid
+                LazyVGrid(columns: columns, spacing: 8) {
+                    ForEach(photos) { photo in
+                        TimelinePhotoTile(item: photo) {
+                            onPhotoTap(photo)
+                        }
+                    }
+                }
+                .padding(.bottom, isLast ? 0 : 24)
+            }
+        }
+        .padding(.leading, 4)
+    }
+}
+
+// MARK: - Timeline Photo Tile
+private struct TimelinePhotoTile: View {
+    let item: ProgressTabView.ProgressPhotoItem
+    let onTap: () -> Void
+    
+    var body: some View {
+        Button(action: onTap) {
             AsyncImage(url: URL(string: item.url)) { phase in
                 switch phase {
                 case .empty:
-                    RoundedRectangle(cornerRadius: 16)
+                    RoundedRectangle(cornerRadius: 12)
                         .fill(FitTheme.cardHighlight)
                         .overlay(
                             SwiftUI.ProgressView()
@@ -1624,53 +3111,204 @@ private struct ProgressPhotoTile: View {
                         .resizable()
                         .scaledToFill()
                 case .failure:
-                    RoundedRectangle(cornerRadius: 16)
+                    RoundedRectangle(cornerRadius: 12)
                         .fill(FitTheme.cardHighlight)
                         .overlay(
                             Image(systemName: "photo")
-                                .foregroundColor(FitTheme.textSecondary)
+                                .font(.system(size: 20))
+                                .foregroundColor(FitTheme.textSecondary.opacity(0.5))
                         )
                 @unknown default:
-                    RoundedRectangle(cornerRadius: 16)
+                    RoundedRectangle(cornerRadius: 12)
                         .fill(FitTheme.cardHighlight)
                 }
             }
-            .frame(height: 110)
-            .clipShape(RoundedRectangle(cornerRadius: 16))
-
-            Text(item.date.map { progressDisplayDateFormatter.string(from: $0) } ?? "—")
-                .font(FitFont.body(size: 11))
-                .foregroundColor(FitTheme.textSecondary)
-
-            if let category = formattedCategory {
-                Text(category)
-                    .font(FitFont.body(size: 11))
-                    .foregroundColor(FitTheme.textSecondary)
-            }
-
-            if let type = item.type, !type.isEmpty {
-                Text(type)
-                    .font(FitFont.body(size: 11))
-                    .foregroundColor(FitTheme.textSecondary)
-            }
+            .frame(height: 100)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(FitTheme.cardStroke.opacity(0.2), lineWidth: 1)
+            )
+            .overlay(
+                // Type badge
+                Group {
+                    if let type = item.type, !type.isEmpty {
+                        Text(type.capitalized)
+                            .font(FitFont.body(size: 9, weight: .semibold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                            .background(Color.black.opacity(0.6))
+                            .clipShape(Capsule())
+                    }
+                }
+                .padding(6),
+                alignment: .bottomLeading
+            )
         }
+        .buttonStyle(.plain)
     }
+}
 
-    private var formattedCategory: String? {
-        guard let category = item.category?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !category.isEmpty
-        else {
-            return nil
+// MARK: - Grid Photo Tile
+private struct GridPhotoTile: View {
+    let item: ProgressTabView.ProgressPhotoItem
+    let onTap: () -> Void
+    
+    var body: some View {
+        Button(action: onTap) {
+            VStack(alignment: .leading, spacing: 6) {
+                AsyncImage(url: URL(string: item.url)) { phase in
+                    switch phase {
+                    case .empty:
+                        RoundedRectangle(cornerRadius: 12)
+                            .fill(FitTheme.cardHighlight)
+                            .overlay(
+                                SwiftUI.ProgressView()
+                                    .tint(FitTheme.textSecondary)
+                            )
+                    case .success(let image):
+                        image
+                            .resizable()
+                            .scaledToFill()
+                    case .failure:
+                        RoundedRectangle(cornerRadius: 12)
+                            .fill(FitTheme.cardHighlight)
+                            .overlay(
+                                Image(systemName: "photo")
+                                    .font(.system(size: 20))
+                                    .foregroundColor(FitTheme.textSecondary.opacity(0.5))
+                            )
+                    @unknown default:
+                        RoundedRectangle(cornerRadius: 12)
+                            .fill(FitTheme.cardHighlight)
+                    }
+                }
+                .frame(height: 110)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(FitTheme.cardStroke.opacity(0.2), lineWidth: 1)
+                )
+                
+                if let date = item.date {
+                    Text(progressDisplayDateFormatter.string(from: date))
+                        .font(FitFont.body(size: 10))
+                        .foregroundColor(FitTheme.textSecondary)
+                }
+            }
         }
-        switch category.lowercased() {
-        case "checkin", "check-in":
-            return "Check-in"
-        case "starting":
-            return "Starting"
-        case "misc":
-            return "Misc"
-        default:
-            return category.replacingOccurrences(of: "_", with: " ").capitalized
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Expanded Photo View
+private struct ExpandedPhotoView: View {
+    let photo: ProgressTabView.ProgressPhotoItem
+    let onDismiss: () -> Void
+    
+    @State private var scale: CGFloat = 1.0
+    @State private var lastScale: CGFloat = 1.0
+    @GestureState private var magnifyBy = 1.0
+    
+    private var dateText: String {
+        guard let date = photo.date else { return "Unknown date" }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "EEEE, MMMM d, yyyy"
+        return formatter.string(from: date)
+    }
+    
+    var body: some View {
+        ZStack {
+            // Dimmed background
+            Color.black.opacity(0.9)
+                .ignoresSafeArea()
+                .onTapGesture {
+                    onDismiss()
+                }
+            
+            VStack(spacing: 0) {
+                // Header
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(dateText)
+                            .font(FitFont.heading(size: 16))
+                            .foregroundColor(.white)
+                        
+                        HStack(spacing: 8) {
+                            if let type = photo.type, !type.isEmpty {
+                                Text(type.capitalized)
+                                    .font(FitFont.body(size: 12))
+                                    .foregroundColor(.white.opacity(0.7))
+                            }
+                            if let category = photo.category, !category.isEmpty {
+                                Text("•")
+                                    .foregroundColor(.white.opacity(0.5))
+                                Text(category.capitalized)
+                                    .font(FitFont.body(size: 12))
+                                    .foregroundColor(.white.opacity(0.7))
+                            }
+                        }
+                    }
+                    
+                    Spacer()
+                    
+                    Button(action: onDismiss) {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 28))
+                            .foregroundColor(.white.opacity(0.8))
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 60)
+                .padding(.bottom, 20)
+                
+                // Photo
+                AsyncImage(url: URL(string: photo.url)) { phase in
+                    switch phase {
+                    case .empty:
+                        SwiftUI.ProgressView()
+                            .tint(.white)
+                    case .success(let image):
+                        image
+                            .resizable()
+                            .scaledToFit()
+                            .scaleEffect(scale * magnifyBy)
+                            .gesture(
+                                MagnificationGesture()
+                                    .updating($magnifyBy) { value, state, _ in
+                                        state = value
+                                    }
+                                    .onEnded { value in
+                                        scale = min(max(scale * value, 1.0), 4.0)
+                                    }
+                            )
+                            .onTapGesture(count: 2) {
+                                withAnimation(.spring(response: 0.3)) {
+                                    scale = scale > 1.0 ? 1.0 : 2.0
+                                }
+                            }
+                    case .failure:
+                        VStack(spacing: 12) {
+                            Image(systemName: "photo")
+                                .font(.system(size: 40))
+                                .foregroundColor(.white.opacity(0.5))
+                            Text("Failed to load image")
+                                .font(FitFont.body(size: 14))
+                                .foregroundColor(.white.opacity(0.7))
+                        }
+                    @unknown default:
+                        EmptyView()
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                
+                // Hint
+                Text("Pinch to zoom • Double-tap to zoom in/out")
+                    .font(FitFont.body(size: 12))
+                    .foregroundColor(.white.opacity(0.5))
+                    .padding(.bottom, 40)
+            }
         }
     }
 }
@@ -1682,6 +3320,8 @@ private struct CheckinResultsView: View {
     let goal: OnboardingForm.Goal
     let comparisonPhotoCount: Int
     let overrideSummary: String?
+    @Environment(\.dismiss) private var dismiss
+    
     private var recap: CheckinRecap {
         let raw = checkin.aiSummary?.raw?.trimmingCharacters(in: .whitespacesAndNewlines)
         let parsed = checkin.aiSummary?.parsed
@@ -1727,6 +3367,11 @@ private struct CheckinResultsView: View {
 
     private var displaySummary: String? {
         if let summary = recap.summary, !summary.isEmpty {
+            // Don't show raw JSON as summary
+            let trimmed = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.first == "{" || trimmed.first == "[" || trimmed.contains("\"improvements\"") {
+                return fallback.summary
+            }
             return summary
         }
         return fallback.summary
@@ -1750,6 +3395,13 @@ private struct CheckinResultsView: View {
     private var shouldShowCardio: Bool {
         goal != .gainWeight
     }
+    
+    private var checkinDateText: String {
+        guard let date = checkin.dateValue else { return "Recent" }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d, yyyy"
+        return formatter.string(from: date)
+    }
 
     var body: some View {
         ZStack {
@@ -1757,56 +3409,407 @@ private struct CheckinResultsView: View {
                 .ignoresSafeArea()
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    Text("Coach Recap")
-                        .font(FitFont.heading(size: 26))
-                        .fontWeight(.semibold)
-                        .foregroundColor(FitTheme.textPrimary)
-
-                    RecapSectionCard(
-                        title: "Improved",
-                        items: displayImprovements,
-                        fallback: "Consistency stayed strong this week."
-                    )
-
-                    RecapSectionCard(
-                        title: "Needs work",
-                        items: displayNeedsWork,
-                        fallback: "Focus areas will tighten as more data comes in."
-                    )
-
-                    RecapPhotoAnalysisCard(
-                        notes: displayPhotoNotes,
-                        focus: recap.photoFocus,
-                        comparisonText: comparisonText,
-                        hasPhoto: (checkin.photos?.isEmpty == false)
-                    )
-
-                    RecapSectionCard(
-                        title: "Next-week targets",
-                        items: displayTargets,
-                        fallback: "Lock in one small target and repeat it daily."
-                    )
+                VStack(alignment: .leading, spacing: 18) {
+                    header
+                    
+                    improvementsCard
+                    
+                    needsWorkCard
+                    
+                    photoNotesCard
+                    
+                    targetsCard
 
                     if shouldShowCardio {
-                        CardioUpdateCard(summary: displayCardioSummary, plan: displayCardioPlan)
+                        cardioCard
                     }
 
                     if checkin.macroUpdateSuggested {
-                        MacroUpdateCard(userId: userId, checkin: checkin)
+                        macroUpdateCard
                     }
 
                     if let summary = displaySummary, !summary.isEmpty {
-                        RecapTextCard(title: "Coach recap", text: summary)
+                        summaryCard(text: summary)
                     }
 
-                    RecapChatBox(userId: userId)
+                    chatCard
                 }
                 .padding(.horizontal, 20)
-                .padding(.top, 16)
+                .padding(.top, 12)
                 .padding(.bottom, 32)
             }
         }
+    }
+    
+    private var header: some View {
+        VStack(spacing: 16) {
+            // Close button row
+            HStack {
+                Spacer()
+                Button(action: { dismiss() }) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(FitTheme.textSecondary)
+                        .frame(width: 32, height: 32)
+                        .background(FitTheme.cardHighlight)
+                        .clipShape(Circle())
+                }
+            }
+            
+            // Hero section
+            VStack(spacing: 12) {
+                ZStack {
+                    Circle()
+                        .fill(FitTheme.cardCoachAccent.opacity(0.15))
+                        .frame(width: 80, height: 80)
+                    
+                    Image(systemName: "brain.head.profile")
+                        .font(.system(size: 32, weight: .medium))
+                        .foregroundColor(FitTheme.cardCoachAccent)
+                }
+                
+                Text("Coach Recap")
+                    .font(FitFont.heading(size: 28))
+                    .fontWeight(.bold)
+                    .foregroundColor(FitTheme.textPrimary)
+                
+                Text("Your check-in from \(checkinDateText)")
+                    .font(FitFont.body(size: 14))
+                    .foregroundColor(FitTheme.textSecondary)
+                    .multilineTextAlignment(.center)
+            }
+        }
+    }
+    
+    private var improvementsCard: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 10) {
+                Image(systemName: "arrow.up.circle.fill")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(width: 32, height: 32)
+                    .background(FitTheme.cardProgressAccent)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                
+                Text("Improved")
+                    .font(FitFont.heading(size: 18))
+                    .foregroundColor(FitTheme.textPrimary)
+            }
+            
+            VStack(alignment: .leading, spacing: 8) {
+                if displayImprovements.isEmpty {
+                    recapBulletItem("Consistency stayed strong this week.")
+                } else {
+                    ForEach(displayImprovements.indices, id: \.self) { index in
+                        recapBulletItem(displayImprovements[index])
+                    }
+                }
+            }
+        }
+        .padding(18)
+        .background(FitTheme.cardProgress)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(FitTheme.cardProgressAccent.opacity(0.2), lineWidth: 1)
+        )
+    }
+    
+    private var needsWorkCard: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 10) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(width: 32, height: 32)
+                    .background(FitTheme.cardReminderAccent)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                
+                Text("Needs Work")
+                    .font(FitFont.heading(size: 18))
+                    .foregroundColor(FitTheme.textPrimary)
+            }
+            
+            VStack(alignment: .leading, spacing: 8) {
+                if displayNeedsWork.isEmpty {
+                    recapBulletItem("Focus areas will tighten as more data comes in.")
+                } else {
+                    ForEach(displayNeedsWork.indices, id: \.self) { index in
+                        recapBulletItem(displayNeedsWork[index])
+                    }
+                }
+            }
+        }
+        .padding(18)
+        .background(FitTheme.cardReminder)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(FitTheme.cardReminderAccent.opacity(0.2), lineWidth: 1)
+        )
+    }
+    
+    private var photoNotesCard: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 10) {
+                Image(systemName: "camera.fill")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(width: 32, height: 32)
+                    .background(FitTheme.cardNutritionAccent)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Photo Notes")
+                        .font(FitFont.heading(size: 18))
+                        .foregroundColor(FitTheme.textPrimary)
+                    if let context = comparisonText {
+                        Text(context)
+                            .font(FitFont.body(size: 12))
+                            .foregroundColor(FitTheme.textSecondary)
+                    }
+                }
+            }
+            
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(displayPhotoNotes.indices, id: \.self) { index in
+                    recapBulletItem(displayPhotoNotes[index])
+                }
+            }
+            
+            if checkin.photos?.isEmpty == false, !recap.photoFocus.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("What I looked at")
+                        .font(FitFont.body(size: 13, weight: .semibold))
+                        .foregroundColor(FitTheme.textSecondary)
+                    
+                    FlowLayout(spacing: 8) {
+                        ForEach(recap.photoFocus, id: \.self) { area in
+                            Text(area)
+                                .font(FitFont.body(size: 12))
+                                .foregroundColor(FitTheme.textPrimary)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(FitTheme.cardHighlight)
+                                .clipShape(Capsule())
+                        }
+                    }
+                }
+            }
+        }
+        .padding(18)
+        .background(FitTheme.cardNutrition)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(FitTheme.cardNutritionAccent.opacity(0.2), lineWidth: 1)
+        )
+    }
+    
+    private var targetsCard: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 10) {
+                Image(systemName: "target")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(width: 32, height: 32)
+                    .background(FitTheme.cardWorkoutAccent)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                
+                Text("Next-Week Targets")
+                    .font(FitFont.heading(size: 18))
+                    .foregroundColor(FitTheme.textPrimary)
+            }
+            
+            VStack(alignment: .leading, spacing: 8) {
+                if displayTargets.isEmpty {
+                    recapBulletItem("Lock in one small target and repeat it daily.")
+                } else {
+                    ForEach(displayTargets.indices, id: \.self) { index in
+                        recapBulletItem(displayTargets[index])
+                    }
+                }
+            }
+        }
+        .padding(18)
+        .background(FitTheme.cardWorkout)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(FitTheme.cardWorkoutAccent.opacity(0.2), lineWidth: 1)
+        )
+    }
+    
+    private var cardioCard: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 10) {
+                Image(systemName: "figure.run")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(width: 32, height: 32)
+                    .background(FitTheme.cardStreakAccent)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                
+                Text("Cardio Recommendation")
+                    .font(FitFont.heading(size: 18))
+                    .foregroundColor(FitTheme.textPrimary)
+            }
+            
+            Text(displayCardioSummary)
+                .font(FitFont.body(size: 14))
+                .foregroundColor(FitTheme.textSecondary)
+            
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(displayCardioPlan.indices, id: \.self) { index in
+                    recapBulletItem(displayCardioPlan[index])
+                }
+            }
+        }
+        .padding(18)
+        .background(FitTheme.cardStreak)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(FitTheme.cardStreakAccent.opacity(0.2), lineWidth: 1)
+        )
+    }
+    
+    private var macroUpdateCard: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 10) {
+                Image(systemName: "chart.bar.fill")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(width: 32, height: 32)
+                    .background(FitTheme.accent)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                
+                Text("Macro Update")
+                    .font(FitFont.heading(size: 18))
+                    .foregroundColor(FitTheme.textPrimary)
+            }
+            
+            MacroUpdateActionRow(userId: userId, checkin: checkin, isCompact: false)
+        }
+        .padding(18)
+        .background(FitTheme.cardCoach)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(FitTheme.cardCoachAccent.opacity(0.2), lineWidth: 1)
+        )
+    }
+    
+    private func summaryCard(text: String) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 10) {
+                Image(systemName: "text.quote")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(width: 32, height: 32)
+                    .background(FitTheme.cardCoachAccent)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                
+                Text("Coach Summary")
+                    .font(FitFont.heading(size: 18))
+                    .foregroundColor(FitTheme.textPrimary)
+            }
+            
+            Text(text)
+                .font(FitFont.body(size: 14))
+                .foregroundColor(FitTheme.textSecondary)
+                .lineSpacing(4)
+        }
+        .padding(18)
+        .background(FitTheme.cardCoach)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(FitTheme.cardCoachAccent.opacity(0.2), lineWidth: 1)
+        )
+    }
+    
+    private var chatCard: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 10) {
+                Image(systemName: "bubble.left.and.bubble.right.fill")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(width: 32, height: 32)
+                    .background(FitTheme.accent)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Ask Your Coach")
+                        .font(FitFont.heading(size: 18))
+                        .foregroundColor(FitTheme.textPrimary)
+                    Text("Get clarification or ask follow-ups")
+                        .font(FitFont.body(size: 12))
+                        .foregroundColor(FitTheme.textSecondary)
+                }
+            }
+            
+            RecapChatBox(userId: userId)
+        }
+        .padding(18)
+        .background(FitTheme.cardBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(FitTheme.accent.opacity(0.2), lineWidth: 1)
+        )
+    }
+    
+    private func recapBulletItem(_ text: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Circle()
+                .fill(FitTheme.textSecondary.opacity(0.5))
+                .frame(width: 6, height: 6)
+                .padding(.top, 6)
+            Text(text)
+                .font(FitFont.body(size: 14))
+                .foregroundColor(FitTheme.textSecondary)
+        }
+    }
+}
+
+// Flow layout for tags
+private struct FlowLayout: Layout {
+    var spacing: CGFloat = 8
+    
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let result = arrange(proposal: proposal, subviews: subviews)
+        return result.size
+    }
+    
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let result = arrange(proposal: proposal, subviews: subviews)
+        for (index, frame) in result.frames.enumerated() {
+            subviews[index].place(at: CGPoint(x: bounds.minX + frame.minX, y: bounds.minY + frame.minY), proposal: .unspecified)
+        }
+    }
+    
+    private func arrange(proposal: ProposedViewSize, subviews: Subviews) -> (size: CGSize, frames: [CGRect]) {
+        let maxWidth = proposal.width ?? .infinity
+        var frames: [CGRect] = []
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var rowHeight: CGFloat = 0
+        
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if x + size.width > maxWidth && x > 0 {
+                x = 0
+                y += rowHeight + spacing
+                rowHeight = 0
+            }
+            frames.append(CGRect(origin: CGPoint(x: x, y: y), size: size))
+            x += size.width + spacing
+            rowHeight = max(rowHeight, size.height)
+        }
+        
+        let height = y + rowHeight
+        return (CGSize(width: maxWidth, height: height), frames)
     }
 }
 
@@ -1821,12 +3824,25 @@ private struct CheckinRecap {
 
     var highlights: [String] {
         let ordered = improvements + needsWork + photoNotes + targets
-        if !ordered.isEmpty {
-            return Array(ordered.prefix(3))
+        // Filter out any JSON-looking content that slipped through
+        let filtered = ordered.filter { item in
+            !item.contains("\"improvements\"") &&
+            !item.contains("\"needs work\"") &&
+            !item.contains("\"targets\"") &&
+            !item.contains("```json") &&
+            !item.contains("```") &&
+            !(item.trimmingCharacters(in: .whitespacesAndNewlines).first == "{")
         }
-        if let summary, !summary.isEmpty {
+        if !filtered.isEmpty {
+            return Array(filtered.prefix(3))
+        }
+        // Don't fall back to summary if it looks like JSON
+        if let summary, !summary.isEmpty, !Self.isLikelyJSON(summary) {
             let firstLine = summary.split(separator: "\n").first.map(String.init) ?? summary
-            return [firstLine]
+            // Extra check on the first line
+            if !firstLine.contains("\"improvements\"") && !firstLine.contains("```") {
+                return [firstLine]
+            }
         }
         return []
     }
@@ -1987,7 +4003,25 @@ private struct CheckinRecap {
     private static func isLikelyJSON(_ raw: String?) -> Bool {
         guard let raw else { return false }
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.first == "{" || trimmed.first == "["
+        // Direct JSON
+        if trimmed.first == "{" || trimmed.first == "[" {
+            return true
+        }
+        // JSON in markdown code blocks
+        if trimmed.hasPrefix("```") && trimmed.contains("{") {
+            return true
+        }
+        // JSON-like content patterns
+        if trimmed.contains("\"improvements\":") || 
+           trimmed.contains("\"needs work\":") ||
+           trimmed.contains("\"needs_work\":") ||
+           trimmed.contains("\"photo notes\":") ||
+           trimmed.contains("\"photo_notes\":") ||
+           trimmed.contains("\"targets\":") ||
+           trimmed.contains("\"summary\":") {
+            return true
+        }
+        return false
     }
 
     private static func sanitizeFocus(_ focus: [String]) -> [String] {
@@ -2119,7 +4153,7 @@ private struct CheckinRecapFallback {
         var items: [String] = []
         if let delta = weightDelta {
             switch goal {
-            case .loseWeight where delta < -0.1:
+            case .loseWeight, .loseWeightFast where delta < -0.1:
                 items.append("Scale down \(formatDelta(delta)) lb since last check-in.")
             case .gainWeight where delta > 0.1:
                 items.append("Scale up \(formatDelta(delta)) lb since last check-in.")
@@ -2145,7 +4179,7 @@ private struct CheckinRecapFallback {
         var items: [String] = []
         if let delta = weightDelta {
             switch goal {
-            case .loseWeight where delta >= 0.1:
+            case .loseWeight, .loseWeightFast where delta >= 0.1:
                 items.append("Scale up \(formatDelta(delta)) lb; tighten calories or steps.")
             case .gainWeight where delta <= -0.1:
                 items.append("Scale down \(formatDelta(delta)) lb; add a small surplus.")
@@ -2173,12 +4207,12 @@ private struct CheckinRecapFallback {
         }
         if let delta = weightDelta {
             switch goal {
-            case .loseWeight where delta < -0.1:
+            case .loseWeight, .loseWeightFast where delta < -0.1:
                 return [
                     "Midsection looks a bit tighter this week.",
                     "Abs look a touch more defined."
                 ]
-            case .loseWeight where delta > 0.1:
+            case .loseWeight, .loseWeightFast where delta > 0.1:
                 return [
                     "Midsection looks a little softer than last week.",
                     "Let’s tighten food consistency this week."
@@ -2214,7 +4248,7 @@ private struct CheckinRecapFallback {
     var targets: [String] {
         var items: [String] = []
         switch goal {
-        case .loseWeight:
+        case .loseWeight, .loseWeightFast:
             items.append("Hit your macros at least 5 days this week.")
             items.append("Log meals before the day ends.")
         case .gainWeight:
@@ -2233,7 +4267,7 @@ private struct CheckinRecapFallback {
         var lines: [String] = []
         if let delta = weightDelta {
             switch goal {
-            case .loseWeight:
+            case .loseWeight, .loseWeightFast:
                 lines.append(delta < -0.1 ? "Weight trend is moving down." : "Weight trend is flat to up.")
             case .gainWeight:
                 lines.append(delta > 0.1 ? "Weight trend is moving up." : "Weight trend is flat to down.")
@@ -2259,7 +4293,7 @@ private struct CheckinRecapFallback {
 
     var cardioSummary: String {
         switch goal {
-        case .loseWeight:
+        case .loseWeight, .loseWeightFast:
             return "Cardio will support a steady calorie deficit without draining recovery."
         case .gainWeight:
             return "Cardio stays optional while you focus on surplus and strength."
@@ -2270,7 +4304,7 @@ private struct CheckinRecapFallback {
 
     var cardioPlan: [String] {
         switch goal {
-        case .loseWeight:
+        case .loseWeight, .loseWeightFast:
             return [
                 "2-3 sessions · 20 min incline walk",
                 "1 session · 10 min bike finisher"
@@ -2853,19 +4887,28 @@ private struct ActionButton: View {
 }
 
 private struct CardContainer<Content: View>: View {
+    var isAccented: Bool
     @ViewBuilder let content: Content
+    
+    init(
+        isAccented: Bool = false,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.isAccented = isAccented
+        self.content = content()
+    }
 
     var body: some View {
         content
             .padding(18)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(FitTheme.cardBackground)
+            .background(isAccented ? FitTheme.cardProgress : FitTheme.cardBackground)
             .clipShape(RoundedRectangle(cornerRadius: 24))
             .overlay(
                 RoundedRectangle(cornerRadius: 24)
-                    .stroke(FitTheme.cardStroke.opacity(0.6), lineWidth: 1)
+                    .stroke(isAccented ? FitTheme.cardProgressAccent.opacity(0.3) : FitTheme.cardStroke.opacity(0.6), lineWidth: isAccented ? 1.5 : 1)
             )
-            .shadow(color: FitTheme.shadow, radius: 18, x: 0, y: 10)
+            .shadow(color: isAccented ? FitTheme.cardProgressAccent.opacity(0.15) : FitTheme.shadow, radius: 18, x: 0, y: 10)
     }
 }
 

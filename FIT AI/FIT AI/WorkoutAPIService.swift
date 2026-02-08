@@ -27,6 +27,15 @@ struct WorkoutTemplate: Decodable, Identifiable {
         mode = trimmedMode.isEmpty ? "manual" : trimmedMode
         createdAt = try container.decodeIfPresent(String.self, forKey: .createdAt)
     }
+    
+    // Memberwise initializer for manual creation
+    init(id: String, title: String, description: String?, mode: String, createdAt: String?) {
+        self.id = id
+        self.title = title
+        self.description = description
+        self.mode = mode
+        self.createdAt = createdAt
+    }
 }
 
 struct WorkoutSession: Decodable, Identifiable {
@@ -168,6 +177,72 @@ struct WorkoutSessionLogEntry: Decodable, Identifiable {
     let durationMinutes: Int?
     let notes: String?
     let createdAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case exerciseName
+        case sets
+        case reps
+        case weight
+        case durationMinutes
+        case notes
+        case createdAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        func decodeInt(_ key: CodingKeys) -> Int {
+            if let value = try? container.decode(Int.self, forKey: key) {
+                return value
+            }
+            if let value = try? container.decode(Double.self, forKey: key) {
+                return Int(value)
+            }
+            if let value = try? container.decode(String.self, forKey: key) {
+                return Int(value.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+            }
+            return 0
+        }
+
+        func decodeOptionalInt(_ key: CodingKeys) -> Int? {
+            if let value = try? container.decodeIfPresent(Int.self, forKey: key) {
+                return value
+            }
+            if let value = try? container.decodeIfPresent(Double.self, forKey: key) {
+                return Int(value)
+            }
+            if let value = try? container.decodeIfPresent(String.self, forKey: key) {
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                return Int(trimmed)
+            }
+            return nil
+        }
+
+        func decodeDouble(_ key: CodingKeys) -> Double {
+            if let value = try? container.decode(Double.self, forKey: key) {
+                return value
+            }
+            if let value = try? container.decode(Int.self, forKey: key) {
+                return Double(value)
+            }
+            if let value = try? container.decode(String.self, forKey: key) {
+                return Double(value.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+            }
+            return 0
+        }
+
+        id = (try? container.decode(String.self, forKey: .id)) ?? UUID().uuidString
+        let rawName = (try? container.decode(String.self, forKey: .exerciseName)) ?? ""
+        let trimmedName = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        exerciseName = trimmedName.isEmpty ? "Exercise" : trimmedName
+        sets = decodeInt(.sets)
+        reps = decodeInt(.reps)
+        weight = decodeDouble(.weight)
+        durationMinutes = decodeOptionalInt(.durationMinutes)
+        notes = try? container.decodeIfPresent(String.self, forKey: .notes)
+        createdAt = try? container.decodeIfPresent(String.self, forKey: .createdAt)
+    }
 }
 
 struct WorkoutSessionLogsResponse: Decodable {
@@ -548,6 +623,10 @@ struct WorkoutAPIService {
     }
 
     func searchExercises(query: String) async throws -> [ExerciseDefinition] {
+        #if DEBUG
+        let start = Date()
+        debugLog("searchExercises start query=\"\(query)\"")
+        #endif
         let url = BackendConfig.baseURL.appendingPathComponent("exercises/search")
         var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
         components?.queryItems = [
@@ -560,6 +639,9 @@ struct WorkoutAPIService {
 
         let (data, response) = try await session.data(from: finalURL)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            #if DEBUG
+            debugLog("searchExercises bad response")
+            #endif
             throw OnboardingAPIError.invalidResponse
         }
 
@@ -594,6 +676,11 @@ struct WorkoutAPIService {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         let payload = try decoder.decode(ExerciseSearchResponse.self, from: data)
+        #if DEBUG
+        let elapsed = Date().timeIntervalSince(start)
+        let elapsedText = String(format: "%.2f", elapsed)
+        debugLog("searchExercises done results=\(payload.results.count) elapsed=\(elapsedText)s")
+        #endif
         return payload.results.map {
             let muscles = $0.muscleGroups ?? $0.primaryMuscles ?? []
             let equipment = $0.equipment?.values ?? []
@@ -604,6 +691,14 @@ struct WorkoutAPIService {
             )
         }
     }
+
+    #if DEBUG
+    private func debugLog(_ message: String) {
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        print("[WorkoutAPIService] \(stamp) \(message)")
+    }
+    #endif
+
 
     func generateWorkout(
         userId: String,

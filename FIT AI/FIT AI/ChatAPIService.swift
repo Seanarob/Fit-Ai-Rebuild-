@@ -40,8 +40,9 @@ struct ChatAPIService {
 
     private static func defaultSession() -> URLSession {
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 15
-        config.timeoutIntervalForResource = 60
+        // Increased timeouts to accommodate AI model response time
+        config.timeoutIntervalForRequest = 30
+        config.timeoutIntervalForResource = 90
         if let anonKey = SupabaseConfig.anonKey {
             config.httpAdditionalHeaders = [
                 "apikey": anonKey,
@@ -129,7 +130,11 @@ struct ChatAPIService {
             "content": content,
             "stream": true,
         ]
-        request.httpBody = try JSONSerialization.data(withJSONObject: payload, options: [])
+        var payloadWithContext = payload
+        if let snapshot = localWorkoutSnapshot() {
+            payloadWithContext["local_workout_snapshot"] = snapshot
+        }
+        request.httpBody = try JSONSerialization.data(withJSONObject: payloadWithContext, options: [])
 
         let (bytes, response) = try await session.bytes(for: request)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
@@ -146,5 +151,53 @@ struct ChatAPIService {
                 onChunk(chunk)
             }
         }
+    }
+
+    private func localWorkoutSnapshot() -> [String: Any]? {
+        guard let session = WorkoutSessionStore.load() else { return nil }
+
+        var lastCompleted: [String: Any]? = nil
+        for exercise in session.exercises {
+            for setEntry in exercise.sets where setEntry.isComplete {
+                lastCompleted = [
+                    "exercise_name": exercise.name,
+                    "reps": setEntry.reps,
+                    "weight": setEntry.weight,
+                    "is_warmup": setEntry.isWarmup,
+                ]
+            }
+        }
+
+        let exercises: [[String: Any]] = session.exercises.map { exercise in
+            let sets: [[String: Any]] = exercise.sets.map { entry in
+                [
+                    "reps": entry.reps,
+                    "weight": entry.weight,
+                    "is_complete": entry.isComplete,
+                    "is_warmup": entry.isWarmup,
+                ]
+            }
+            return [
+                "name": exercise.name,
+                "sets": sets,
+                "rest_seconds": exercise.restSeconds,
+                "notes": exercise.notes,
+            ]
+        }
+
+        var snapshot: [String: Any] = [
+            "title": session.title,
+            "workout_elapsed_seconds": session.workoutElapsed,
+            "is_paused": session.isPaused,
+            "rest_remaining": session.restRemaining,
+            "rest_active": session.restActive,
+            "exercises": exercises,
+        ]
+
+        if let lastCompleted {
+            snapshot["last_completed_set"] = lastCompleted
+        }
+
+        return snapshot
     }
 }

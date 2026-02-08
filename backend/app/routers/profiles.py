@@ -11,7 +11,9 @@ class ProfileUpsertRequest(BaseModel):
     age: int | None = None
     height_cm: float | None = None
     weight_kg: float | None = None
+    weight_lbs: float | None = None  # Accept either lbs or kg
     goal: str | None = None
+    sex: str | None = None
     macros: dict | None = None
     preferences: dict | None = None
     units: dict | None = None
@@ -39,6 +41,13 @@ async def upsert_profile(user_id: str, payload: ProfileUpsertRequest):
     supabase = get_supabase()
     update_payload = payload.dict(exclude_none=True)
     update_payload["user_id"] = user_id
+    
+    # Convert weight_lbs to weight_kg if provided
+    if "weight_lbs" in update_payload:
+        weight_lbs = update_payload.pop("weight_lbs")
+        if weight_lbs and weight_lbs > 0:
+            update_payload["weight_kg"] = weight_lbs * 0.453592
+    
     result = (
         supabase.table("profiles")
         .upsert(update_payload, on_conflict="user_id")

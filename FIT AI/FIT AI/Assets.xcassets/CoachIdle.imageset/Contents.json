@@ -1,16 +1,6 @@
 {
   "images" : [
     {
-      "filename" : "CoachIdleLight.png",
-      "idiom" : "universal"
-    },
-    {
-      "appearances" : [
-        {
-          "appearance" : "luminosity",
-          "value" : "dark"
-        }
-      ],
       "filename" : "CoachIdleDark.png",
       "idiom" : "universal"
     }

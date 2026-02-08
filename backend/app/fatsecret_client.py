@@ -13,6 +13,7 @@ FATSECRET_API_URL = "https://platform.fatsecret.com/rest"
 FATSECRET_METHOD_API_URL = "https://platform.fatsecret.com/rest/server.api"
 FATSECRET_URL_ENDPOINTS = {
     "foods.search": "/foods/search/v3",
+    "foods.autocomplete": "/foods/autocomplete/v2",
     "food.get": "/food/v5",
     "food.find_id_for_barcode": "/food/barcode/v3",
 }

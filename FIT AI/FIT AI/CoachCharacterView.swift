@@ -15,33 +15,11 @@ enum CoachPose: String {
 struct CoachArtView: View {
     let pose: CoachPose
     var blink: Bool = false
-    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        GeometryReader { proxy in
-            if let image = CoachArtAsset.image(for: pose, colorScheme: colorScheme) {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: proxy.size.width, height: proxy.size.height)
-            } else {
-                CoachIllustration(blink: blink)
-            }
-        }
-    }
-}
-
-private enum CoachArtAsset {
-    static func image(for pose: CoachPose, colorScheme: ColorScheme) -> UIImage? {
-        let base = pose.assetBaseName
-        let trait = UITraitCollection(userInterfaceStyle: colorScheme == .dark ? .dark : .light)
-
-        if let image = UIImage(named: base, in: .main, compatibleWith: trait) {
-            return image
-        }
-
-        let variant = colorScheme == .dark ? "\(base)Dark" : "\(base)Light"
-        return UIImage(named: variant, in: .main, compatibleWith: trait)
+        Image(pose.assetBaseName)
+            .resizable()
+            .scaledToFit()
     }
 }
 

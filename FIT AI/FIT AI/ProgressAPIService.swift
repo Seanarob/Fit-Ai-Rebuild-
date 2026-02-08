@@ -497,8 +497,8 @@ struct ProgressAPIService {
 
     private static func defaultSession() -> URLSession {
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 15
-        config.timeoutIntervalForResource = 30
+        config.timeoutIntervalForRequest = 30
+        config.timeoutIntervalForResource = 90  // Increased for AI analysis
         if let anonKey = SupabaseConfig.anonKey {
             config.httpAdditionalHeaders = [
                 "apikey": anonKey,
