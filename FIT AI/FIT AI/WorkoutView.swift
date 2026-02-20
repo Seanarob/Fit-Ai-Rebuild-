@@ -129,6 +129,17 @@ struct WorkoutView: View {
                         }
                     }
                 }
+
+                if isGenerating {
+                    WorkoutGeneratingFullscreenOverlay()
+                        .zIndex(10)
+                        .transition(
+                            .asymmetric(
+                                insertion: .opacity.combined(with: .scale(scale: 1.02)),
+                                removal: .opacity
+                            )
+                        )
+                }
             }
         )
 
@@ -740,12 +751,9 @@ struct WorkoutView: View {
                             }
                         }
                         .frame(maxWidth: .infinity)
+                        .disabled(isGenerating)
                     }
                 }
-            }
-
-            if isGenerating {
-                WorkoutGeneratingCard()
             }
             
             if !generatedExercises.isEmpty && !isGenerating {
@@ -6832,73 +6840,119 @@ private struct ActionButton: View {
     }
 }
 
-private struct WorkoutGeneratingCard: View {
-    @State private var animationPhase = 0
-    @State private var iconScale: CGFloat = 1.0
-    
+private struct WorkoutGeneratingFullscreenOverlay: View {
+    @State private var messageIndex = 0
+    @State private var progressPhase = 0
+    @State private var spinnerRotation = 0.0
+    @State private var pulseScale = 0.88
+    @State private var glowScale = 0.96
+
     private let loadingMessages = [
-        "Analyzing your preferences...",
-        "Building your workout...",
-        "Selecting exercises...",
-        "Optimizing for your goals...",
-        "Almost ready..."
+        "Analyzing your goals",
+        "Mapping the best exercise order",
+        "Balancing intensity and recovery",
+        "Fine-tuning set and rep ranges",
+        "Finalizing your session"
     ]
-    
+
     var body: some View {
-        VStack(spacing: 20) {
-            // Animated icon
-            ZStack {
-                Circle()
-                    .fill(FitTheme.cardWorkoutAccent.opacity(0.15))
-                    .frame(width: 80, height: 80)
-                    .scaleEffect(iconScale)
-                
-                Image(systemName: "sparkles")
-                    .font(.system(size: 32, weight: .medium))
-                    .foregroundColor(FitTheme.cardWorkoutAccent)
-                    .scaleEffect(iconScale)
-            }
-            .onAppear {
-                withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
-                    iconScale = 1.15
-                }
-            }
-            
-            VStack(spacing: 8) {
-                Text("Generating Your Workout")
-                    .font(FitFont.heading(size: 20))
-                    .foregroundColor(FitTheme.textPrimary)
-                
-                Text(loadingMessages[animationPhase % loadingMessages.count])
-                    .font(FitFont.body(size: 14))
-                    .foregroundColor(FitTheme.textSecondary)
-                    .animation(.easeInOut(duration: 0.3), value: animationPhase)
-            }
-            
-            // Progress dots
-            HStack(spacing: 8) {
-                ForEach(0..<5, id: \.self) { index in
+        ZStack {
+            LinearGradient(
+                colors: [Color.black.opacity(0.62), Color.black.opacity(0.78)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .ignoresSafeArea()
+
+            RadialGradient(
+                colors: [
+                    FitTheme.cardWorkoutAccent.opacity(0.28),
+                    FitTheme.cardWorkoutAccent.opacity(0.02),
+                    .clear
+                ],
+                center: .center,
+                startRadius: 40,
+                endRadius: 260
+            )
+            .scaleEffect(glowScale)
+            .ignoresSafeArea()
+
+            VStack(spacing: 30) {
+                ZStack {
                     Circle()
-                        .fill(index <= animationPhase % 5 ? FitTheme.cardWorkoutAccent : FitTheme.cardWorkoutAccent.opacity(0.3))
-                        .frame(width: 8, height: 8)
-                        .animation(.easeInOut(duration: 0.2).delay(Double(index) * 0.1), value: animationPhase)
+                        .fill(FitTheme.cardWorkoutAccent.opacity(0.18))
+                        .frame(width: 210, height: 210)
+                        .blur(radius: 16)
+                        .scaleEffect(glowScale)
+
+                    Circle()
+                        .stroke(FitTheme.cardWorkoutAccent.opacity(0.32), lineWidth: 1.4)
+                        .frame(width: 174, height: 174)
+                        .scaleEffect(pulseScale)
+
+                    Circle()
+                        .trim(from: 0.08, to: 0.92)
+                        .stroke(
+                            FitTheme.primaryGradient,
+                            style: StrokeStyle(lineWidth: 7, lineCap: .round)
+                        )
+                        .frame(width: 132, height: 132)
+                        .rotationEffect(.degrees(spinnerRotation))
+
+                    Circle()
+                        .fill(FitTheme.cardWorkout)
+                        .frame(width: 94, height: 94)
+                        .overlay(
+                            Circle()
+                                .stroke(FitTheme.cardStroke.opacity(0.55), lineWidth: 1)
+                        )
+
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 32, weight: .semibold))
+                        .foregroundColor(FitTheme.cardWorkoutAccent)
+                }
+
+                VStack(spacing: 10) {
+                    Text("Generating")
+                        .font(FitFont.heading(size: 34))
+                        .foregroundColor(.white)
+                    Text(loadingMessages[messageIndex % loadingMessages.count])
+                        .font(FitFont.body(size: 14))
+                        .foregroundColor(.white.opacity(0.82))
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 280)
+                        .animation(.easeInOut(duration: 0.35), value: messageIndex)
+                }
+
+                HStack(spacing: 8) {
+                    ForEach(0..<6, id: \.self) { index in
+                        Capsule()
+                            .fill(index <= progressPhase ? FitTheme.cardWorkoutAccent : Color.white.opacity(0.2))
+                            .frame(width: index == progressPhase ? 26 : 10, height: 8)
+                            .animation(.spring(response: 0.28, dampingFraction: 0.82), value: progressPhase)
+                    }
                 }
             }
+            .padding(.horizontal, 24)
         }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 40)
-        .padding(.horizontal, 24)
-        .background(FitTheme.cardWorkout)
-        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .stroke(FitTheme.cardWorkoutAccent.opacity(0.3), lineWidth: 1.5)
-        )
-        .shadow(color: FitTheme.cardWorkoutAccent.opacity(0.15), radius: 18, x: 0, y: 10)
-        .onAppear {
-            Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { _ in
-                withAnimation {
-                    animationPhase += 1
+        .task {
+            withAnimation(.linear(duration: 1.1).repeatForever(autoreverses: false)) {
+                spinnerRotation = 360
+            }
+            withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) {
+                pulseScale = 1.1
+            }
+            withAnimation(.easeInOut(duration: 1.4).repeatForever(autoreverses: true)) {
+                glowScale = 1.08
+            }
+
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_150_000_000)
+                await MainActor.run {
+                    withAnimation(.easeInOut(duration: 0.28)) {
+                        messageIndex = (messageIndex + 1) % loadingMessages.count
+                        progressPhase = (progressPhase + 1) % 6
+                    }
                 }
             }
         }
