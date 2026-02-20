@@ -70,6 +70,7 @@ enum ProgressTabIntent: Equatable {
 struct MainTabView: View {
     let userId: String
     @EnvironmentObject private var guidedTour: GuidedTourCoordinator
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var selectedTab: MainTab = .home
     @State private var workoutIntent: WorkoutTabIntent?
     @State private var nutritionIntent: NutritionTabIntent?
@@ -118,9 +119,9 @@ struct MainTabView: View {
                 .tag(MainTab.progress)
         }
         .tint(FitTheme.accent)
-        .animation(MotionTokens.springSoft, value: selectedTab)
+        .animation(reduceMotion ? nil : MotionTokens.springSoft, value: selectedTab)
         .onChange(of: selectedTab) { tab in
-            Haptics.heavy()
+            Haptics.selection()
             guidedTour.presentIntroIfNeeded(for: guidedTourScreen(for: tab))
         }
         .onReceive(NotificationCenter.default.publisher(for: .fitAIOpenWorkout)) { _ in
@@ -188,14 +189,16 @@ struct MainTabView: View {
         let isActive = selectedTab == tab
         let iconName = isActive ? tab.activeIcon : tab.icon
         let weight: Font.Weight = isActive ? .semibold : .regular
+        let activeScale: CGFloat = reduceMotion ? 1.0 : 1.03
+        let inactiveScale: CGFloat = 1.0
         return VStack(spacing: 4) {
             Image(systemName: iconName)
                 .font(.system(size: 17, weight: weight))
             Text(tab.title)
                 .font(.system(size: 11, weight: weight))
         }
-        .scaleEffect(isActive ? 1.08 : 0.98)
-        .opacity(isActive ? 1.0 : 0.85)
+        .scaleEffect(isActive ? activeScale : inactiveScale)
+        .opacity(isActive ? 1.0 : 0.9)
     }
 
     private func handleGuidedTourAction(_ action: GuidedTourAction) {

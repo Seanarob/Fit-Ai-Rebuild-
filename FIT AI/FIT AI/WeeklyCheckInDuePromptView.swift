@@ -5,6 +5,7 @@ struct WeeklyCheckInDuePromptView: View {
     let statusText: String
     let onStartCheckIn: () -> Void
     let onDismiss: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     
     @State private var pulseAnimation = false
     
@@ -20,6 +21,10 @@ struct WeeklyCheckInDuePromptView: View {
         isOverdue
             ? "Catch up now so your plan stays accurate."
             : "Log weight, photos, and adherence so your coach can adjust the week."
+    }
+
+    private var modalTransition: AnyTransition {
+        reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.985))
     }
     
     var body: some View {
@@ -91,6 +96,7 @@ struct WeeklyCheckInDuePromptView: View {
                             .foregroundColor(isOverdue ? accent : FitTheme.textSecondary)
                             .multilineTextAlignment(.center)
                             .padding(.top, 2)
+                            .contentTransition(.numericText())
                     }
                 }
                 
@@ -135,12 +141,27 @@ struct WeeklyCheckInDuePromptView: View {
                     .stroke(accent.opacity(0.25), lineWidth: 1.5)
             )
             .padding(.horizontal, 22)
-            .transition(.opacity.combined(with: .scale(scale: 0.98)))
+            .transition(modalTransition)
         }
         .onAppear {
-            withAnimation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true)) {
-                pulseAnimation = true
-            }
+            runPulseBurst()
+        }
+        .onChange(of: statusText) { _ in
+            runPulseBurst()
+        }
+    }
+
+    private func runPulseBurst() {
+        guard !reduceMotion else {
+            pulseAnimation = false
+            return
+        }
+        pulseAnimation = false
+        withAnimation(.easeInOut(duration: MotionTokens.slow).repeatCount(2, autoreverses: true)) {
+            pulseAnimation = true
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + (MotionTokens.slow * 2.2)) {
+            pulseAnimation = false
         }
     }
 }
@@ -156,4 +177,3 @@ struct WeeklyCheckInDuePromptView: View {
         )
     }
 }
-

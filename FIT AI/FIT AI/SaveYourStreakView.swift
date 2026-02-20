@@ -6,11 +6,33 @@ struct SaveYourStreakView: View {
     let atRiskStreaks: [(StreakType, TimeInterval)]
     let onActionComplete: (StreakType) -> Void
     let onDismiss: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     
     @State private var showingCheckIn = false
     @State private var showingQuickLog = false
     @State private var showingQuickWorkout = false
     @State private var pulseAnimation = false
+
+    private let backgroundFlames: [BackgroundFlame] = [
+        .init(x: 0.08, y: 0.12, size: 24),
+        .init(x: 0.22, y: 0.34, size: 30),
+        .init(x: 0.38, y: 0.18, size: 34),
+        .init(x: 0.52, y: 0.42, size: 26),
+        .init(x: 0.66, y: 0.24, size: 38),
+        .init(x: 0.78, y: 0.36, size: 28),
+        .init(x: 0.92, y: 0.15, size: 24),
+        .init(x: 0.16, y: 0.62, size: 35),
+        .init(x: 0.34, y: 0.74, size: 28),
+        .init(x: 0.48, y: 0.64, size: 22),
+        .init(x: 0.62, y: 0.78, size: 36),
+        .init(x: 0.84, y: 0.70, size: 30),
+        .init(x: 0.10, y: 0.90, size: 26),
+        .init(x: 0.28, y: 0.92, size: 22),
+        .init(x: 0.44, y: 0.88, size: 32),
+        .init(x: 0.58, y: 0.94, size: 26),
+        .init(x: 0.72, y: 0.90, size: 34),
+        .init(x: 0.88, y: 0.92, size: 24)
+    ]
     
     var body: some View {
         ZStack {
@@ -29,13 +51,13 @@ struct SaveYourStreakView: View {
             // Background pattern
             GeometryReader { geometry in
                 ZStack {
-                    ForEach(0..<20, id: \.self) { i in
+                    ForEach(backgroundFlames) { flame in
                         Image(systemName: "flame.fill")
-                            .font(.system(size: CGFloat.random(in: 20...40)))
+                            .font(.system(size: flame.size))
                             .foregroundColor(.orange.opacity(0.05))
                             .position(
-                                x: CGFloat.random(in: 0...geometry.size.width),
-                                y: CGFloat.random(in: 0...geometry.size.height)
+                                x: geometry.size.width * flame.x,
+                                y: geometry.size.height * flame.y
                             )
                     }
                 }
@@ -140,9 +162,10 @@ struct SaveYourStreakView: View {
             }
         }
         .onAppear {
-            withAnimation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true)) {
-                pulseAnimation = true
-            }
+            runPulseBurst()
+        }
+        .onChange(of: atRiskStreaks.count) { _ in
+            runPulseBurst()
         }
         .sheet(isPresented: $showingCheckIn) {
             DailyCheckInView(onComplete: {
@@ -158,6 +181,20 @@ struct SaveYourStreakView: View {
             QuickStartWorkoutSheet(onComplete: {
                 onActionComplete(.weeklyWin)
             })
+        }
+    }
+
+    private func runPulseBurst() {
+        guard !reduceMotion else {
+            pulseAnimation = false
+            return
+        }
+        pulseAnimation = false
+        withAnimation(.easeInOut(duration: MotionTokens.slow).repeatCount(2, autoreverses: true)) {
+            pulseAnimation = true
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + (MotionTokens.slow * 2.2)) {
+            pulseAnimation = false
         }
     }
     
@@ -182,6 +219,13 @@ struct SaveYourStreakView: View {
     }
 }
 
+private struct BackgroundFlame: Identifiable {
+    let id = UUID()
+    let x: CGFloat
+    let y: CGFloat
+    let size: CGFloat
+}
+
 // MARK: - Save Streak Action Button
 
 struct SaveStreakActionButton: View {
@@ -189,8 +233,7 @@ struct SaveStreakActionButton: View {
     let timeRemaining: TimeInterval
     let currentStreak: Int
     let onTap: () -> Void
-    
-    @State private var isPressed = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     
     private var actionTitle: String {
         switch streakType {
@@ -241,6 +284,7 @@ struct SaveStreakActionButton: View {
                         Text(StreakCalculations.formatCountdown(timeRemaining))
                             .font(FitFont.body(size: 13, weight: .semibold))
                             .foregroundColor(urgency.color)
+                            .contentTransition(.numericText())
                     }
                 }
                 
@@ -258,14 +302,19 @@ struct SaveStreakActionButton: View {
                     .stroke(streakType.color.opacity(0.3), lineWidth: 2)
             )
             .shadow(color: streakType.color.opacity(0.15), radius: 15, y: 8)
-            .scaleEffect(isPressed ? 0.98 : 1.0)
         }
-        .buttonStyle(.plain)
-        .onLongPressGesture(minimumDuration: .infinity, pressing: { pressing in
-            withAnimation(.easeInOut(duration: 0.1)) {
-                isPressed = pressing
-            }
-        }, perform: {})
+        .buttonStyle(PressableSaveStreakButtonStyle(reduceMotion: reduceMotion))
+    }
+}
+
+private struct PressableSaveStreakButtonStyle: ButtonStyle {
+    let reduceMotion: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.985 : 1.0)
+            .opacity(configuration.isPressed ? 0.95 : 1.0)
+            .animation(reduceMotion ? nil : MotionTokens.springQuick, value: configuration.isPressed)
     }
 }
 
@@ -399,5 +448,3 @@ struct QuickStartWorkoutSheet: View {
         onDismiss: {}
     )
 }
-
-

@@ -8,6 +8,7 @@ struct HomeView: View {
     @Binding var workoutIntent: WorkoutTabIntent?
     @Binding var nutritionIntent: NutritionTabIntent?
     @Binding var progressIntent: ProgressTabIntent?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @EnvironmentObject private var guidedTour: GuidedTourCoordinator
     @StateObject private var viewModel: HomeViewModel
     @ObservedObject private var streakStore = StreakStore.shared
@@ -30,11 +31,22 @@ struct HomeView: View {
     @State private var hasActivatedPendingOnboardingTour = false
     @State private var homeActiveSession: HomeSessionDraft?
     @State private var showHomeActiveSession = false
+    @State private var revealHeader = false
+    @State private var revealPrimaryCards = false
+    @State private var revealSecondaryCards = false
+    @State private var isLaunchingWorkoutFromHome = false
 
     private let trainingPreview = [
         "Bench Press · 4 x 8",
         "Incline DB Press · 3 x 10"
     ]
+
+    private enum HomeOverlay {
+        case saveStreak
+        case weeklyCheckIn
+        case greeting
+        case streakCelebration
+    }
 
     init(
         userId: String,
@@ -51,6 +63,45 @@ struct HomeView: View {
         _viewModel = StateObject(wrappedValue: HomeViewModel(userId: userId))
     }
 
+    private var overlayAnimation: Animation {
+        reduceMotion ? .linear(duration: 0.01) : MotionTokens.easeInOut
+    }
+
+    private var springAnimation: Animation {
+        reduceMotion ? .linear(duration: 0.01) : MotionTokens.springBase
+    }
+
+    private var celebrationAnimation: Animation {
+        reduceMotion ? .linear(duration: 0.01) : MotionTokens.springSoft
+    }
+
+    private var standardOverlayTransition: AnyTransition {
+        reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.985))
+    }
+
+    private var currentOverlay: HomeOverlay? {
+        if showStreakCelebration {
+            return .streakCelebration
+        }
+        if showWeeklyCheckInPrompt {
+            return .weeklyCheckIn
+        }
+        if showSaveStreakMode {
+            return .saveStreak
+        }
+        if showGreeting {
+            return .greeting
+        }
+        return nil
+    }
+
+    private func setOverlay(_ overlay: HomeOverlay?) {
+        showSaveStreakMode = overlay == .saveStreak
+        showWeeklyCheckInPrompt = overlay == .weeklyCheckIn
+        showGreeting = overlay == .greeting
+        showStreakCelebration = overlay == .streakCelebration
+    }
+
     var body: some View {
         ZStack {
             FitTheme.backgroundGradient
@@ -59,19 +110,22 @@ struct HomeView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
-                        // Enhanced Streak Badge with new StreakStore
-                        EnhancedStreakBadge(onTap: {
-                            showStreakDetail = true
-                        })
-                        
-                        // Daily Check-In Card (if not completed today)
-                        if !streakStore.hasCompletedCheckInToday {
-                            DailyCheckInCard(
-                                currentStreak: streakStore.appStreak.currentStreak,
-                                timeRemaining: streakStore.timeUntilMidnight,
-                                onCheckIn: { showDailyCheckIn = true }
-                            )
+                        Group {
+                            // Enhanced Streak Badge with new StreakStore
+                            EnhancedStreakBadge(onTap: {
+                                showStreakDetail = true
+                            })
+
+                            // Daily Check-In Card (if not completed today)
+                            if !streakStore.hasCompletedCheckInToday {
+                                DailyCheckInCard(
+                                    currentStreak: streakStore.appStreak.currentStreak,
+                                    timeRemaining: streakStore.timeUntilMidnight,
+                                    onCheckIn: { showDailyCheckIn = true }
+                                )
+                            }
                         }
+                        .homeEntrance(visible: revealPrimaryCards, reduceMotion: reduceMotion)
 
                         HomeHeaderView(
                             name: viewModel.displayName,
@@ -83,6 +137,7 @@ struct HomeView: View {
                         }
                         .tourTarget(.homeHeader)
                         .id(GuidedTourTargetID.homeHeader)
+                        .homeEntrance(visible: revealHeader, reduceMotion: reduceMotion)
 
                         Group {
                             let schedule = SplitSchedule.loadSnapshot()
@@ -109,7 +164,12 @@ struct HomeView: View {
                                     completedExercises: todaysWorkout?.exercises ?? [],
                                     isCompleted: todaysWorkout != nil,
                                     coachPick: coachPickForToday,
+                                    isLaunchingWorkout: isLaunchingWorkoutFromHome,
                                     onStartWorkout: {
+                                        guard !isLaunchingWorkoutFromHome else { return }
+                                        withAnimation(springAnimation) {
+                                            isLaunchingWorkoutFromHome = true
+                                        }
                                         Task {
                                             await startWorkoutFromHome(coachPick: coachPickForToday)
                                         }
@@ -123,6 +183,7 @@ struct HomeView: View {
                                 .id(GuidedTourTargetID.homeTrainingCard)
                             }
                         }
+                        .homeEntrance(visible: revealPrimaryCards, reduceMotion: reduceMotion)
 
                         NutritionSnapshotCard(
                             caloriesUsed: Int(viewModel.macroTotals.calories),
@@ -153,6 +214,7 @@ struct HomeView: View {
                         )
                         .tourTarget(.homeNutritionCard)
                         .id(GuidedTourTargetID.homeNutritionCard)
+                        .homeEntrance(visible: revealSecondaryCards, reduceMotion: reduceMotion)
 
                         CheckInReminderCard(
                             daysUntilCheckin: viewModel.daysUntilCheckin,
@@ -166,8 +228,10 @@ struct HomeView: View {
                         )
                         .tourTarget(.homeCheckinCard, shape: .roundedRect(cornerRadius: 24), padding: 0)
                         .id(GuidedTourTargetID.homeCheckinCard)
+                        .homeEntrance(visible: revealSecondaryCards, reduceMotion: reduceMotion)
                         
                         ProgressSummaryCard(weight: viewModel.latestWeight, lastPr: viewModel.lastPr)
+                            .homeEntrance(visible: revealSecondaryCards, reduceMotion: reduceMotion)
                         GoalCard(
                             name: viewModel.displayName,
                             goal: viewModel.goal,
@@ -177,6 +241,7 @@ struct HomeView: View {
                             age: viewModel.age,
                             onTap: { showProfileEdit = true }
                         )
+                        .homeEntrance(visible: revealSecondaryCards, reduceMotion: reduceMotion)
                     }
                     .padding(.horizontal, 20)
                     .padding(.top, 12)
@@ -189,67 +254,66 @@ struct HomeView: View {
                     scrollToGuidedTourTarget(using: proxy)
                 }
             }
-            // Save Your Streak Mode (when <6 hours remaining and streaks at risk)
-            if showSaveStreakMode {
-                SaveYourStreakView(
-                    atRiskStreaks: streakStore.atRiskStreaks,
-                    onActionComplete: { streakType in
-                        handleStreakActionComplete(streakType)
-                    },
-                    onDismiss: {
-                        withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
-                            showSaveStreakMode = false
+            if let currentOverlay {
+                switch currentOverlay {
+                case .saveStreak:
+                    SaveYourStreakView(
+                        atRiskStreaks: streakStore.atRiskStreaks,
+                        onActionComplete: { streakType in
+                            handleStreakActionComplete(streakType)
+                        },
+                        onDismiss: {
+                            withAnimation(springAnimation) {
+                                setOverlay(nil)
+                            }
                         }
-                    }
-                )
-                .transition(.opacity)
-                .zIndex(1)
-            }
-            
-            if showWeeklyCheckInPrompt {
-                WeeklyCheckInDuePromptView(
-                    isOverdue: viewModel.isCheckinOverdue,
-                    statusText: viewModel.checkinStatusText,
-                    onStartCheckIn: {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            showWeeklyCheckInPrompt = false
+                    )
+                    .transition(standardOverlayTransition)
+                    .zIndex(1)
+
+                case .weeklyCheckIn:
+                    WeeklyCheckInDuePromptView(
+                        isOverdue: viewModel.isCheckinOverdue,
+                        statusText: viewModel.checkinStatusText,
+                        onStartCheckIn: {
+                            withAnimation(overlayAnimation) {
+                                setOverlay(nil)
+                            }
+                            progressIntent = .startCheckin
+                            selectedTab = .progress
+                        },
+                        onDismiss: {
+                            withAnimation(overlayAnimation) {
+                                setOverlay(nil)
+                            }
                         }
-                        progressIntent = .startCheckin
-                        selectedTab = .progress
-                    },
-                    onDismiss: {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            showWeeklyCheckInPrompt = false
+                    )
+                    .transition(standardOverlayTransition)
+                    .zIndex(2)
+
+                case .greeting:
+                    DailyCoachGreetingView(
+                        name: viewModel.displayName,
+                        streakDays: streakStore.appStreak.currentStreak,
+                        onDismiss: {
+                            onGreetingDismissed()
                         }
-                    }
-                )
-                .transition(.opacity)
-                .zIndex(2)
-            }
-            
-            if showGreeting && !showSaveStreakMode && !showWeeklyCheckInPrompt {
-                DailyCoachGreetingView(
-                    name: viewModel.displayName,
-                    streakDays: streakStore.appStreak.currentStreak,
-                    onDismiss: {
-                        onGreetingDismissed()
-                    }
-                )
-                .transition(.opacity)
-                .zIndex(1)
-            }
-            
-            if showStreakCelebration {
-                StreakCelebrationView(
-                    streakDays: streakStore.appStreak.currentStreak,
-                    onDismiss: {
-                        withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
-                            showStreakCelebration = false
+                    )
+                    .transition(standardOverlayTransition)
+                    .zIndex(1)
+
+                case .streakCelebration:
+                    StreakCelebrationView(
+                        streakDays: streakStore.appStreak.currentStreak,
+                        onDismiss: {
+                            withAnimation(celebrationAnimation) {
+                                setOverlay(nil)
+                            }
                         }
-                    }
-                )
-                .transition(.scale.combined(with: .opacity))
-                .zIndex(3)
+                    )
+                    .transition(standardOverlayTransition)
+                    .zIndex(3)
+                }
             }
         }
         .sheet(isPresented: $showSettings) {
@@ -274,13 +338,14 @@ struct HomeView: View {
         }
         .sheet(isPresented: $showDailyCheckIn) {
             DailyCheckInView(onComplete: {
-                withAnimation(.spring(response: 0.5, dampingFraction: 0.7)) {
-                    showStreakCelebration = true
+                withAnimation(celebrationAnimation) {
+                    setOverlay(.streakCelebration)
                 }
             })
         }
         .fullScreenCover(isPresented: $showHomeActiveSession, onDismiss: {
             homeActiveSession = nil
+            isLaunchingWorkoutFromHome = false
         }) {
             Group {
                 if let session = homeActiveSession, !session.exercises.isEmpty {
@@ -322,11 +387,13 @@ struct HomeView: View {
             todaysWorkout = WorkoutCompletionStore.todaysCompletion()
             todaysTrainingSnapshot = TodayTrainingStore.todaysTraining()
             tryActivatePendingOnboardingTourIfNeeded()
+            triggerHomeEntranceAnimation()
         }
         .onAppear {
             promptDailyCheckInIfNeeded()
             updateGreetingIfNeeded()
             tryActivatePendingOnboardingTourIfNeeded()
+            triggerHomeEntranceAnimation()
         }
         .onReceive(NotificationCenter.default.publisher(for: .fitAIMacrosUpdated)) { _ in
             Task { await viewModel.load() }
@@ -358,7 +425,9 @@ struct HomeView: View {
                 let logDate = notification.userInfo?["logDate"] as? String
                 let isTodayLog = (logDate == nil) || (logDate == NutritionLocalStore.todayKey)
                 if isTodayLog, let macros = notification.userInfo?["macros"] as? [String: Any] {
-                    viewModel.macroTotals = MacroTotals.fromDictionary(macros)
+                    withAnimation(overlayAnimation) {
+                        viewModel.macroTotals = MacroTotals.fromDictionary(macros)
+                    }
                 }
                 if isTodayLog {
                     // Also reload full data to ensure sync
@@ -371,6 +440,7 @@ struct HomeView: View {
                 Task { await viewModel.load() }
                 todaysTrainingSnapshot = TodayTrainingStore.todaysTraining()
                 tryActivatePendingOnboardingTourIfNeeded()
+                triggerHomeEntranceAnimation(forceRestart: true)
             }
         }
         .onChange(of: showGreeting) { _ in
@@ -398,27 +468,26 @@ struct HomeView: View {
         
         // Check if we should show Save Your Streak mode instead
         if shouldPromptWeeklyCheckIn() || showWeeklyCheckInPrompt {
-            showSaveStreakMode = false
             markWeeklyCheckInPrompted()
-            withAnimation(.easeInOut(duration: 0.2)) {
-                showWeeklyCheckInPrompt = true
+            withAnimation(overlayAnimation) {
+                setOverlay(.weeklyCheckIn)
             }
         } else if streakStore.shouldShowSaveStreakMode && !streakStore.hasCompletedCheckInToday {
-            withAnimation(.easeInOut(duration: 0.3)) {
-                showSaveStreakMode = true
+            withAnimation(springAnimation) {
+                setOverlay(.saveStreak)
             }
         } else if shouldPromptDailyCheckIn() || showDailyCheckIn {
             return
         } else {
-            withAnimation(.easeInOut(duration: 0.2)) {
-                showGreeting = true
+            withAnimation(overlayAnimation) {
+                setOverlay(.greeting)
             }
         }
     }
     
     private func onGreetingDismissed() {
-        withAnimation(.easeInOut(duration: 0.2)) {
-            showGreeting = false
+        withAnimation(overlayAnimation) {
+            setOverlay(nil)
         }
         
         // If check-in not completed, prompt once per day
@@ -457,15 +526,19 @@ struct HomeView: View {
         }
 
         DispatchQueue.main.async {
-            withAnimation(.easeInOut(duration: 0.3)) {
+            if reduceMotion {
                 proxy.scrollTo(target, anchor: anchor)
+            } else {
+                withAnimation(MotionTokens.easeInOut) {
+                    proxy.scrollTo(target, anchor: anchor)
+                }
             }
         }
     }
     
     private func handleStreakActionComplete(_ streakType: StreakType) {
-        withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
-            showSaveStreakMode = false
+        withAnimation(springAnimation) {
+            setOverlay(nil)
         }
         
         // Navigate to appropriate tab based on action
@@ -473,8 +546,8 @@ struct HomeView: View {
         case .app:
             // Check-in completed, show celebration
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                withAnimation(.spring(response: 0.5, dampingFraction: 0.7)) {
-                    showStreakCelebration = true
+                withAnimation(celebrationAnimation) {
+                    setOverlay(.streakCelebration)
                 }
             }
         case .nutrition:
@@ -491,6 +564,10 @@ struct HomeView: View {
     private func startWorkoutFromHome(coachPick: CoachPickWorkout?) async {
         let launchPlan = workoutLaunchPlan(coachPick: coachPick)
 
+        if !reduceMotion {
+            try? await Task.sleep(nanoseconds: 140_000_000)
+        }
+
         await MainActor.run {
             homeActiveSession = HomeSessionDraft(
                 sessionId: nil,
@@ -498,6 +575,7 @@ struct HomeView: View {
                 exercises: launchPlan.exercises
             )
             showHomeActiveSession = true
+            isLaunchingWorkoutFromHome = false
         }
 
         TodayTrainingStore.save(
@@ -524,6 +602,36 @@ struct HomeView: View {
             }
         } catch {
             // Keep the local session running even if backend session creation fails.
+            await MainActor.run {
+                isLaunchingWorkoutFromHome = false
+            }
+        }
+    }
+
+    private func triggerHomeEntranceAnimation(forceRestart: Bool = false) {
+        if reduceMotion {
+            revealHeader = true
+            revealPrimaryCards = true
+            revealSecondaryCards = true
+            return
+        }
+
+        if forceRestart {
+            revealHeader = false
+            revealPrimaryCards = false
+            revealSecondaryCards = false
+        } else if revealHeader && revealPrimaryCards && revealSecondaryCards {
+            return
+        }
+
+        withAnimation(MotionTokens.springQuick) {
+            revealHeader = true
+        }
+        withAnimation(MotionTokens.springBase.delay(0.05)) {
+            revealPrimaryCards = true
+        }
+        withAnimation(MotionTokens.springSoft.delay(0.12)) {
+            revealSecondaryCards = true
         }
     }
 
@@ -624,7 +732,9 @@ struct HomeView: View {
     private func promptWeeklyCheckInIfNeeded() {
         guard shouldPromptWeeklyCheckIn() else { return }
         markWeeklyCheckInPrompted()
-        showWeeklyCheckInPrompt = true
+        withAnimation(overlayAnimation) {
+            setOverlay(.weeklyCheckIn)
+        }
     }
     
     private func dateFromKey(_ key: String) -> Date? {
@@ -811,6 +921,7 @@ private struct DailyCoachGreetingView: View {
 private struct StreakCelebrationView: View {
     let streakDays: Int
     let onDismiss: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     
     @State private var animateFlame = false
     @State private var animateNumber = false
@@ -904,17 +1015,25 @@ private struct StreakCelebrationView: View {
             .padding(.horizontal, 32)
         }
         .onAppear {
-            // Animate flame
-            withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
+            if reduceMotion {
                 animateFlame = true
+                animateNumber = true
+                return
             }
-            // Animate number pop
-            withAnimation(.spring(response: 0.5, dampingFraction: 0.6).delay(0.2)) {
+
+            withAnimation(MotionTokens.easeOut) {
+                animateRing = true
+            }
+            withAnimation(MotionTokens.springSoft.delay(0.14)) {
                 animateNumber = true
             }
-            // Animate rings
-            withAnimation(.easeOut(duration: 1.5).repeatForever(autoreverses: false)) {
-                animateRing = true
+            withAnimation(.easeInOut(duration: MotionTokens.base).repeatCount(2, autoreverses: true)) {
+                animateFlame = true
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
+                withAnimation(MotionTokens.easeOut) {
+                    animateFlame = false
+                }
             }
         }
     }
@@ -927,8 +1046,10 @@ private struct TodayTrainingCard: View {
     let completedExercises: [String]
     let isCompleted: Bool
     let coachPick: CoachPickWorkout?
+    let isLaunchingWorkout: Bool
     let onStartWorkout: () -> Void
     let onSwap: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     
     @State private var isExpanded = false
     
@@ -967,6 +1088,19 @@ private struct TodayTrainingCard: View {
     
     private var previewList: [String] {
         Array(displayList.prefix(2))
+    }
+
+    private var expandCollapseAnimation: Animation {
+        reduceMotion ? .linear(duration: 0.01) : MotionTokens.springBase
+    }
+
+    private var listTransition: AnyTransition {
+        reduceMotion
+            ? .opacity
+            : .asymmetric(
+                insertion: .opacity.combined(with: .move(edge: .top)),
+                removal: .opacity.combined(with: .move(edge: .bottom))
+            )
     }
 
     var body: some View {
@@ -1010,7 +1144,7 @@ private struct TodayTrainingCard: View {
                     Spacer()
                     
                     Button {
-                        withAnimation(.easeInOut(duration: 0.2)) {
+                        withAnimation(expandCollapseAnimation) {
                             isExpanded.toggle()
                         }
                     } label: {
@@ -1025,70 +1159,94 @@ private struct TodayTrainingCard: View {
 
                 VStack(alignment: .leading, spacing: 8) {
                     if isExpanded {
-                        if let coachPick, !coachPick.exerciseDetails.isEmpty {
-                            ForEach(coachPick.exerciseDetails) { exercise in
-                                HStack {
-                                    Circle()
-                                        .fill(FitTheme.cardWorkoutAccent)
-                                        .frame(width: 6, height: 6)
-                                    
-                                    Text(exercise.name)
-                                        .font(FitFont.body(size: 14))
-                                        .foregroundColor(FitTheme.textPrimary)
-                                    
-                                    Spacer()
-                                    
-                                    Text("\(exercise.sets) × \(exercise.reps)")
-                                        .font(FitFont.body(size: 13))
-                                        .foregroundColor(FitTheme.textSecondary)
-                                }
-                                .padding(.vertical, 4)
-                            }
-                        } else {
-                            ForEach(displayList, id: \.self) { item in
-                                HStack(spacing: 8) {
-                                    Circle()
-                                        .fill(FitTheme.cardWorkoutAccent)
-                                        .frame(width: 6, height: 6)
-                                    Text(item)
-                                        .font(FitFont.body(size: 14))
-                                        .foregroundColor(FitTheme.textSecondary)
-                                }
-                                .padding(.vertical, 4)
-                            }
-                        }
+                        expandedExerciseList
+                            .transition(listTransition)
                     } else {
-                        // Show preview
-                        ForEach(previewList, id: \.self) { item in
-                            HStack(spacing: 8) {
-                                Circle()
-                                    .fill(FitTheme.cardWorkoutAccent)
-                                    .frame(width: 6, height: 6)
-                                Text(item)
-                                    .font(FitFont.body(size: 14))
-                                    .foregroundColor(FitTheme.textSecondary)
-                            }
-                        }
-                        
-                        if displayList.count > previewList.count {
-                            Text("+\(displayList.count - previewList.count) more exercises")
-                                .font(FitFont.body(size: 12))
-                                .foregroundColor(FitTheme.cardWorkoutAccent)
-                                .onTapGesture {
-                                    withAnimation(.easeInOut(duration: 0.2)) {
-                                        isExpanded = true
-                                    }
-                                }
-                        }
+                        previewExerciseList
+                            .transition(listTransition)
                     }
                 }
+                .animation(expandCollapseAnimation, value: isExpanded)
 
                 if !isCompleted {
                     HStack(spacing: 12) {
-                        ActionButton(title: "Start Workout", style: .primary, action: onStartWorkout)
-                        ActionButton(title: "Swap", style: .secondary, action: onSwap)
+                        ActionButton(
+                            title: isLaunchingWorkout ? "Preparing..." : "Start Workout",
+                            style: .primary,
+                            isLoading: isLaunchingWorkout,
+                            isDisabled: isLaunchingWorkout,
+                            action: onStartWorkout
+                        )
+                        ActionButton(
+                            title: "Swap",
+                            style: .secondary,
+                            isDisabled: isLaunchingWorkout,
+                            action: onSwap
+                        )
                     }
                 }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var expandedExerciseList: some View {
+        if let coachPick, !coachPick.exerciseDetails.isEmpty {
+            ForEach(coachPick.exerciseDetails) { exercise in
+                HStack {
+                    Circle()
+                        .fill(FitTheme.cardWorkoutAccent)
+                        .frame(width: 6, height: 6)
+
+                    Text(exercise.name)
+                        .font(FitFont.body(size: 14))
+                        .foregroundColor(FitTheme.textPrimary)
+
+                    Spacer()
+
+                    Text("\(exercise.sets) × \(exercise.reps)")
+                        .font(FitFont.body(size: 13))
+                        .foregroundColor(FitTheme.textSecondary)
+                }
+                .padding(.vertical, 4)
+            }
+        } else {
+            ForEach(displayList, id: \.self) { item in
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(FitTheme.cardWorkoutAccent)
+                        .frame(width: 6, height: 6)
+                    Text(item)
+                        .font(FitFont.body(size: 14))
+                        .foregroundColor(FitTheme.textSecondary)
+                }
+                .padding(.vertical, 4)
+            }
+        }
+    }
+
+    private var previewExerciseList: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(previewList, id: \.self) { item in
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(FitTheme.cardWorkoutAccent)
+                        .frame(width: 6, height: 6)
+                    Text(item)
+                        .font(FitFont.body(size: 14))
+                        .foregroundColor(FitTheme.textSecondary)
+                }
+            }
+
+            if displayList.count > previewList.count {
+                Text("+\(displayList.count - previewList.count) more exercises")
+                    .font(FitFont.body(size: 12))
+                    .foregroundColor(FitTheme.cardWorkoutAccent)
+                    .onTapGesture {
+                        withAnimation(expandCollapseAnimation) {
+                            isExpanded = true
+                        }
+                    }
             }
         }
     }
@@ -1673,6 +1831,7 @@ private struct NutritionSnapshotCard: View {
     let fats: MacroProgress
     let onLogMeal: () -> Void
     let onScanFood: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         let calorieDelta = caloriesTarget - caloriesUsed
@@ -1699,6 +1858,8 @@ private struct NutritionSnapshotCard: View {
                         .font(FitFont.heading(size: 34))
                         .fontWeight(.bold)
                         .foregroundColor(FitTheme.textPrimary)
+                        .contentTransition(.numericText())
+                        .animation(reduceMotion ? nil : MotionTokens.springQuick, value: calorieAmount)
 
                     Text(isOverCalories ? "cal over" : "cal left")
                         .font(FitFont.body(size: 16))
@@ -1709,6 +1870,9 @@ private struct NutritionSnapshotCard: View {
                     Text("\(caloriesUsed) / \(caloriesTarget) used")
                         .font(FitFont.body(size: 13))
                         .foregroundColor(FitTheme.textSecondary)
+                        .contentTransition(.numericText())
+                        .animation(reduceMotion ? nil : MotionTokens.springQuick, value: caloriesUsed)
+                        .animation(reduceMotion ? nil : MotionTokens.springQuick, value: caloriesTarget)
                 }
 
                 MacroRow(progress: protein)
@@ -1828,6 +1992,7 @@ private struct StreakBadge: View {
     let nutritionStreak: Int
     let workoutStreak: Int
     let onTap: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     
     @State private var isAnimating = false
     
@@ -1915,8 +2080,15 @@ private struct StreakBadge: View {
         }
         .buttonStyle(.plain)
         .onAppear {
-            withAnimation(.easeInOut(duration: 1.5).repeatForever(autoreverses: true)) {
+            guard !reduceMotion else {
+                isAnimating = false
+                return
+            }
+            withAnimation(.easeInOut(duration: MotionTokens.slow).repeatCount(2, autoreverses: true)) {
                 isAnimating = true
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + (MotionTokens.slow * 2.2)) {
+                isAnimating = false
             }
         }
     }
@@ -2031,6 +2203,7 @@ private struct DailyCheckInCard: View {
 private struct EnhancedStreakBadge: View {
     @ObservedObject var streakStore = StreakStore.shared
     let onTap: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     
     @State private var isAnimating = false
     
@@ -2098,6 +2271,7 @@ private struct EnhancedStreakBadge: View {
                             .font(FitFont.heading(size: 28))
                             .foregroundColor(FitTheme.textPrimary)
                             .contentTransition(.numericText())
+                            .animation(reduceMotion ? nil : MotionTokens.springQuick, value: streakStore.appStreak.currentStreak)
                         
                         Text("day streak")
                             .font(FitFont.body(size: 12))
@@ -2135,8 +2309,10 @@ private struct EnhancedStreakBadge: View {
                         
                         if atRiskCount > 1 {
                             Text("\(atRiskCount) streaks at risk • \(StreakCalculations.formatCountdown(countdown))")
+                                .contentTransition(.numericText())
                         } else {
                             Text("\(StreakCalculations.formatCountdown(countdown)) to save your streak")
+                                .contentTransition(.numericText())
                         }
                     }
                     .font(FitFont.body(size: 12))
@@ -2169,9 +2345,24 @@ private struct EnhancedStreakBadge: View {
         }
         .buttonStyle(.plain)
         .onAppear {
-            withAnimation(.easeInOut(duration: 1.5).repeatForever(autoreverses: true)) {
-                isAnimating = true
-            }
+            runPulseBurst()
+        }
+        .onChange(of: atRiskCount) { _ in
+            runPulseBurst()
+        }
+    }
+
+    private func runPulseBurst() {
+        guard !reduceMotion else {
+            isAnimating = false
+            return
+        }
+        isAnimating = false
+        withAnimation(.easeInOut(duration: MotionTokens.slow).repeatCount(2, autoreverses: true)) {
+            isAnimating = true
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + (MotionTokens.slow * 2.2)) {
+            isAnimating = false
         }
     }
 }
@@ -2510,6 +2701,7 @@ private struct MacroProgress {
 
 private struct MacroRow: View {
     let progress: MacroProgress
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         let delta = progress.target - progress.current
@@ -2527,6 +2719,8 @@ private struct MacroRow: View {
                 Text("\(amount) g \(label)")
                     .font(FitFont.body(size: 13))
                     .foregroundColor(FitTheme.accent)
+                    .contentTransition(.numericText())
+                    .animation(reduceMotion ? nil : MotionTokens.springQuick, value: amount)
             }
 
             ProgressBar(value: progress.ratio)
@@ -2536,6 +2730,7 @@ private struct MacroRow: View {
 
 private struct ProgressBar: View {
     let value: Double
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         GeometryReader { proxy in
@@ -2546,6 +2741,7 @@ private struct ProgressBar: View {
                 RoundedRectangle(cornerRadius: 6)
                     .fill(FitTheme.primaryGradient)
                     .frame(width: proxy.size.width * value)
+                    .animation(reduceMotion ? nil : MotionTokens.springQuick, value: value)
             }
         }
         .frame(height: 8)
@@ -2560,11 +2756,29 @@ private enum ActionButtonStyle {
 private struct ActionButton: View {
     let title: String
     let style: ActionButtonStyle
+    var isLoading: Bool = false
+    var isDisabled: Bool = false
     let action: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var isInteractive: Bool {
+        !isLoading && !isDisabled
+    }
 
     var body: some View {
-        Button(action: action) {
-            Text(title)
+        Button(action: {
+            guard isInteractive else { return }
+            Haptics.selection()
+            action()
+        }) {
+            Group {
+                if isLoading {
+                    ProgressView()
+                        .progressViewStyle(CircularProgressViewStyle(tint: style == .primary ? FitTheme.buttonText : FitTheme.textPrimary))
+                } else {
+                    Text(title)
+                }
+            }
                 .font(FitFont.body(size: 14))
                 .fontWeight(.semibold)
                 .foregroundColor(style == .primary ? FitTheme.buttonText : FitTheme.textPrimary)
@@ -2585,6 +2799,19 @@ private struct ActionButton: View {
                 )
                 .shadow(color: style == .primary ? FitTheme.buttonShadow : .clear, radius: 12, x: 0, y: 6)
         }
+        .buttonStyle(PressableActionButtonStyle(reduceMotion: reduceMotion))
+        .disabled(!isInteractive)
+    }
+}
+
+private struct PressableActionButtonStyle: ButtonStyle {
+    let reduceMotion: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.985 : 1.0)
+            .opacity(configuration.isPressed ? 0.95 : 1.0)
+            .animation(reduceMotion ? nil : MotionTokens.springQuick, value: configuration.isPressed)
     }
 }
 
@@ -2614,6 +2841,14 @@ private struct CardContainer<Content: View>: View {
                     .stroke(accentBorder ?? FitTheme.cardStroke.opacity(0.6), lineWidth: accentBorder != nil ? 2 : 1)
             )
             .shadow(color: FitTheme.shadow, radius: 18, x: 0, y: 10)
+    }
+}
+
+private extension View {
+    func homeEntrance(visible: Bool, reduceMotion: Bool) -> some View {
+        opacity(visible || reduceMotion ? 1.0 : 0.0)
+            .offset(y: visible || reduceMotion ? 0 : 12)
+            .animation(reduceMotion ? nil : MotionTokens.springBase, value: visible)
     }
 }
 
