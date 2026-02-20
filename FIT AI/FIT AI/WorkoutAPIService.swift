@@ -1,5 +1,11 @@
 import Foundation
 
+func debugPrintResponse(_ endpoint: String, sessionId: String?, _ response: URLResponse?, _ data: Data?) {
+    if let http = response as? HTTPURLResponse { print("HTTP \(http.statusCode) \(endpoint) sessionId=\(sessionId ?? "nil")") }
+    print("BaseURL:", BackendConfig.baseURL.absoluteString)
+    if let data = data, let raw = String(data: data, encoding: .utf8) { print("RAW:", raw) }
+}
+
 struct WorkoutTemplate: Decodable, Identifiable {
     let id: String
     let title: String
@@ -168,6 +174,76 @@ struct WorkoutSessionCompleteResponse: Decodable {
     let prs: [WorkoutSessionPRUpdate]
 }
 
+struct WorkoutSetDetail: Decodable, Identifiable, Hashable {
+    let setIndex: Int?
+    let reps: Int
+    let weight: Double
+    let isWarmup: Bool
+    let durationSeconds: Int?
+
+    var id: String {
+        "\(setIndex ?? 0)-\(reps)-\(weight)-\(isWarmup ? 1 : 0)-\(durationSeconds ?? 0)"
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case setIndex
+        case reps
+        case weight
+        case isWarmup
+        case durationSeconds
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        func decodeInt(_ key: CodingKeys) -> Int {
+            if let value = try? container.decode(Int.self, forKey: key) {
+                return value
+            }
+            if let value = try? container.decode(Double.self, forKey: key) {
+                return Int(value)
+            }
+            if let value = try? container.decode(String.self, forKey: key) {
+                return Int(value.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+            }
+            return 0
+        }
+
+        func decodeOptionalInt(_ key: CodingKeys) -> Int? {
+            if let value = try? container.decodeIfPresent(Int.self, forKey: key) {
+                return value
+            }
+            if let value = try? container.decodeIfPresent(Double.self, forKey: key) {
+                return Int(value)
+            }
+            if let value = try? container.decodeIfPresent(String.self, forKey: key) {
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                return Int(trimmed)
+            }
+            return nil
+        }
+
+        func decodeDouble(_ key: CodingKeys) -> Double {
+            if let value = try? container.decode(Double.self, forKey: key) {
+                return value
+            }
+            if let value = try? container.decode(Int.self, forKey: key) {
+                return Double(value)
+            }
+            if let value = try? container.decode(String.self, forKey: key) {
+                return Double(value.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+            }
+            return 0
+        }
+
+        setIndex = decodeOptionalInt(.setIndex)
+        reps = decodeInt(.reps)
+        weight = decodeDouble(.weight)
+        isWarmup = (try? container.decode(Bool.self, forKey: .isWarmup)) ?? false
+        durationSeconds = decodeOptionalInt(.durationSeconds)
+    }
+}
+
 struct WorkoutSessionLogEntry: Decodable, Identifiable {
     let id: String
     let exerciseName: String
@@ -175,6 +251,7 @@ struct WorkoutSessionLogEntry: Decodable, Identifiable {
     let reps: Int
     let weight: Double
     let durationMinutes: Int?
+    let setDetails: [WorkoutSetDetail]
     let notes: String?
     let createdAt: String?
 
@@ -185,6 +262,7 @@ struct WorkoutSessionLogEntry: Decodable, Identifiable {
         case reps
         case weight
         case durationMinutes
+        case setDetails
         case notes
         case createdAt
     }
@@ -240,8 +318,22 @@ struct WorkoutSessionLogEntry: Decodable, Identifiable {
         reps = decodeInt(.reps)
         weight = decodeDouble(.weight)
         durationMinutes = decodeOptionalInt(.durationMinutes)
+        setDetails = (try? container.decode([WorkoutSetDetail].self, forKey: .setDetails)) ?? []
         notes = try? container.decodeIfPresent(String.self, forKey: .notes)
         createdAt = try? container.decodeIfPresent(String.self, forKey: .createdAt)
+    }
+    
+    // Memberwise initializer for manual creation (e.g., grouping logs)
+    init(id: String, exerciseName: String, sets: Int, reps: Int, weight: Double, durationMinutes: Int?, setDetails: [WorkoutSetDetail], notes: String?, createdAt: String?) {
+        self.id = id
+        self.exerciseName = exerciseName
+        self.sets = sets
+        self.reps = reps
+        self.weight = weight
+        self.durationMinutes = durationMinutes
+        self.setDetails = setDetails
+        self.notes = notes
+        self.createdAt = createdAt
     }
 }
 
@@ -502,8 +594,12 @@ struct WorkoutAPIService {
         request.httpBody = try JSONSerialization.data(withJSONObject: payload, options: [])
 
         let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+        guard let http = response as? HTTPURLResponse else {
             throw OnboardingAPIError.invalidResponse
+        }
+        guard (200...299).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw OnboardingAPIError.serverError(statusCode: http.statusCode, body: body)
         }
 
         let decoder = JSONDecoder()
@@ -518,8 +614,12 @@ struct WorkoutAPIService {
         sets: Int,
         reps: Int,
         weight: Double,
-        notes: String?
+        notes: String?,
+        setIndex: Int? = nil,
+        isWarmup: Bool = false,
+        durationSeconds: Int? = nil
     ) async throws {
+        let endpoint = "POST /workouts/sessions/\(sessionId)/log"
         let url = BackendConfig.baseURL.appendingPathComponent("workouts/sessions/\(sessionId)/log")
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -534,11 +634,26 @@ struct WorkoutAPIService {
         if let notes {
             payload["notes"] = notes
         }
+        if let setIndex {
+            payload["set_index"] = setIndex
+        }
+        if isWarmup {
+            payload["is_warmup"] = true
+        }
+        if let durationSeconds {
+            payload["duration_seconds"] = durationSeconds
+        }
         request.httpBody = try JSONSerialization.data(withJSONObject: payload, options: [])
 
-        let (_, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            debugPrintResponse(endpoint, sessionId: sessionId, response, data)
             throw OnboardingAPIError.invalidResponse
+        }
+        guard (200...299).contains(http.statusCode) else {
+            debugPrintResponse(endpoint, sessionId: sessionId, response, data)
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw OnboardingAPIError.serverError(statusCode: http.statusCode, body: body)
         }
     }
 
@@ -556,15 +671,22 @@ struct WorkoutAPIService {
         var payload: [String: Any] = [
             "exercise_name": exerciseName,
             "duration_minutes": durationMinutes,
+            "duration_seconds": durationMinutes * 60,
+            "set_index": 1,
+            "is_warmup": false,
         ]
         if let notes {
             payload["notes"] = notes
         }
         request.httpBody = try JSONSerialization.data(withJSONObject: payload, options: [])
 
-        let (_, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
             throw OnboardingAPIError.invalidResponse
+        }
+        guard (200...299).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw OnboardingAPIError.serverError(statusCode: http.statusCode, body: body)
         }
     }
 
@@ -579,8 +701,12 @@ struct WorkoutAPIService {
         )
 
         let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+        guard let http = response as? HTTPURLResponse else {
             throw OnboardingAPIError.invalidResponse
+        }
+        guard (200...299).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw OnboardingAPIError.serverError(statusCode: http.statusCode, body: body)
         }
 
         let decoder = JSONDecoder()
@@ -589,16 +715,28 @@ struct WorkoutAPIService {
     }
 
     func fetchSessionLogs(sessionId: String) async throws -> [WorkoutSessionLogEntry] {
+        let endpoint = "GET /workouts/sessions/\(sessionId)/logs"
         let url = BackendConfig.baseURL.appendingPathComponent("workouts/sessions/\(sessionId)/logs")
         let (data, response) = try await session.data(from: url)
-        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+        guard let http = response as? HTTPURLResponse else {
+            debugPrintResponse(endpoint, sessionId: sessionId, response, data)
             throw OnboardingAPIError.invalidResponse
+        }
+        guard (200...299).contains(http.statusCode) else {
+            debugPrintResponse(endpoint, sessionId: sessionId, response, data)
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw OnboardingAPIError.serverError(statusCode: http.statusCode, body: body)
         }
 
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
-        let payload = try decoder.decode(WorkoutSessionLogsResponse.self, from: data)
-        return payload.logs
+        do {
+            let payload = try decoder.decode(WorkoutSessionLogsResponse.self, from: data)
+            return payload.logs
+        } catch {
+            debugPrintResponse(endpoint, sessionId: sessionId, response, data)
+            throw error
+        }
     }
 
     func fetchExerciseHistory(userId: String, exerciseName: String) async throws -> ExerciseHistoryResponse {

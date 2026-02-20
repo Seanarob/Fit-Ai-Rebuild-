@@ -278,7 +278,9 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleURLTypes = "( { CFBundleTypeRole = Editor; CFBundleURLName = fitai; CFBundleURLSchemes = ( fitai ); } )";
 				INFOPLIST_KEY_NSCameraUsageDescription = "FIT AI uses the camera to scan meals and barcodes.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "FIT AI uses the microphone to let you speak meals for Voice Log.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "FIT AI uses your photo library to scan meals.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "FIT AI uses speech recognition to turn your speech into text for meal logging.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
@@ -315,7 +317,9 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleURLTypes = "( { CFBundleTypeRole = Editor; CFBundleURLName = fitai; CFBundleURLSchemes = ( fitai ); } )";
 				INFOPLIST_KEY_NSCameraUsageDescription = "FIT AI uses the camera to scan meals and barcodes.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "FIT AI uses the microphone to let you speak meals for Voice Log.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "FIT AI uses your photo library to scan meals.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "FIT AI uses speech recognition to turn your speech into text for meal logging.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";

@@ -1,5 +1,21 @@
 import Foundation
 
+struct FoodItemMetadata: Decodable {
+    let foodId: String?
+    let brand: String?
+    let restaurant: String?
+    let foodType: String?
+    let source: String?
+
+    enum CodingKeys: String, CodingKey {
+        case foodId = "food_id"
+        case brand
+        case restaurant
+        case foodType = "food_type"
+        case source
+    }
+}
+
 struct FoodItem: Decodable, Identifiable {
     let id: String
     let fdcId: String?
@@ -10,7 +26,12 @@ struct FoodItem: Decodable, Identifiable {
     let carbs: Double
     let fats: Double
     let calories: Double
+    let brand: String?
+    let restaurant: String?
+    let foodType: String?
+    let isBranded: Bool?
     let servingOptions: [ServingOptionPayload]?
+    let metadata: FoodItemMetadata?
     
     enum CodingKeys: String, CodingKey {
         case id
@@ -22,7 +43,12 @@ struct FoodItem: Decodable, Identifiable {
         case carbs
         case fats
         case calories
+        case brand
+        case restaurant
+        case foodType = "food_type"
+        case isBranded = "is_branded"
         case servingOptions = "serving_options"
+        case metadata
     }
     
     /// Convert serving options to the model struct
@@ -40,6 +66,54 @@ struct FoodItem: Decodable, Identifiable {
                 fats: opt.fats ?? 0
             )
         }
+    }
+
+    var brandName: String? {
+        let direct = brand?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let direct, !direct.isEmpty { return direct }
+        let metadataBrand = metadata?.brand?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let metadataBrand, !metadataBrand.isEmpty { return metadataBrand }
+        return nil
+    }
+
+    var foodTypeLabel: String? {
+        let direct = foodType?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let direct, !direct.isEmpty { return direct }
+        let metadataType = metadata?.foodType?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let metadataType, !metadataType.isEmpty { return metadataType }
+        return nil
+    }
+
+    var restaurantName: String? {
+        let direct = restaurant?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let direct, !direct.isEmpty { return direct }
+        let metadataRestaurant = metadata?.restaurant?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let metadataRestaurant, !metadataRestaurant.isEmpty { return metadataRestaurant }
+        if let foodTypeLabel, foodTypeLabel.lowercased().contains("restaurant") {
+            return brandName
+        }
+        return nil
+    }
+
+    var isRestaurantResolved: Bool {
+        if let restaurantName, !restaurantName.isEmpty { return true }
+        if let foodTypeLabel, foodTypeLabel.lowercased().contains("restaurant") { return true }
+        return false
+    }
+
+    var isBrandedResolved: Bool {
+        if let isBranded { return isBranded }
+        if let brandName, !brandName.isEmpty { return true }
+        if let foodTypeLabel {
+            let lowered = foodTypeLabel.lowercased()
+            if lowered.contains("brand") || lowered.contains("restaurant") { return true }
+        }
+        return false
+    }
+
+    var displayBrandLabel: String? {
+        if let restaurantName { return restaurantName }
+        return brandName
     }
 }
 
@@ -344,6 +418,9 @@ struct NutritionAPIService {
                 "carbs": item.macros.carbs,
                 "fats": item.macros.fats,
                 "serving": item.detail,
+                "brand": item.brandName,
+                "restaurant": item.restaurantName,
+                "source": item.source,
             ],
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: payload, options: [])
@@ -401,11 +478,22 @@ struct NutritionAPIService {
         }
 
         var metadata: [String: Any] = ["source": food.source]
-        if food.source == "fatsecret" {
+        if let metadataFoodId = food.metadata?.foodId {
+            metadata["food_id"] = metadataFoodId
+        } else if food.source == "fatsecret" {
             metadata["food_id"] = food.id
         }
         if let fdcId = food.fdcId {
             metadata["fdc_id"] = fdcId
+        }
+        if let brand = food.brandName {
+            metadata["brand"] = brand
+        }
+        if let restaurant = food.restaurantName {
+            metadata["restaurant"] = restaurant
+        }
+        if let foodType = food.foodTypeLabel {
+            metadata["food_type"] = foodType
         }
         metadata["external_id"] = food.id
         foodPayload["metadata"] = metadata
@@ -678,8 +766,146 @@ private enum MealPlanSnapshotBuilder {
     private static func parseMeal(from dict: [String: Any]) -> MealPlanMeal? {
         let name = (dict["name"] as? String) ?? (dict["title"] as? String) ?? "Meal"
         let macros = parseTotals(from: dict) ?? MacroTotals.zero
-        let items = dict["items"] as? [String] ?? []
+        let items = parseMealItems(from: dict)
         return MealPlanMeal(name: name, macros: macros, items: items)
+    }
+
+    private static func parseMealItems(from dict: [String: Any]) -> [String] {
+        if let items = dict["items"] {
+            return normalizeMealPlanItems(items)
+        }
+        if let ingredients = dict["ingredients"] {
+            return normalizeMealPlanItems(ingredients)
+        }
+        if let foods = dict["foods"] {
+            return normalizeMealPlanItems(foods)
+        }
+        return []
+    }
+
+    private static func normalizeMealPlanItems(_ raw: Any) -> [String] {
+        if let items = raw as? [String] {
+            return items.compactMap(cleanItemString)
+        }
+        if let items = raw as? [Any] {
+            return items.compactMap(formatMealPlanItem)
+        }
+        if let dict = raw as? [String: Any], let formatted = formatMealPlanItem(dict) {
+            return [formatted]
+        }
+        return []
+    }
+
+    private static func formatMealPlanItem(_ value: Any) -> String? {
+        if let string = value as? String {
+            return cleanItemString(string)
+        }
+        if let dict = value as? [String: Any] {
+            return formatMealPlanItem(dict)
+        }
+        return nil
+    }
+
+    private static func formatMealPlanItem(_ dict: [String: Any]) -> String? {
+        let name = stringValue(dict["name"])
+            ?? stringValue(dict["item"])
+            ?? stringValue(dict["ingredient"])
+            ?? stringValue(dict["food"])
+            ?? stringValue(dict["title"])
+        let quantity = extractQuantity(from: dict)
+
+        if let name, let quantity {
+            if name.localizedCaseInsensitiveContains(quantity) {
+                return name
+            }
+            return "\(name) - \(quantity)"
+        }
+        if let name { return name }
+        if let quantity { return quantity }
+        return nil
+    }
+
+    private static func extractQuantity(from dict: [String: Any]) -> String? {
+        if let quantityDict = dict["quantity"] as? [String: Any],
+           let nested = quantityFromComponents(quantityDict) {
+            return nested
+        }
+        if let servingDict = dict["serving"] as? [String: Any],
+           let nested = quantityFromComponents(servingDict) {
+            return nested
+        }
+
+        let quantityString = stringValue(dict["quantity"])
+            ?? stringValue(dict["qty"])
+            ?? stringValue(dict["amount"])
+            ?? stringValue(dict["portion"])
+            ?? stringValue(dict["serving"])
+            ?? stringValue(dict["servings"])
+            ?? stringValue(dict["size"])
+            ?? stringValue(dict["serving_size"])
+
+        let unit = stringValue(dict["unit"])
+            ?? stringValue(dict["units"])
+            ?? stringValue(dict["measurement"])
+            ?? stringValue(dict["measure"])
+
+        if let quantityString {
+            if let unit, !quantityString.localizedCaseInsensitiveContains(unit) {
+                return "\(quantityString) \(unit)"
+            }
+            return quantityString
+        }
+
+        if let unit { return unit }
+        return nil
+    }
+
+    private static func quantityFromComponents(_ dict: [String: Any]) -> String? {
+        let amount = stringValue(dict["value"])
+            ?? stringValue(dict["amount"])
+            ?? stringValue(dict["qty"])
+            ?? stringValue(dict["quantity"])
+        let unit = stringValue(dict["unit"])
+            ?? stringValue(dict["units"])
+            ?? stringValue(dict["measure"])
+            ?? stringValue(dict["measurement"])
+
+        if let amount {
+            if let unit { return "\(amount) \(unit)" }
+            return amount
+        }
+        return unit
+    }
+
+    private static func stringValue(_ value: Any?) -> String? {
+        guard let value else { return nil }
+        if let string = value as? String {
+            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        if let int = value as? Int {
+            return "\(int)"
+        }
+        if let double = value as? Double {
+            let rounded = (double * 100).rounded() / 100
+            if rounded == floor(rounded) {
+                return "\(Int(rounded))"
+            }
+            return "\(rounded)"
+        }
+        if let float = value as? Float {
+            let rounded = (Double(float) * 100).rounded() / 100
+            if rounded == floor(rounded) {
+                return "\(Int(rounded))"
+            }
+            return "\(rounded)"
+        }
+        return nil
+    }
+
+    private static func cleanItemString(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private static func parseTotals(from dict: [String: Any]) -> MacroTotals? {

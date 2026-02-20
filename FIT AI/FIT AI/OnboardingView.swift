@@ -1,6 +1,7 @@
 #if canImport(AuthenticationServices)
 import AuthenticationServices
 #endif
+import AVKit
 import Combine
 import PhotosUI
 import SwiftUI
@@ -96,8 +97,7 @@ private enum TrialPlan: String, CaseIterable, Identifiable {
 enum MainGoalOption: String, CaseIterable, Identifiable {
     case buildMuscle
     case loseFat
-    case recomp
-    case performance
+    case maintain
 
     var id: String { rawValue }
 
@@ -105,8 +105,7 @@ enum MainGoalOption: String, CaseIterable, Identifiable {
         switch self {
         case .buildMuscle: return "Build muscle"
         case .loseFat: return "Lose fat"
-        case .recomp: return "Recomp"
-        case .performance: return "Performance"
+        case .maintain: return "Maintain"
         }
     }
 
@@ -114,8 +113,7 @@ enum MainGoalOption: String, CaseIterable, Identifiable {
         switch self {
         case .buildMuscle: return "dumbbell.fill"
         case .loseFat: return "flame.fill"
-        case .recomp: return "arrow.triangle.2.circlepath"
-        case .performance: return "bolt.fill"
+        case .maintain: return "equal.circle.fill"
         }
     }
 
@@ -123,8 +121,7 @@ enum MainGoalOption: String, CaseIterable, Identifiable {
         switch self {
         case .buildMuscle: return "build muscle"
         case .loseFat: return "lose fat"
-        case .recomp: return "recomp your body"
-        case .performance: return "boost performance"
+        case .maintain: return "maintain your physique"
         }
     }
 
@@ -132,8 +129,7 @@ enum MainGoalOption: String, CaseIterable, Identifiable {
         switch self {
         case .buildMuscle: return "building muscle"
         case .loseFat: return "losing fat"
-        case .recomp: return "recomping your body"
-        case .performance: return "performance"
+        case .maintain: return "maintaining your physique"
         }
     }
 }
@@ -232,7 +228,7 @@ struct OnboardingView: View {
 
                             if let subtitle = stepSubtitle {
                                 Text(subtitle)
-                                    .font(FitFont.body(size: 15, weight: .regular))
+                                    .font(FitFont.body(size: 14, weight: .regular))
                                     .foregroundColor(FitTheme.textSecondary)
                             }
                         }
@@ -382,17 +378,17 @@ struct OnboardingView: View {
         case .outcome:
             CoachCharacterView(size: 180, showBackground: true, pose: .talking)
         case .featureCoach:
-            OnboardingFeaturePhoneMock(imageName: "OnboardingFeatureCoach")
+            OnboardingFeatureMediaMock(media: .video(assetName: "OnboardingChatVideo", range: .last(seconds: 10), fallbackImageName: "OnboardingFeatureCoach"))
         case .featureTraining:
-            OnboardingFeaturePhoneMock(imageName: "OnboardingFeatureTraining")
+            OnboardingFeatureMediaMock(media: .video(assetName: "OnboardingWorkoutVideo", range: .range(start: 10, end: 23), fallbackImageName: "OnboardingFeatureTraining"))
         case .featureCheckin:
-            OnboardingFeaturePhoneMock(imageName: "OnboardingFeatureCheckin")
+            OnboardingFeatureMediaMock(media: .video(assetName: "OnboardingCoachRecapVideo", range: .full, fallbackImageName: "OnboardingFeatureCheckin"))
         case .featureNutrition:
-            OnboardingFeaturePhoneMock(imageName: "OnboardingFeatureNutrition")
+            OnboardingFeatureMediaMock(media: .swapImages(primary: "OnboardingFeatureNutrition", secondary: "OnboardingMealDetail", delay: 7))
         case .featureProgress:
-            OnboardingFeaturePhoneMock(imageName: "OnboardingFeatureProgress")
+            OnboardingFeatureMediaMock(media: .video(assetName: "OnboardingWorkoutVideo", range: .range(start: 26, end: 35), fallbackImageName: "OnboardingFeatureProgress"))
         case .featureInsights:
-            OnboardingFeaturePhoneMock(imageName: "OnboardingFeatureInsights")
+            OnboardingFeatureMediaMock(media: .image(name: "OnboardingFeatureInsights"))
         case .goal:
             CoachCharacterView(size: 180, showBackground: true, pose: .celebration)
         case .frequency:
@@ -425,12 +421,12 @@ struct OnboardingView: View {
     private var stepTitle: String {
         switch viewModel.currentStepCase {
         case .outcome: return "Train smarter. Stay consistent."
-        case .featureCoach: return "AI Fitness Coach"
-        case .featureTraining: return "Personalized Training"
-        case .featureCheckin: return "Daily Check-Ins"
-        case .featureNutrition: return "Nutrition + Macros"
-        case .featureProgress: return "Progress Tracking"
-        case .featureInsights: return "Coach Insights"
+        case .featureCoach: return "Personal AI coach"
+        case .featureTraining: return "Personalized workout splits"
+        case .featureCheckin: return "Weekly AI coach check-ins"
+        case .featureNutrition: return "Custom meal plans based on your goals"
+        case .featureProgress: return "Full built-in workout tracker"
+        case .featureInsights: return "AI nutrition logging"
         case .goal: return "What's your main goal right now?"
         case .frequency: return "How many days can you train each week?"
         case .environment: return "Where do you train most?"
@@ -449,12 +445,12 @@ struct OnboardingView: View {
     private var stepSubtitle: String? {
         switch viewModel.currentStepCase {
         case .outcome: return "AI coaching for workouts and nutrition, built around your life."
-        case .featureCoach: return "Daily guidance tuned to your goal, schedule, and progress."
-        case .featureTraining: return "Your split and progression are built for your experience and equipment."
-        case .featureCheckin: return "Fast accountability prompts keep your streak and momentum alive."
-        case .featureNutrition: return "Hit targets you can sustain with simple logging and weekly adjustments."
-        case .featureProgress: return "Track trends, check-ins, and consistency so you always know what to improve."
-        case .featureInsights: return "Get clear recap notes on what improved and what to do next."
+        case .featureCoach: return "Get guidance on workouts, nutrition, and next steps anytime."
+        case .featureTraining: return "AI matches your split to your days and goals."
+        case .featureCheckin: return "Weekly recaps keep you accountable and on track."
+        case .featureNutrition: return "Meals and macros built around your targets."
+        case .featureProgress: return "Track every session in one place."
+        case .featureInsights: return "Log meals fast with photo, scan, or voice."
         case .goal: return nil
         case .frequency: return nil
         case .environment: return nil
@@ -1436,7 +1432,7 @@ struct OnboardingView: View {
     private var goalSelectionStep: some View {
         VStack(alignment: .leading, spacing: 12) {
             ForEach(goalOptions, id: \.self) { option in
-                GoalOptionButton(
+                OnboardingGoalOptionButton(
                     goal: option,
                     title: goalTitle(for: option),
                     isSelected: viewModel.form.goal == option,
@@ -1611,7 +1607,7 @@ struct OnboardingView: View {
                                 .foregroundColor(viewModel.splitDaysPerWeek == dayCount ? FitTheme.buttonText : FitTheme.textPrimary)
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 10)
-                                .background(viewModel.splitDaysPerWeek == dayCount ? FitTheme.accent : Color.white)
+                                .background(viewModel.splitDaysPerWeek == dayCount ? FitTheme.accent : FitTheme.cardBackground)
                                 .clipShape(Capsule())
                                 .overlay(
                                     Capsule()
@@ -1869,7 +1865,8 @@ struct OnboardingView: View {
             age: userAge,
             sex: viewModel.form.sex,
             trainingDaysPerWeek: viewModel.form.workoutDaysPerWeek,
-            goal: viewModel.form.goal
+            goal: viewModel.form.goal,
+            goalWeightLbs: goalWeight
         ))
         
         // Weekly rate description
@@ -2108,7 +2105,8 @@ struct OnboardingView: View {
         age: Int,
         sex: OnboardingForm.Sex,
         trainingDaysPerWeek: Int,
-        goal: OnboardingForm.Goal
+        goal: OnboardingForm.Goal,
+        goalWeightLbs: Double? = nil
     ) -> MacroTotals {
         // Convert to metric
         let weightKg = weightLbs * 0.453592
@@ -2141,26 +2139,28 @@ struct OnboardingView: View {
 
         let maintenanceCalories = bmr * activityMultiplier
 
-        // Adjust for goal (percentage-based)
+        // Adjust calories for goal (percentage-based)
         let calories: Double
-        let proteinMultiplier: Double
 
         switch goal {
         case .maintain:
             calories = maintenanceCalories
-            proteinMultiplier = 0.8
         case .loseWeight, .loseWeightFast:
             calories = maintenanceCalories * 0.8
-            proteinMultiplier = 0.8
         case .gainWeight:
             calories = maintenanceCalories * 1.15
-            proteinMultiplier = 1.0
+        }
+
+        let macroWeightLbs: Double
+        if goal == .gainWeight, let goalWeightLbs, goalWeightLbs > 0 {
+            macroWeightLbs = goalWeightLbs
+        } else {
+            macroWeightLbs = weightLbs
         }
 
         let fat = weightLbs * 0.3
-        let protein = weightLbs * proteinMultiplier
-        let carbCalories = max(calories - (protein * 4) - (fat * 9), 0)
-        let carbs = carbCalories / 4
+        let protein = macroWeightLbs * 1.0
+        let carbs = macroWeightLbs * 1.0
         
         return MacroTotals(calories: calories, protein: protein, carbs: carbs, fats: fat)
     }
@@ -2347,20 +2347,177 @@ private struct ComparisonMetric: Identifiable {
     var id: String { label }
 }
 
-private struct OnboardingFeaturePhoneMock: View {
-    let imageName: String
+private enum OnboardingFeatureMedia {
+    case image(name: String)
+    case video(assetName: String, range: OnboardingVideoClipRange, fallbackImageName: String?)
+    case swapImages(primary: String, secondary: String, delay: TimeInterval)
+}
+
+private enum OnboardingVideoClipRange {
+    case full
+    case range(start: TimeInterval, end: TimeInterval)
+    case last(seconds: TimeInterval)
+}
+
+private struct OnboardingFeatureMediaMock: View {
+    let media: OnboardingFeatureMedia
 
     var body: some View {
-        Image(imageName)
-            .resizable()
-            .scaledToFit()
-            .frame(maxWidth: 270)
-            .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 28, style: .continuous)
-                    .stroke(FitTheme.cardStroke, lineWidth: 1)
-            )
-            .shadow(color: FitTheme.shadow.opacity(0.35), radius: 16, x: 0, y: 10)
+        Group {
+            switch media {
+            case .image(let name):
+                Image(name)
+                    .resizable()
+                    .scaledToFit()
+            case .video(let assetName, let range, let fallbackImageName):
+                OnboardingVideoClipView(assetName: assetName, range: range, fallbackImageName: fallbackImageName)
+                    .scaledToFit()
+            case .swapImages(let primary, let secondary, let delay):
+                OnboardingTimedSwapView(primary: primary, secondary: secondary, delay: delay)
+            }
+        }
+        .shadow(color: Color.black.opacity(0.35), radius: 14, x: 0, y: 8)
+        .frame(maxWidth: 420)
+        .accessibilityHidden(true)
+    }
+}
+
+private struct OnboardingTimedSwapView: View {
+    let primary: String
+    let secondary: String
+    let delay: TimeInterval
+
+    @State private var showSecondary = false
+    @State private var swapTask: Task<Void, Never>?
+
+    var body: some View {
+        ZStack {
+            Image(primary)
+                .resizable()
+                .scaledToFit()
+                .opacity(showSecondary ? 0 : 1)
+
+            Image(secondary)
+                .resizable()
+                .scaledToFit()
+                .opacity(showSecondary ? 1 : 0)
+        }
+        .animation(.easeInOut(duration: 0.6), value: showSecondary)
+        .onAppear {
+            showSecondary = false
+            swapTask?.cancel()
+            swapTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                showSecondary = true
+            }
+        }
+        .onDisappear {
+            swapTask?.cancel()
+        }
+    }
+}
+
+private struct OnboardingVideoClipView: View {
+    let assetName: String
+    let range: OnboardingVideoClipRange
+    let fallbackImageName: String?
+
+    @State private var player: AVPlayer?
+    @State private var timeObserver: Any?
+
+    var body: some View {
+        ZStack {
+            if let player {
+                VideoPlayer(player: player)
+                    .aspectRatio(9 / 16, contentMode: .fit)
+                    .onAppear {
+                        player.play()
+                    }
+                    .onDisappear {
+                        cleanupPlayer()
+                    }
+                    .allowsHitTesting(false)
+            } else if let fallbackImageName {
+                Image(fallbackImageName)
+                    .resizable()
+                    .scaledToFit()
+            } else {
+                Color.black.opacity(0.1)
+            }
+        }
+        .onAppear {
+            preparePlayerIfNeeded()
+        }
+    }
+
+    private func preparePlayerIfNeeded() {
+        guard player == nil, let url = OnboardingVideoCache.url(for: assetName) else { return }
+        let asset = AVAsset(url: url)
+        let duration = asset.duration.seconds
+        let clip = resolvedClipRange(duration: duration)
+        let item = AVPlayerItem(asset: asset)
+        let player = AVPlayer(playerItem: item)
+        player.isMuted = true
+        player.actionAtItemEnd = .pause
+        self.player = player
+
+        let startTime = CMTime(seconds: clip.start, preferredTimescale: 600)
+        player.seek(to: startTime) { _ in
+            player.play()
+        }
+
+        if clip.end > clip.start + 0.05 {
+            let interval = CMTime(seconds: 0.25, preferredTimescale: 600)
+            timeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { time in
+                if time.seconds >= clip.end {
+                    player.seek(to: startTime) { _ in
+                        player.play()
+                    }
+                }
+            }
+        }
+    }
+
+    private func resolvedClipRange(duration: TimeInterval) -> (start: TimeInterval, end: TimeInterval) {
+        let safeDuration = duration.isFinite ? duration : 0
+        switch range {
+        case .full:
+            return (0, safeDuration)
+        case .range(let start, let end):
+            return (max(0, start), min(end, safeDuration))
+        case .last(let seconds):
+            let end = safeDuration
+            let start = max(end - seconds, 0)
+            return (start, end)
+        }
+    }
+
+    private func cleanupPlayer() {
+        if let observer = timeObserver, let player {
+            player.removeTimeObserver(observer)
+        }
+        timeObserver = nil
+        player?.pause()
+        player = nil
+    }
+}
+
+private enum OnboardingVideoCache {
+    static var cachedURLs: [String: URL] = [:]
+
+    static func url(for assetName: String) -> URL? {
+        if let cached = cachedURLs[assetName] { return cached }
+        guard let dataAsset = NSDataAsset(name: assetName) else { return nil }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(assetName).mp4")
+        if !FileManager.default.fileExists(atPath: url.path) {
+            do {
+                try dataAsset.data.write(to: url, options: .atomic)
+            } catch {
+                return nil
+            }
+        }
+        cachedURLs[assetName] = url
+        return url
     }
 }
 
@@ -2855,7 +3012,7 @@ private struct PrimaryGoalOptionButton: View {
                 }
             }
             .padding(14)
-            .background(isSelected ? FitTheme.accent.opacity(0.1) : Color.white)
+            .background(isSelected ? FitTheme.accent.opacity(0.12) : FitTheme.cardBackground)
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -2920,7 +3077,7 @@ private struct TrainingLevelButton: View {
                 }
             }
             .padding(16)
-            .background(isSelected ? FitTheme.accent.opacity(0.1) : Color.white)
+            .background(isSelected ? FitTheme.accent.opacity(0.1) : FitTheme.cardBackground)
             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
@@ -3204,7 +3361,7 @@ struct GenderOptionButton: View {
     }
 }
 
-struct GoalOptionButton: View {
+private struct OnboardingGoalOptionButton: View {
     let goal: OnboardingForm.Goal
     let title: String
     let isSelected: Bool
@@ -3277,12 +3434,15 @@ struct SplitModeCard: View {
                 }
             }
             .padding(16)
-            .background(isSelected ? FitTheme.accent.opacity(0.1) : Color.white)
+            .background(isSelected ? FitTheme.accent.opacity(0.12) : FitTheme.cardBackground)
             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .stroke(isSelected ? FitTheme.accent : FitTheme.cardStroke, lineWidth: isSelected ? 2 : 1)
             )
+            .shadow(color: isSelected ? FitTheme.accent.opacity(0.15) : FitTheme.shadow.opacity(0.5), radius: isSelected ? 12 : 8, x: 0, y: 5)
+            .scaleEffect(isSelected ? 1.01 : 1.0)
+            .animation(MotionTokens.springQuick, value: isSelected)
         }
         .buttonStyle(.plain)
     }
@@ -3300,12 +3460,15 @@ struct SplitDayChip: View {
                 .foregroundColor(isSelected ? FitTheme.buttonText : FitTheme.textPrimary)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 8)
-                .background(isSelected ? FitTheme.accent : Color.white)
+                .background(isSelected ? FitTheme.accent : FitTheme.cardBackground)
                 .clipShape(Capsule())
                 .overlay(
                     Capsule()
                         .stroke(isSelected ? Color.clear : FitTheme.cardStroke, lineWidth: 1)
                 )
+                .shadow(color: isSelected ? FitTheme.accent.opacity(0.18) : .clear, radius: 8, x: 0, y: 4)
+                .scaleEffect(isSelected ? 1.03 : 1.0)
+                .animation(MotionTokens.springQuick, value: isSelected)
         }
         .buttonStyle(.plain)
     }
@@ -3822,16 +3985,19 @@ struct DatePickerSheet: View {
                 
                 Spacer()
                 
-                Button("Done") {
+                Button {
                     onSave?(date)
                     isPresented = false
+                } label: {
+                    Text("Done")
+                        .font(FitFont.body(size: 16, weight: .semibold))
+                        .foregroundColor(FitTheme.accent)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .background(FitTheme.cardHighlight)
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 }
-                .font(FitFont.body(size: 16, weight: .semibold))
-                .foregroundColor(FitTheme.accent)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
-                .background(FitTheme.cardHighlight)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
             .padding(20)
             
@@ -3855,115 +4021,151 @@ struct DatePickerSheet: View {
 struct LoginView: View {
     @ObservedObject var viewModel: OnboardingViewModel
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var onboardingBackground: Color {
+        colorScheme == .dark ? .black : .white
+    }
+
+    private var onboardingPrimaryText: Color {
+        colorScheme == .dark ? .white : .black
+    }
+
+    private var onboardingSurfaceTint: Color {
+        colorScheme == .dark ? .white : .black
+    }
+
+    private var primaryGradient: LinearGradient {
+        LinearGradient(
+            colors: [Color(red: 0.09, green: 0.49, blue: 0.98), Color(red: 0.09, green: 0.49, blue: 0.98)],
+            startPoint: .leading,
+            endPoint: .trailing
+        )
+    }
     
     var body: some View {
-        NavigationView {
-            VStack(spacing: 24) {
-                Text("Sign In")
-                    .font(FitFont.heading(size: 28, weight: .bold))
-                    .foregroundColor(FitTheme.textPrimary)
-                    .padding(.top, 40)
+        NavigationStack {
+            ZStack {
+                onboardingBackground.ignoresSafeArea()
 
-                if let message = viewModel.submissionMessage, !message.isEmpty {
-                    Text(message)
-                        .font(FitFont.body(size: 14, weight: .regular))
-                        .foregroundColor(.red)
-                        .multilineTextAlignment(.center)
-                }
+                ScrollView(showsIndicators: false) {
+                    VStack(spacing: 22) {
+                        VStack(spacing: 6) {
+                            Text("Sign In")
+                                .font(.system(size: 32, weight: .bold))
+                                .foregroundColor(onboardingPrimaryText)
 
-                Button {
-                    Task {
-                        await viewModel.signInWithGoogle()
-                        if viewModel.isComplete {
-                            dismiss()
+                            Text("Pick up where you left off")
+                                .font(.system(size: 15, weight: .medium))
+                                .foregroundColor(onboardingPrimaryText.opacity(0.6))
                         }
-                    }
-                } label: {
-                    HStack(spacing: 12) {
-                        Circle()
-                            .fill(Color.white)
-                            .frame(width: 24, height: 24)
+                        .padding(.top, 12)
+
+                        if let message = viewModel.submissionMessage, !message.isEmpty {
+                            Text(message)
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundColor(.red)
+                                .multilineTextAlignment(.center)
+                                .padding(.horizontal, 8)
+                        }
+
+                        Button {
+                            Task {
+                                await viewModel.signInWithGoogle()
+                                if viewModel.isComplete {
+                                    dismiss()
+                                }
+                            }
+                        } label: {
+                            HStack(spacing: 12) {
+                                Circle()
+                                    .fill(Color.white)
+                                    .frame(width: 26, height: 26)
+                                    .overlay(
+                                        Text("G")
+                                            .font(.system(size: 14, weight: .bold))
+                                            .foregroundColor(.blue)
+                                    )
+                                Text("Continue with Google")
+                                    .font(.system(size: 16, weight: .semibold))
+                                    .foregroundColor(onboardingPrimaryText)
+                                Spacer()
+                            }
+                            .padding(.vertical, 14)
+                            .padding(.horizontal, 18)
+                            .background(onboardingSurfaceTint.opacity(0.06))
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                             .overlay(
-                                Text("G")
-                                    .font(.system(size: 14, weight: .bold))
-                                    .foregroundColor(.blue)
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .stroke(onboardingSurfaceTint.opacity(0.12), lineWidth: 1)
                             )
-                        Text("Continue with Google")
-                            .font(FitFont.body(size: 17, weight: .semibold))
-                            .foregroundColor(FitTheme.textPrimary)
-                        Spacer()
-                    }
-                    .padding(.vertical, 16)
-                    .padding(.horizontal, 20)
-                    .background(Color.white)
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .stroke(FitTheme.cardStroke, lineWidth: 1)
-                    )
-                }
-
-                HStack {
-                    Rectangle()
-                        .fill(FitTheme.cardStroke)
-                        .frame(height: 1)
-                    Text("or")
-                        .font(FitFont.body(size: 14, weight: .regular))
-                        .foregroundColor(FitTheme.textSecondary)
-                        .padding(.horizontal, 12)
-                    Rectangle()
-                        .fill(FitTheme.cardStroke)
-                        .frame(height: 1)
-                }
-                
-                VStack(spacing: 16) {
-                    TextField("Email", text: $viewModel.email)
-                        .textContentType(.emailAddress)
-                        .keyboardType(.emailAddress)
-                        .autocapitalization(.none)
-                        .foregroundColor(FitTheme.textPrimary)
-                        .padding(16)
-                        .background(Color.white)
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .stroke(FitTheme.cardStroke, lineWidth: 1)
-                        )
-                    
-                    SecureField("Password", text: $viewModel.password)
-                        .textContentType(.password)
-                        .foregroundColor(FitTheme.textPrimary)
-                        .padding(16)
-                        .background(Color.white)
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .stroke(FitTheme.cardStroke, lineWidth: 1)
-                        )
-                }
-                
-                Button {
-                    Task {
-                        await viewModel.login()
-                        if viewModel.isComplete {
-                            dismiss()
                         }
+                        .buttonStyle(.plain)
+
+                        HStack {
+                            Rectangle()
+                                .fill(onboardingSurfaceTint.opacity(0.18))
+                                .frame(height: 1)
+                            Text("or")
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundColor(onboardingPrimaryText.opacity(0.6))
+                                .padding(.horizontal, 12)
+                            Rectangle()
+                                .fill(onboardingSurfaceTint.opacity(0.18))
+                                .frame(height: 1)
+                        }
+
+                        VStack(spacing: 14) {
+                            AuthFieldCard(
+                                title: "Email",
+                                placeholder: "you@fitai.app",
+                                text: $viewModel.email,
+                                isSecure: false,
+                                keyboardType: .emailAddress,
+                                textContentType: .emailAddress,
+                                autocapitalization: .never,
+                                primaryText: onboardingPrimaryText,
+                                surfaceTint: onboardingSurfaceTint
+                            )
+
+                            AuthFieldCard(
+                                title: "Password",
+                                placeholder: "Enter your password",
+                                text: $viewModel.password,
+                                isSecure: true,
+                                keyboardType: .default,
+                                textContentType: .password,
+                                autocapitalization: .never,
+                                primaryText: onboardingPrimaryText,
+                                surfaceTint: onboardingSurfaceTint
+                            )
+                        }
+
+                        Button {
+                            Task {
+                                await viewModel.login()
+                                if viewModel.isComplete {
+                                    dismiss()
+                                }
+                            }
+                        } label: {
+                            Text("Sign In")
+                                .font(.system(size: 20, weight: .semibold))
+                                .foregroundColor(.white)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 16)
+                                .background(primaryGradient)
+                                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(viewModel.isSubmitting)
+                        .opacity(viewModel.isSubmitting ? 0.45 : 1)
                     }
-                } label: {
-                    Text("Sign In")
-                        .font(FitFont.body(size: 17, weight: .semibold))
-                        .foregroundColor(FitTheme.textOnAccent)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 16)
-                        .background(FitTheme.primaryGradient)
-                        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .padding(.horizontal, 20)
+                    .padding(.top, 24)
+                    .padding(.bottom, 28)
                 }
-                .disabled(viewModel.isSubmitting)
-                
-                Spacer()
             }
-            .padding(24)
-            .background(Color.white)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
@@ -3978,143 +4180,715 @@ struct LoginView: View {
                 }
             }
         }
-        .preferredColorScheme(.light)
     }
 }
 
 struct EmailSignupView: View {
     @ObservedObject var viewModel: OnboardingViewModel
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @FocusState private var focusedField: EmailSignupFocusField?
+    @State private var revealContent = false
+    @State private var animateBackdrop = false
+
+    private var primaryText: Color {
+        colorScheme == .dark ? .white : Color(red: 0.08, green: 0.13, blue: 0.24)
+    }
+
+    private var secondaryText: Color {
+        colorScheme == .dark ? Color.white.opacity(0.67) : Color.black.opacity(0.55)
+    }
+
+    private var accentColor: Color {
+        Color(red: 0.17, green: 0.55, blue: 1.0)
+    }
+
+    private var secondaryAccent: Color {
+        Color(red: 0.14, green: 0.82, blue: 0.96)
+    }
+
+    private var backgroundGradient: LinearGradient {
+        if colorScheme == .dark {
+            return LinearGradient(
+                colors: [
+                    Color(red: 0.01, green: 0.03, blue: 0.08),
+                    Color(red: 0.01, green: 0.01, blue: 0.05),
+                    .black
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        }
+
+        return LinearGradient(
+            colors: [
+                Color(red: 0.95, green: 0.97, blue: 1.0),
+                Color(red: 0.99, green: 0.99, blue: 1.0),
+                .white
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+    }
+
+    private var cardFill: LinearGradient {
+        if colorScheme == .dark {
+            return LinearGradient(
+                colors: [Color.white.opacity(0.09), Color.white.opacity(0.04)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        }
+
+        return LinearGradient(
+            colors: [Color.white.opacity(0.96), Color.white.opacity(0.86)],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+    }
+
+    private var primaryButtonGradient: LinearGradient {
+        LinearGradient(
+            colors: [accentColor, Color(red: 0.12, green: 0.44, blue: 0.98)],
+            startPoint: .leading,
+            endPoint: .trailing
+        )
+    }
+
+    private var passwordStrength: SignupPasswordStrength {
+        SignupPasswordStrength.evaluate(viewModel.password)
+    }
+
+    private var passwordsMatch: Bool {
+        !viewModel.confirmPassword.isEmpty && viewModel.password == viewModel.confirmPassword
+    }
+
+    private var canSubmit: Bool {
+        !viewModel.email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !viewModel.password.isEmpty
+            && !viewModel.confirmPassword.isEmpty
+            && passwordsMatch
+    }
+
+    private var submissionFeedback: (message: String, isError: Bool)? {
+        guard let message = viewModel.submissionMessage, !message.isEmpty else {
+            return nil
+        }
+
+        let text = message.lowercased()
+        let isError = text.contains("error")
+            || text.contains("failed")
+            || text.contains("please")
+            || text.contains("match")
+        return (message, isError)
+    }
+
+    private func stagedAnimation(delay: Double) -> Animation {
+        reduceMotion
+            ? .linear(duration: 0)
+            : .spring(response: 0.62, dampingFraction: 0.85, blendDuration: 0.12).delay(delay)
+    }
     
     var body: some View {
-        NavigationView {
-            VStack(spacing: 24) {
-                Text("Create Account")
-                    .font(FitFont.heading(size: 28, weight: .bold))
-                    .foregroundColor(FitTheme.textPrimary)
-                    .padding(.top, 40)
+        NavigationStack {
+            ZStack {
+                backgroundGradient.ignoresSafeArea()
 
-                if let message = viewModel.submissionMessage, !message.isEmpty {
-                    Text(message)
-                        .font(FitFont.body(size: 14, weight: .regular))
-                        .foregroundColor(.red)
-                        .multilineTextAlignment(.center)
-                }
-
-                Button {
-                    Task {
-                        await viewModel.signInWithGoogle()
-                        if viewModel.isComplete {
-                            dismiss()
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 12) {
-                        Circle()
-                            .fill(Color.white)
-                            .frame(width: 24, height: 24)
-                            .overlay(
-                                Text("G")
-                                    .font(.system(size: 14, weight: .bold))
-                                    .foregroundColor(.blue)
-                            )
-                        Text("Continue with Google")
-                            .font(FitFont.body(size: 17, weight: .semibold))
-                            .foregroundColor(FitTheme.textPrimary)
-                        Spacer()
-                    }
-                    .padding(.vertical, 16)
-                    .padding(.horizontal, 20)
-                    .background(Color.white)
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .stroke(FitTheme.cardStroke, lineWidth: 1)
+                Circle()
+                    .fill(
+                        RadialGradient(
+                            colors: [accentColor.opacity(colorScheme == .dark ? 0.42 : 0.20), .clear],
+                            center: .center,
+                            startRadius: 10,
+                            endRadius: 220
+                        )
                     )
-                }
+                    .frame(width: 360, height: 360)
+                    .offset(x: animateBackdrop ? 130 : -120, y: -250)
+                    .blur(radius: 12)
+                    .animation(
+                        reduceMotion ? nil : .easeInOut(duration: 8).repeatForever(autoreverses: true),
+                        value: animateBackdrop
+                    )
 
-                HStack {
-                    Rectangle()
-                        .fill(FitTheme.cardStroke)
-                        .frame(height: 1)
-                    Text("or")
-                        .font(FitFont.body(size: 14, weight: .regular))
-                        .foregroundColor(FitTheme.textSecondary)
-                        .padding(.horizontal, 12)
-                    Rectangle()
-                        .fill(FitTheme.cardStroke)
-                        .frame(height: 1)
-                }
-                
-                VStack(spacing: 16) {
-                    TextField("Email", text: $viewModel.email)
-                        .textContentType(.emailAddress)
-                        .keyboardType(.emailAddress)
-                        .autocapitalization(.none)
-                        .foregroundColor(FitTheme.textPrimary)
-                        .padding(16)
-                        .background(Color.white)
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .stroke(FitTheme.cardStroke, lineWidth: 1)
+                Circle()
+                    .fill(
+                        RadialGradient(
+                            colors: [secondaryAccent.opacity(colorScheme == .dark ? 0.22 : 0.14), .clear],
+                            center: .center,
+                            startRadius: 10,
+                            endRadius: 220
                         )
-                    
-                    SecureField("Password", text: $viewModel.password)
-                        .textContentType(.newPassword)
-                        .foregroundColor(FitTheme.textPrimary)
-                        .padding(16)
-                        .background(Color.white)
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .stroke(FitTheme.cardStroke, lineWidth: 1)
-                        )
-                    
-                    SecureField("Confirm Password", text: $viewModel.confirmPassword)
-                        .textContentType(.newPassword)
-                        .foregroundColor(FitTheme.textPrimary)
-                        .padding(16)
-                        .background(Color.white)
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .stroke(FitTheme.cardStroke, lineWidth: 1)
-                        )
-                }
-                
-                Button {
-                    Task {
-                        await viewModel.registerAndComplete()
-                        if viewModel.isComplete {
-                            dismiss()
+                    )
+                    .frame(width: 330, height: 330)
+                    .offset(x: animateBackdrop ? -170 : 150, y: 430)
+                    .blur(radius: 14)
+                    .animation(
+                        reduceMotion ? nil : .easeInOut(duration: 9).repeatForever(autoreverses: true),
+                        value: animateBackdrop
+                    )
+
+                ScrollView(showsIndicators: false) {
+                    VStack(spacing: 18) {
+                        VStack(alignment: .leading, spacing: 14) {
+                            Label("SECURE ACCOUNT SETUP", systemImage: "checkmark.shield.fill")
+                                .font(.system(size: 12, weight: .semibold))
+                                .kerning(0.8)
+                                .foregroundColor(secondaryAccent)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 7)
+                                .background(
+                                    Capsule()
+                                        .fill(Color.white.opacity(colorScheme == .dark ? 0.10 : 0.74))
+                                )
+
+                            Text("Create Account")
+                                .font(.system(size: 37, weight: .heavy, design: .rounded))
+                                .foregroundColor(primaryText)
+
+                            Text("Claim your plan and keep your progress synced across every session.")
+                                .font(.system(size: 15, weight: .medium))
+                                .foregroundColor(secondaryText)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(20)
+                        .background(
+                            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                                .fill(cardFill)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                                .stroke(Color.white.opacity(colorScheme == .dark ? 0.14 : 0.35), lineWidth: 1)
+                        )
+                        .shadow(
+                            color: colorScheme == .dark ? .black.opacity(0.32) : .black.opacity(0.12),
+                            radius: 16,
+                            x: 0,
+                            y: 12
+                        )
+                        .opacity(revealContent ? 1 : 0)
+                        .offset(y: revealContent ? 0 : (reduceMotion ? 0 : 22))
+                        .animation(stagedAnimation(delay: 0.04), value: revealContent)
+
+                        if let feedback = submissionFeedback {
+                            HStack(spacing: 10) {
+                                Image(systemName: feedback.isError ? "xmark.octagon.fill" : "checkmark.circle.fill")
+                                    .font(.system(size: 16, weight: .semibold))
+                                    .foregroundColor(feedback.isError ? .red : .green)
+
+                                Text(feedback.message)
+                                    .font(.system(size: 14, weight: .medium))
+                                    .foregroundColor(feedback.isError ? .red : .green)
+                                    .multilineTextAlignment(.leading)
+
+                                Spacer(minLength: 0)
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 12)
+                            .background(
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .fill((feedback.isError ? Color.red : .green).opacity(0.12))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .stroke((feedback.isError ? Color.red : .green).opacity(0.30), lineWidth: 1)
+                            )
+                            .opacity(revealContent ? 1 : 0)
+                            .offset(y: revealContent ? 0 : (reduceMotion ? 0 : 22))
+                            .animation(stagedAnimation(delay: 0.10), value: revealContent)
+                        }
+
+                        VStack(spacing: 14) {
+                            Button {
+                                Task {
+                                    await viewModel.signInWithGoogle()
+                                    if viewModel.isComplete {
+                                        dismiss()
+                                    }
+                                }
+                            } label: {
+                                HStack(spacing: 12) {
+                                    ZStack {
+                                        Circle()
+                                            .fill(Color.white)
+                                            .frame(width: 30, height: 30)
+
+                                        Text("G")
+                                            .font(.system(size: 16, weight: .bold))
+                                            .foregroundColor(Color(red: 0.16, green: 0.52, blue: 0.96))
+                                    }
+
+                                    Text("Continue with Google")
+                                        .font(.system(size: 17, weight: .semibold))
+                                        .foregroundColor(primaryText)
+
+                                    Spacer()
+
+                                    Image(systemName: "arrow.right")
+                                        .font(.system(size: 12, weight: .bold))
+                                        .foregroundColor(secondaryText)
+                                }
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 15)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                        .fill(Color.white.opacity(colorScheme == .dark ? 0.08 : 0.72))
+                                )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                        .stroke(Color.white.opacity(colorScheme == .dark ? 0.14 : 0.32), lineWidth: 1)
+                                )
+                            }
+                            .buttonStyle(.plain)
+
+                            HStack(spacing: 12) {
+                                Capsule()
+                                    .fill(Color.white.opacity(colorScheme == .dark ? 0.22 : 0.32))
+                                    .frame(height: 1)
+
+                                Text("or continue with email")
+                                    .font(.system(size: 13, weight: .medium))
+                                    .foregroundColor(secondaryText)
+
+                                Capsule()
+                                    .fill(Color.white.opacity(colorScheme == .dark ? 0.22 : 0.32))
+                                    .frame(height: 1)
+                            }
+                        }
+                        .padding(18)
+                        .background(
+                            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                                .fill(cardFill)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                                .stroke(Color.white.opacity(colorScheme == .dark ? 0.13 : 0.32), lineWidth: 1)
+                        )
+                        .opacity(revealContent ? 1 : 0)
+                        .offset(y: revealContent ? 0 : (reduceMotion ? 0 : 22))
+                        .animation(stagedAnimation(delay: 0.14), value: revealContent)
+
+                        VStack(spacing: 14) {
+                            SignupCredentialField(
+                                title: "Email",
+                                placeholder: "you@fitai.app",
+                                iconName: "envelope.fill",
+                                text: $viewModel.email,
+                                field: .email,
+                                isSecure: false,
+                                keyboardType: .emailAddress,
+                                textContentType: .emailAddress,
+                                autocapitalization: .never,
+                                primaryText: primaryText,
+                                secondaryText: secondaryText,
+                                accent: accentColor,
+                                focusedField: $focusedField,
+                                submitLabel: .next
+                            ) {
+                                focusedField = .password
+                            }
+
+                            SignupCredentialField(
+                                title: "Password",
+                                placeholder: "Create a strong password",
+                                iconName: "lock.fill",
+                                text: $viewModel.password,
+                                field: .password,
+                                isSecure: true,
+                                keyboardType: .default,
+                                textContentType: .newPassword,
+                                autocapitalization: .never,
+                                primaryText: primaryText,
+                                secondaryText: secondaryText,
+                                accent: accentColor,
+                                focusedField: $focusedField,
+                                submitLabel: .next
+                            ) {
+                                focusedField = .confirmPassword
+                            }
+
+                            SignupCredentialField(
+                                title: "Confirm Password",
+                                placeholder: "Re-enter password",
+                                iconName: "lock.rotation",
+                                text: $viewModel.confirmPassword,
+                                field: .confirmPassword,
+                                isSecure: true,
+                                keyboardType: .default,
+                                textContentType: .newPassword,
+                                autocapitalization: .never,
+                                primaryText: primaryText,
+                                secondaryText: secondaryText,
+                                accent: accentColor,
+                                focusedField: $focusedField,
+                                submitLabel: .go
+                            ) {
+                                if canSubmit {
+                                    submit()
+                                }
+                            }
+
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack {
+                                    Text("Password strength")
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundColor(secondaryText)
+
+                                    Spacer()
+
+                                    Text(passwordStrength.title)
+                                        .font(.system(size: 12, weight: .bold))
+                                        .foregroundColor(passwordStrength.color)
+                                }
+
+                                GeometryReader { proxy in
+                                    ZStack(alignment: .leading) {
+                                        Capsule()
+                                            .fill(Color.white.opacity(colorScheme == .dark ? 0.12 : 0.22))
+
+                                        Capsule()
+                                            .fill(
+                                                LinearGradient(
+                                                    colors: [passwordStrength.color, passwordStrength.color.opacity(0.68)],
+                                                    startPoint: .leading,
+                                                    endPoint: .trailing
+                                                )
+                                            )
+                                            .frame(width: proxy.size.width * passwordStrength.progress)
+                                    }
+                                }
+                                .frame(height: 7)
+
+                                if !viewModel.confirmPassword.isEmpty {
+                                    HStack(spacing: 8) {
+                                        Image(systemName: passwordsMatch ? "checkmark.circle.fill" : "xmark.circle.fill")
+                                            .foregroundColor(passwordsMatch ? .green : .red)
+
+                                        Text(passwordsMatch ? "Passwords match" : "Passwords do not match yet")
+                                            .font(.system(size: 13, weight: .medium))
+                                            .foregroundColor(passwordsMatch ? .green : .red)
+                                    }
+                                    .transition(.opacity.combined(with: .move(edge: .top)))
+                                }
+                            }
+                            .animation(MotionTokens.springQuick, value: viewModel.confirmPassword)
+                        }
+                        .padding(18)
+                        .background(
+                            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                                .fill(cardFill)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                                .stroke(Color.white.opacity(colorScheme == .dark ? 0.13 : 0.32), lineWidth: 1)
+                        )
+                        .opacity(revealContent ? 1 : 0)
+                        .offset(y: revealContent ? 0 : (reduceMotion ? 0 : 22))
+                        .animation(stagedAnimation(delay: 0.20), value: revealContent)
+
+                        Button {
+                            submit()
+                        } label: {
+                            HStack(spacing: 10) {
+                                if viewModel.isSubmitting {
+                                    ProgressView()
+                                        .tint(.white)
+                                }
+
+                                Text(viewModel.isSubmitting ? "Creating Account..." : "Create Account")
+                                    .font(.system(size: 20, weight: .semibold))
+                                    .foregroundColor(.white)
+
+                                if !viewModel.isSubmitting {
+                                    Image(systemName: "arrow.right")
+                                        .font(.system(size: 13, weight: .bold))
+                                        .foregroundColor(.white.opacity(0.9))
+                                }
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 17)
+                            .background(primaryButtonGradient)
+                            .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                                    .stroke(Color.white.opacity(0.2), lineWidth: 1)
+                            )
+                            .shadow(color: accentColor.opacity(0.42), radius: 14, x: 0, y: 10)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(viewModel.isSubmitting || !canSubmit)
+                        .opacity((viewModel.isSubmitting || !canSubmit) ? 0.62 : 1)
+                        .scaleEffect(viewModel.isSubmitting ? 0.99 : 1)
+                        .animation(MotionTokens.springQuick, value: viewModel.isSubmitting)
+                        .animation(MotionTokens.springQuick, value: canSubmit)
+                        .opacity(revealContent ? 1 : 0)
+                        .offset(y: revealContent ? 0 : (reduceMotion ? 0 : 22))
+                        .animation(stagedAnimation(delay: 0.26), value: revealContent)
+
+                        Text("By creating an account, you agree to our Terms and Privacy Policy.")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(secondaryText)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 12)
+                            .opacity(revealContent ? 1 : 0)
+                            .offset(y: revealContent ? 0 : (reduceMotion ? 0 : 22))
+                            .animation(stagedAnimation(delay: 0.31), value: revealContent)
                     }
-                } label: {
-                    Text("Create Account")
-                        .font(FitFont.body(size: 17, weight: .semibold))
-                        .foregroundColor(FitTheme.textOnAccent)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 16)
-                        .background(FitTheme.primaryGradient)
-                        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .padding(.horizontal, 20)
+                    .padding(.top, 12)
+                    .padding(.bottom, 32)
                 }
-                .disabled(viewModel.isSubmitting)
-                
-                Spacer()
             }
-            .padding(24)
-            .background(Color.white)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Cancel") {
+            .toolbar(.hidden, for: .navigationBar)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                HStack(spacing: 12) {
+                    Text("FIT AI")
+                        .font(.system(size: 12, weight: .bold))
+                        .kerning(1.0)
+                        .foregroundColor(secondaryText)
+
+                    Spacer()
+
+                    Button {
                         dismiss()
+                    } label: {
+                        Text("Cancel")
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundColor(primaryText)
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 10)
+                            .background(
+                                Capsule()
+                                    .fill(Color.white.opacity(colorScheme == .dark ? 0.10 : 0.75))
+                            )
+                            .overlay(
+                                Capsule()
+                                    .stroke(Color.white.opacity(colorScheme == .dark ? 0.16 : 0.28), lineWidth: 1)
+                            )
                     }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 6)
+                .padding(.bottom, 10)
+                .background(Color.clear)
+            }
+            .onAppear {
+                revealContent = true
+                if !reduceMotion {
+                    animateBackdrop = true
+                }
+            }
+            .onChange(of: viewModel.isComplete) { isComplete in
+                if isComplete {
+                    dismiss()
                 }
             }
         }
-        .preferredColorScheme(.light)
+    }
+
+    private func submit() {
+        focusedField = nil
+        Task {
+            await viewModel.registerAndComplete()
+            if viewModel.isComplete {
+                dismiss()
+            }
+        }
+    }
+}
+
+private enum EmailSignupFocusField: Hashable {
+    case email
+    case password
+    case confirmPassword
+}
+
+private struct SignupCredentialField: View {
+    let title: String
+    let placeholder: String
+    let iconName: String
+    @Binding var text: String
+    let field: EmailSignupFocusField
+    let isSecure: Bool
+    let keyboardType: UIKeyboardType
+    let textContentType: UITextContentType?
+    let autocapitalization: TextInputAutocapitalization
+    let primaryText: Color
+    let secondaryText: Color
+    let accent: Color
+    @FocusState.Binding var focusedField: EmailSignupFocusField?
+    let submitLabel: SubmitLabel
+    let onSubmit: () -> Void
+
+    @State private var revealsSecureText = false
+
+    private var isFocused: Bool {
+        focusedField == field
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(secondaryText)
+
+            HStack(spacing: 10) {
+                Image(systemName: iconName)
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundColor(isFocused ? accent : secondaryText)
+                    .frame(width: 15)
+
+                Group {
+                    if isSecure && !revealsSecureText {
+                        SecureField(placeholder, text: $text)
+                            .focused($focusedField, equals: field)
+                    } else {
+                        TextField(placeholder, text: $text)
+                            .focused($focusedField, equals: field)
+                    }
+                }
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundColor(primaryText)
+                .keyboardType(keyboardType)
+                .textInputAutocapitalization(autocapitalization)
+                .autocorrectionDisabled()
+                .textContentType(textContentType)
+                .submitLabel(submitLabel)
+                .onSubmit(onSubmit)
+
+                if isSecure {
+                    Button {
+                        revealsSecureText.toggle()
+                    } label: {
+                        Image(systemName: revealsSecureText ? "eye.slash.fill" : "eye.fill")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(secondaryText)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 13)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color.white.opacity(isFocused ? 0.13 : 0.06))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(
+                        isFocused ? accent.opacity(0.95) : Color.white.opacity(0.16),
+                        lineWidth: isFocused ? 1.4 : 1
+                    )
+            )
+            .shadow(color: isFocused ? accent.opacity(0.26) : .clear, radius: 12, x: 0, y: 6)
+        }
+    }
+}
+
+private enum SignupPasswordStrength {
+    case weak
+    case moderate
+    case strong
+
+    var title: String {
+        switch self {
+        case .weak:
+            return "Weak"
+        case .moderate:
+            return "Good"
+        case .strong:
+            return "Strong"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .weak:
+            return .red
+        case .moderate:
+            return .orange
+        case .strong:
+            return .green
+        }
+    }
+
+    var progress: CGFloat {
+        switch self {
+        case .weak:
+            return 0.34
+        case .moderate:
+            return 0.66
+        case .strong:
+            return 1.0
+        }
+    }
+
+    static func evaluate(_ password: String) -> SignupPasswordStrength {
+        guard !password.isEmpty else {
+            return .weak
+        }
+
+        var score = 0
+        if password.count >= 8 { score += 1 }
+        if password.count >= 12 { score += 1 }
+        if password.rangeOfCharacter(from: .uppercaseLetters) != nil { score += 1 }
+        if password.rangeOfCharacter(from: .decimalDigits) != nil { score += 1 }
+        if password.rangeOfCharacter(from: CharacterSet(charactersIn: "!@#$%^&*()_+-=[]{}|;:'\",.<>?/`~")) != nil {
+            score += 1
+        }
+
+        if score <= 2 {
+            return .weak
+        }
+        if score <= 4 {
+            return .moderate
+        }
+        return .strong
+    }
+}
+
+private struct AuthFieldCard: View {
+    let title: String
+    let placeholder: String
+    @Binding var text: String
+    let isSecure: Bool
+    let keyboardType: UIKeyboardType
+    let textContentType: UITextContentType?
+    let autocapitalization: TextInputAutocapitalization
+    let primaryText: Color
+    let surfaceTint: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(primaryText.opacity(0.65))
+
+            Group {
+                if isSecure {
+                    SecureField(placeholder, text: $text)
+                } else {
+                    TextField(placeholder, text: $text)
+                }
+            }
+            .font(.system(size: 18, weight: .semibold))
+            .foregroundColor(primaryText)
+            .keyboardType(keyboardType)
+            .textInputAutocapitalization(autocapitalization)
+            .autocorrectionDisabled()
+            .textContentType(textContentType)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(surfaceTint.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(surfaceTint.opacity(0.12), lineWidth: 1)
+        )
     }
 }
 
@@ -4338,10 +5112,7 @@ final class OnboardingViewModel: NSObject, ObservableObject {
         case .loseFat:
             form.primaryTrainingGoal = .fatLoss
             form.goal = .loseWeight
-        case .recomp:
-            form.primaryTrainingGoal = .strength
-            form.goal = .maintain
-        case .performance:
+        case .maintain:
             form.primaryTrainingGoal = .strength
             form.goal = .maintain
         }
@@ -4357,7 +5128,7 @@ final class OnboardingViewModel: NSObject, ObservableObject {
         form.workoutDaysPerWeek = clamped
         form.trainingDaysOfWeek = normalized
         save()
-        saveSplitPreferences()
+        saveSplitPreferences(isUserConfigured: false)
     }
 
     func setTrainingEnvironment(_ environment: TrainingEnvironmentOption) {
@@ -4469,7 +5240,7 @@ final class OnboardingViewModel: NSObject, ObservableObject {
 
     func setSplitCreationMode(_ mode: SplitCreationMode) {
         splitCreationMode = mode
-        saveSplitPreferences()
+        saveSplitPreferences(isUserConfigured: true)
     }
 
     func setSplitDaysPerWeek(_ days: Int) {
@@ -4483,7 +5254,7 @@ final class OnboardingViewModel: NSObject, ObservableObject {
         form.workoutDaysPerWeek = clamped
         form.trainingDaysOfWeek = updatedDays
         save()
-        saveSplitPreferences()
+        saveSplitPreferences(isUserConfigured: true)
     }
 
     func toggleSplitTrainingDay(_ day: String) {
@@ -4500,7 +5271,7 @@ final class OnboardingViewModel: NSObject, ObservableObject {
         form.workoutDaysPerWeek = splitDaysPerWeek
         form.trainingDaysOfWeek = ordered
         save()
-        saveSplitPreferences()
+        saveSplitPreferences(isUserConfigured: true)
     }
 
     func skipSplitSetup() {
@@ -4510,7 +5281,7 @@ final class OnboardingViewModel: NSObject, ObservableObject {
         form.workoutDaysPerWeek = splitDaysPerWeek
         form.trainingDaysOfWeek = splitTrainingDays
         save()
-        saveSplitPreferences()
+        saveSplitPreferences(isUserConfigured: false)
         nextStep()
     }
     
@@ -4875,11 +5646,12 @@ final class OnboardingViewModel: NSObject, ObservableObject {
         UserDefaults.standard.set(focusAreaSelection.rawValue, forKey: focusAreaKey)
     }
 
-    private func saveSplitPreferences() {
+    private func saveSplitPreferences(isUserConfigured: Bool = false) {
         let preferences = SplitSetupPreferences(
             mode: splitCreationMode.rawValue,
             daysPerWeek: splitDaysPerWeek,
-            trainingDays: splitTrainingDays
+            trainingDays: splitTrainingDays,
+            isUserConfigured: isUserConfigured
         )
         guard let encoded = try? JSONEncoder().encode(preferences) else { return }
         UserDefaults.standard.set(encoded, forKey: splitPreferencesKey)
@@ -4924,10 +5696,15 @@ final class OnboardingViewModel: NSObject, ObservableObject {
     }
 
     private func loadMainGoalSelection() {
-        if let raw = UserDefaults.standard.string(forKey: mainGoalKey),
-           let option = MainGoalOption(rawValue: raw) {
-            setMainGoal(option)
-            return
+        if let raw = UserDefaults.standard.string(forKey: mainGoalKey) {
+            if let option = MainGoalOption(rawValue: raw) {
+                setMainGoal(option)
+                return
+            }
+            if raw == "recomp" || raw == "performance" {
+                setMainGoal(.maintain)
+                return
+            }
         }
 
         let derived: MainGoalOption
@@ -4937,7 +5714,7 @@ final class OnboardingViewModel: NSObject, ObservableObject {
         case .loseWeight, .loseWeightFast:
             derived = .loseFat
         case .maintain:
-            derived = .performance
+            derived = .maintain
         }
         setMainGoal(derived)
     }

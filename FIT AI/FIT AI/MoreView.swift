@@ -9,6 +9,7 @@ struct MoreView: View {
 
     @StateObject private var viewModel: MoreViewModel
     @StateObject private var healthSyncState = HealthSyncState.shared
+    @AppStorage(AppAppearance.storageKey) private var appAppearance: AppAppearance = .system
 
     private var macroSummary: String {
         let entries = [
@@ -121,6 +122,20 @@ struct MoreView: View {
                             }
                         }
 
+                        SettingsSection(title: "Appearance") {
+                            NavigationLink {
+                                AppearanceDetailView()
+                            } label: {
+                                SettingsCard(
+                                    title: "Theme",
+                                    subtitle: "Light, dark, or system",
+                                    value: appAppearance.title,
+                                    icon: "circle.lefthalf.filled",
+                                    iconColor: .teal
+                                )
+                            }
+                        }
+
                         SettingsSection(title: "Integrations") {
                             NavigationLink {
                                 HealthSyncDetailView()
@@ -178,13 +193,13 @@ struct MoreView: View {
                             }
                         }
 
-                        SettingsSection(title: "Guided Walkthrough") {
+                        SettingsSection(title: "Page Guides") {
                             NavigationLink {
                                 WalkthroughReplayView(onReplay: viewModel.replayWalkthrough)
                             } label: {
                                 SettingsCard(
-                                    title: "Replay Walkthrough",
-                                    subtitle: "Run the guided tour again",
+                                    title: "Replay Page Guides",
+                                    subtitle: "Show first-visit explainers again",
                                     value: "Tap to start",
                                     icon: "play.circle.fill",
                                     iconColor: .indigo
@@ -211,6 +226,20 @@ struct MoreView: View {
                                     value: viewModel.subscriptionStatus,
                                     icon: "person.crop.circle.fill",
                                     iconColor: .blue
+                                )
+                            }
+                        }
+
+                        SettingsSection(title: "Labs") {
+                            NavigationLink {
+                                StreakBadgesDemoView()
+                            } label: {
+                                SettingsCard(
+                                    title: "Holographic Badges",
+                                    subtitle: "Interactive shimmer demo",
+                                    value: "Try it",
+                                    icon: "sparkles",
+                                    iconColor: .mint
                                 )
                             }
                         }
@@ -447,6 +476,32 @@ private struct MacroTargetsDetailView: View {
     }
 }
 
+private struct AppearanceDetailView: View {
+    @AppStorage(AppAppearance.storageKey) private var appAppearance: AppAppearance = .system
+    private let columns = [GridItem(.adaptive(minimum: 110), spacing: 12)]
+
+    var body: some View {
+        DetailContainer(
+            title: "Appearance",
+            subtitle: "Choose how the app should look."
+        ) {
+            LazyVGrid(columns: columns, alignment: .leading, spacing: 12) {
+                ForEach(AppAppearance.allCases) { appearance in
+                    Button {
+                        appAppearance = appearance
+                    } label: {
+                        SelectionChip(
+                            title: appearance.title,
+                            isSelected: appAppearance == appearance
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+}
+
 private struct CheckInDayDetailView: View {
     @Binding var selectedDay: String
     let statusMessage: String?
@@ -506,25 +561,20 @@ private struct StartingPhotosDetailView: View {
 
 private struct WalkthroughReplayView: View {
     let onReplay: () -> Void
-    @State private var showingAlert = false
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        DetailContainer(title: "Guided Walkthrough", subtitle: "Replay the guided tour any time.") {
+        DetailContainer(title: "Page Guides", subtitle: "Replay first-visit page explainers any time.") {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Tap below to replay the guided tour the next time it is available.")
+                Text("Tap below to reset all page intro popups. You can also use the help icon on any screen to open that page’s guide.")
                     .font(FitFont.body(size: 15))
                     .foregroundColor(FitTheme.textSecondary)
 
-                Button("Start walkthrough") {
+                Button("Replay guides") {
                     onReplay()
-                    showingAlert = true
+                    dismiss()
                 }
                 .buttonStyle(PrimaryActionButton())
-                .alert("Walkthrough queued", isPresented: $showingAlert) {
-                    Button("OK", role: .cancel) {}
-                } message: {
-                    Text("We will launch the guided walkthrough from here once the flow is wired.")
-                }
             }
         }
     }
@@ -996,6 +1046,7 @@ private struct PrimaryActionButton: ButtonStyle {
             .frame(maxWidth: .infinity)
             .background(FitTheme.primaryGradient)
             .clipShape(RoundedRectangle(cornerRadius: 18))
+            .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
             .shadow(color: FitTheme.buttonShadow, radius: 12, x: 0, y: 8)
             .opacity(configuration.isPressed ? 0.8 : 1)
     }
@@ -1011,6 +1062,7 @@ private struct SecondaryActionButton: ButtonStyle {
             .frame(maxWidth: .infinity)
             .background(FitTheme.cardBackground)
             .clipShape(RoundedRectangle(cornerRadius: 18))
+            .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 18)
                     .stroke(FitTheme.cardStroke, lineWidth: 1)

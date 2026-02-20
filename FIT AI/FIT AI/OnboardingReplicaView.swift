@@ -1,10 +1,14 @@
+import AVKit
 import SwiftUI
 import Combine
+import UIKit
 
 private enum ReplicaOnboardingStep: Int, CaseIterable {
     case hero
+    case featureWorkoutPlans
+    case featureMealPlans
+    case featureCheckins
     case featureCoach
-    case featureAnalysis
     case featureTraining
     case featureChallenges
     case featureNutrition
@@ -26,6 +30,7 @@ private enum ReplicaOnboardingStep: Int, CaseIterable {
     case questionDiet
     case building
     case potential
+    case personalizedGoals
     case projection
     case personalizing
     case claim
@@ -48,13 +53,23 @@ private enum ReplicaOnboardingStep: Int, CaseIterable {
         .questionDiet,
     ]
 
+    static let featureSteps: [ReplicaOnboardingStep] = [
+        .featureWorkoutPlans,
+        .featureMealPlans,
+        .featureCheckins,
+        .featureCoach,
+        .featureTraining,
+        .featureChallenges,
+        .featureNutrition,
+        .featureProgress,
+    ]
+
     var isFeatureSlide: Bool {
-        switch self {
-        case .featureCoach, .featureAnalysis, .featureTraining, .featureChallenges, .featureNutrition, .featureProgress:
-            return true
-        default:
-            return false
-        }
+        Self.featureSteps.contains(self)
+    }
+
+    var isLastFeatureSlide: Bool {
+        self == Self.featureSteps.last
     }
 
     var isQuestionStep: Bool {
@@ -202,10 +217,44 @@ private enum ReplicaPlan: String, CaseIterable, Identifiable {
     }
 }
 
+private enum ReplicaFeatureMedia {
+    case image(name: String)
+    case video(assetName: String, range: ReplicaVideoClipRange, fallbackImageName: String?)
+    case swapImages(primary: String, secondary: String, delay: TimeInterval)
+
+    var id: String {
+        switch self {
+        case .image(let name):
+            return "image-\(name)"
+        case .video(let assetName, let range, _):
+            return "video-\(assetName)-\(range.id)"
+        case .swapImages(let primary, let secondary, _):
+            return "swap-\(primary)-\(secondary)"
+        }
+    }
+}
+
+private enum ReplicaVideoClipRange {
+    case full
+    case range(start: TimeInterval, end: TimeInterval)
+    case last(seconds: TimeInterval)
+
+    var id: String {
+        switch self {
+        case .full:
+            return "full"
+        case .range(let start, let end):
+            return "range-\(start)-\(end)"
+        case .last(let seconds):
+            return "last-\(seconds)"
+        }
+    }
+}
+
 private struct ReplicaFeatureSlide {
     let title: String
     let subtitle: String
-    let imageAsset: String
+    let media: ReplicaFeatureMedia
     let buttonGradient: [Color]
     let dotColor: Color
 }
@@ -218,6 +267,8 @@ private struct BenefitItem: Identifiable {
 }
 
 struct OnboardingReplicaView: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @StateObject private var viewModel = OnboardingViewModel()
 
     @State private var step: ReplicaOnboardingStep = .hero
@@ -241,6 +292,12 @@ struct OnboardingReplicaView: View {
     @State private var selectedDiet: ReplicaDietOption?
 
     @State private var selectedPlan: ReplicaPlan = .yearly
+    @State private var editedCalories: String = ""
+    @State private var editedProtein: String = ""
+    @State private var editedCarbs: String = ""
+    @State private var editedFats: String = ""
+    @State private var goalsMacrosInitialized = false
+    @State private var shouldApplyPersonalizedMacros = true
     @State private var buildingStage = 0
     @State private var buildingProgress = 0.0
     @State private var personalizingProgress = 0.0
@@ -250,16 +307,60 @@ struct OnboardingReplicaView: View {
 
     private let clock = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
+    private var onboardingBackground: Color {
+        colorScheme == .dark ? .black : .white
+    }
+
+    private var onboardingPrimaryText: Color {
+        colorScheme == .dark ? .white : .black
+    }
+
+    private var onboardingSurfaceTint: Color {
+        colorScheme == .dark ? .white : .black
+    }
+
+    private var stepTransitionID: String {
+        step.isFeatureSlide ? "feature" : "\(step.rawValue)"
+    }
+
+    private var pageChangeAnimation: Animation {
+        reduceMotion ? MotionTokens.easeInOut : MotionTokens.springBase
+    }
+
+    private var demoAnimation: Animation {
+        reduceMotion ? MotionTokens.easeInOut : MotionTokens.springQuick
+    }
+
+    private var stepTransition: AnyTransition {
+        reduceMotion
+            ? .opacity
+            : .opacity.combined(with: .scale(scale: 0.985))
+    }
+
+    private var featureDemoTransition: AnyTransition {
+        reduceMotion
+            ? .opacity
+            : .asymmetric(
+                insertion: .fadeSlide(y: 18).combined(with: .scale(scale: 0.985)),
+                removal: .fadeSlide(y: -18).combined(with: .scale(scale: 0.995))
+            )
+    }
+
     var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
+            onboardingBackground.ignoresSafeArea()
 
             VStack(spacing: 0) {
                 header
 
                 ScrollView(showsIndicators: false) {
                     VStack(spacing: 22) {
-                        stepBody
+                        ZStack {
+                            stepBody
+                                .id(stepTransitionID)
+                                .transition(stepTransition)
+                        }
+                        .animation(pageChangeAnimation, value: stepTransitionID)
                     }
                     .padding(.horizontal, 20)
                     .padding(.top, 14)
@@ -297,7 +398,6 @@ struct OnboardingReplicaView: View {
         .onDisappear {
             autoTask?.cancel()
         }
-        .preferredColorScheme(.dark)
     }
 
     private var header: some View {
@@ -309,9 +409,9 @@ struct OnboardingReplicaView: View {
                     } label: {
                         Image(systemName: "arrow.left")
                             .font(.system(size: 15, weight: .semibold))
-                            .foregroundColor(.white)
+                            .foregroundColor(onboardingPrimaryText)
                             .frame(width: 40, height: 40)
-                            .background(Color.white.opacity(0.11))
+                            .background(onboardingSurfaceTint.opacity(0.11))
                             .clipShape(Circle())
                     }
                     .buttonStyle(.plain)
@@ -326,7 +426,7 @@ struct OnboardingReplicaView: View {
                         step = .questionExperience
                     }
                     .font(.system(size: 15, weight: .medium))
-                    .foregroundColor(.white.opacity(0.88))
+                    .foregroundColor(onboardingPrimaryText.opacity(0.88))
                     .buttonStyle(.plain)
                 }
             }
@@ -338,7 +438,7 @@ struct OnboardingReplicaView: View {
                     GeometryReader { proxy in
                         ZStack(alignment: .leading) {
                             Capsule()
-                                .fill(Color.white.opacity(0.16))
+                                .fill(onboardingSurfaceTint.opacity(0.16))
                                 .frame(height: 4)
                             Capsule()
                                 .fill(questionAccent)
@@ -352,7 +452,7 @@ struct OnboardingReplicaView: View {
 
                     Text("\(questionIndex) of \(step.questionCount)")
                         .font(.system(size: 14, weight: .semibold))
-                        .foregroundColor(.white.opacity(0.78))
+                        .foregroundColor(onboardingPrimaryText.opacity(0.78))
                 }
                 .padding(.horizontal, 62)
             }
@@ -370,7 +470,7 @@ struct OnboardingReplicaView: View {
         switch step {
         case .hero:
             heroStep
-        case .featureCoach, .featureAnalysis, .featureTraining, .featureChallenges, .featureNutrition, .featureProgress:
+        case .featureWorkoutPlans, .featureMealPlans, .featureCheckins, .featureCoach, .featureTraining, .featureChallenges, .featureNutrition, .featureProgress:
             featureStep
         case .featureList:
             featuresListStep
@@ -406,6 +506,8 @@ struct OnboardingReplicaView: View {
             buildingStep
         case .potential:
             potentialStep
+        case .personalizedGoals:
+            personalizedGoalsStep
         case .projection:
             projectionStep
         case .personalizing:
@@ -458,7 +560,7 @@ struct OnboardingReplicaView: View {
             VStack(spacing: 2) {
                 Text("Train Smarter")
                     .font(.system(size: 52, weight: .heavy))
-                    .foregroundColor(.white)
+                    .foregroundColor(onboardingPrimaryText)
                 Text("Win More")
                     .font(.system(size: 52, weight: .heavy))
                     .foregroundColor(Color(red: 0.09, green: 0.49, blue: 0.98))
@@ -468,12 +570,12 @@ struct OnboardingReplicaView: View {
             Text("AI-POWERED FITNESS COACH")
                 .font(.system(size: 13, weight: .bold))
                 .tracking(1.4)
-                .foregroundColor(.white.opacity(0.48))
+                .foregroundColor(onboardingPrimaryText.opacity(0.48))
 
             VStack(alignment: .leading, spacing: 15) {
-                heroBullet(icon: "video.fill", text: "Real-time form breakdowns")
+                heroBullet(icon: "photo.fill", text: "Real-time physique analysis")
                 heroBullet(icon: "figure.strengthtraining.traditional", text: "Personalized training plans")
-                heroBullet(icon: "chart.pie.fill", text: "Adaptive macro coaching")
+                heroBullet(icon: "fork.knife", text: "Adaptive meal plans")
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.top, 6)
@@ -493,46 +595,91 @@ struct OnboardingReplicaView: View {
                 )
             Text(text)
                 .font(.system(size: 18, weight: .medium))
-                .foregroundColor(.white.opacity(0.92))
+                .foregroundColor(onboardingPrimaryText.opacity(0.92))
         }
     }
 
     private var featureStep: some View {
         let slide = currentSlide
+        let demoID = featureDemoID
 
-        return VStack(spacing: 18) {
-            RoundedRectangle(cornerRadius: 26, style: .continuous)
-                .fill(Color.white.opacity(0.04))
-                .frame(maxWidth: .infinity)
-                .frame(height: 318)
-                .overlay(
-                    Image(slide.imageAsset)
-                        .resizable()
-                        .scaledToFit()
-                        .padding(14)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 26, style: .continuous)
-                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
-                )
+        return VStack(spacing: 0) {
+            GeometryReader { proxy in
+                let horizontalInset: CGFloat = 16
+                let availableWidth = max(proxy.size.width - (horizontalInset * 2), 0)
+                let phoneAspect: CGFloat = 9 / 19.5
+                let targetHeight = min(proxy.size.height, 620)
+                let widthFromHeight = targetHeight * phoneAspect
+                let demoWidth = min(availableWidth, widthFromHeight)
 
-            VStack(spacing: 8) {
+                ZStack {
+                    featureDemoView
+                        .id(demoID)
+                        .transition(featureDemoTransition)
+                        .frame(width: demoWidth, height: demoWidth / phoneAspect)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                        .padding(.top, 12)
+                }
+            }
+            .animation(demoAnimation, value: demoID)
+            .frame(height: min(max(UIScreen.main.bounds.height * 0.56, 420), 620))
+            .frame(maxWidth: .infinity)
+            .padding(.top, 10)
+
+            // Text content at bottom
+            VStack(spacing: 10) {
                 Text(slide.title)
-                    .font(.system(size: 42, weight: .bold))
-                    .foregroundColor(.white)
+                    .font(.system(size: 28, weight: .bold))
+                    .foregroundColor(onboardingPrimaryText)
                     .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.85)
                 Text(slide.subtitle)
-                    .font(.system(size: 23, weight: .regular))
-                    .foregroundColor(.white.opacity(0.75))
+                    .font(.system(size: 15, weight: .regular))
+                    .foregroundColor(onboardingPrimaryText.opacity(0.75))
                     .multilineTextAlignment(.center)
                     .lineSpacing(1)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.9)
             }
+            .padding(.horizontal, 24)
+            .padding(.top, 24)
 
-            HStack(spacing: 26) {
-                featureTag(text: "Personalized", tint: slide.dotColor)
-                featureTag(text: "AI-Powered", tint: slide.dotColor)
-                featureTag(text: "Real-time", tint: slide.dotColor)
+            HStack(spacing: 22) {
+                ForEach(featureTags, id: \.self) { tag in
+                    featureTag(text: tag, tint: slide.dotColor)
+                }
             }
+            .padding(.top, 16)
+        }
+    }
+
+    private var featureDemoView: some View {
+        PhoneMockupContainerView(cornerRadius: 54, bezelWidth: 12, showNotch: true, shadow: true) {
+            ReplicaFeatureMediaView(media: currentSlide.media)
+        }
+    }
+
+    private var featureDemoID: String {
+        currentSlide.media.id
+    }
+
+    private var featureTags: [String] {
+        switch step {
+        case .featureWorkoutPlans, .featureTraining:
+            return ["Split", "Schedule", "AI Fit"]
+        case .featureMealPlans:
+            return ["Meals", "Macros", "Swaps"]
+        case .featureCheckins, .featureChallenges:
+            return ["Weekly", "Recap", "Adjust"]
+        case .featureCoach:
+            return ["Chat", "Guidance", "24/7"]
+        case .featureProgress:
+            return ["Sessions", "Sets", "Streaks"]
+        case .featureNutrition:
+            return ["Scan", "Photo", "Voice"]
+        default:
+            return ["Personalized", "AI-Powered", "Real-time"]
         }
     }
 
@@ -542,8 +689,172 @@ struct OnboardingReplicaView: View {
                 .fill(tint)
                 .frame(width: 8, height: 8)
             Text(text)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundColor(.white.opacity(0.76))
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(onboardingPrimaryText.opacity(0.76))
+        }
+    }
+
+    private struct ReplicaFeatureMediaView: View {
+        let media: ReplicaFeatureMedia
+
+        var body: some View {
+            Group {
+                switch media {
+                case .image(let name):
+                    Image(name)
+                        .resizable()
+                        .scaledToFill()
+                case .video(let assetName, let range, let fallbackImageName):
+                    ReplicaVideoClipView(assetName: assetName, range: range, fallbackImageName: fallbackImageName)
+                case .swapImages(let primary, let secondary, let delay):
+                    ReplicaTimedSwapView(primary: primary, secondary: secondary, delay: delay)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipped()
+        }
+    }
+
+    private struct ReplicaTimedSwapView: View {
+        let primary: String
+        let secondary: String
+        let delay: TimeInterval
+
+        @State private var showSecondary = false
+        @State private var swapTask: Task<Void, Never>?
+
+        var body: some View {
+            ZStack {
+                Image(primary)
+                    .resizable()
+                    .scaledToFill()
+                    .opacity(showSecondary ? 0 : 1)
+
+                Image(secondary)
+                    .resizable()
+                    .scaledToFill()
+                    .opacity(showSecondary ? 1 : 0)
+            }
+            .animation(.easeInOut(duration: 0.6), value: showSecondary)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipped()
+            .onAppear {
+                showSecondary = false
+                swapTask?.cancel()
+                swapTask = Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                    showSecondary = true
+                }
+            }
+            .onDisappear {
+                swapTask?.cancel()
+            }
+        }
+    }
+
+    private struct ReplicaVideoClipView: View {
+        let assetName: String
+        let range: ReplicaVideoClipRange
+        let fallbackImageName: String?
+
+        @State private var player: AVPlayer?
+        @State private var timeObserver: Any?
+
+        var body: some View {
+            ZStack {
+                if let player {
+                    VideoPlayer(player: player)
+                        .aspectRatio(contentMode: .fill)
+                        .onAppear {
+                            player.play()
+                        }
+                        .onDisappear {
+                            cleanupPlayer()
+                        }
+                        .allowsHitTesting(false)
+                } else if let fallbackImageName {
+                    Image(fallbackImageName)
+                        .resizable()
+                        .scaledToFill()
+                } else {
+                    Color.black.opacity(0.1)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipped()
+            .onAppear {
+                preparePlayerIfNeeded()
+            }
+        }
+
+        private func preparePlayerIfNeeded() {
+            guard player == nil, let url = ReplicaVideoCache.url(for: assetName) else { return }
+            let asset = AVAsset(url: url)
+            let duration = asset.duration.seconds
+            let clip = resolvedClipRange(duration: duration)
+            let item = AVPlayerItem(asset: asset)
+            let player = AVPlayer(playerItem: item)
+            player.isMuted = true
+            player.actionAtItemEnd = .pause
+            self.player = player
+
+            let startTime = CMTime(seconds: clip.start, preferredTimescale: 600)
+            player.seek(to: startTime) { _ in
+                player.play()
+            }
+
+            if clip.end > clip.start + 0.05 {
+                let interval = CMTime(seconds: 0.25, preferredTimescale: 600)
+                timeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { time in
+                    if time.seconds >= clip.end {
+                        player.seek(to: startTime) { _ in
+                            player.play()
+                        }
+                    }
+                }
+            }
+        }
+
+        private func resolvedClipRange(duration: TimeInterval) -> (start: TimeInterval, end: TimeInterval) {
+            let safeDuration = duration.isFinite ? duration : 0
+            switch range {
+            case .full:
+                return (0, safeDuration)
+            case .range(let start, let end):
+                return (max(0, start), min(end, safeDuration))
+            case .last(let seconds):
+                let end = safeDuration
+                let start = max(end - seconds, 0)
+                return (start, end)
+            }
+        }
+
+        private func cleanupPlayer() {
+            if let observer = timeObserver, let player {
+                player.removeTimeObserver(observer)
+            }
+            timeObserver = nil
+            player?.pause()
+            player = nil
+        }
+    }
+
+    private enum ReplicaVideoCache {
+        static var cachedURLs: [String: URL] = [:]
+
+        static func url(for assetName: String) -> URL? {
+            if let cached = cachedURLs[assetName] { return cached }
+            guard let dataAsset = NSDataAsset(name: assetName) else { return nil }
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(assetName).mp4")
+            if !FileManager.default.fileExists(atPath: url.path) {
+                do {
+                    try dataAsset.data.write(to: url, options: .atomic)
+                } catch {
+                    return nil
+                }
+            }
+            cachedURLs[assetName] = url
+            return url
         }
     }
 
@@ -551,7 +862,7 @@ struct OnboardingReplicaView: View {
         VStack(spacing: 14) {
             Text("What makes FIT AI\nspecial?")
                 .font(.system(size: 24, weight: .bold))
-                .foregroundColor(.white)
+                .foregroundColor(onboardingPrimaryText)
                 .multilineTextAlignment(.center)
 
             VStack(spacing: 12) {
@@ -565,7 +876,7 @@ struct OnboardingReplicaView: View {
     private func featureBenefitCard(_ item: BenefitItem) -> some View {
         HStack(spacing: 12) {
             Circle()
-                .fill(Color.white.opacity(0.06))
+                .fill(onboardingSurfaceTint.opacity(0.06))
                 .frame(width: 36, height: 36)
                 .overlay(
                     Image(systemName: item.icon)
@@ -576,20 +887,20 @@ struct OnboardingReplicaView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(item.title)
                     .font(.system(size: 21, weight: .semibold))
-                    .foregroundColor(.white)
+                    .foregroundColor(onboardingPrimaryText)
                 Text(item.detail)
                     .font(.system(size: 16, weight: .regular))
-                    .foregroundColor(.white.opacity(0.66))
+                    .foregroundColor(onboardingPrimaryText.opacity(0.66))
             }
 
             Spacer()
         }
         .padding(14)
-        .background(Color.white.opacity(0.05))
+        .background(onboardingSurfaceTint.opacity(0.05))
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                .stroke(onboardingSurfaceTint.opacity(0.1), lineWidth: 1)
         )
     }
 
@@ -606,16 +917,16 @@ struct OnboardingReplicaView: View {
 
             Text("Love FIT AI?")
                 .font(.system(size: 24, weight: .bold))
-                .foregroundColor(.white)
+                .foregroundColor(onboardingPrimaryText)
 
             Text("Help us reach more users by rating us 5 stars")
                 .font(.system(size: 17, weight: .regular))
-                .foregroundColor(.white.opacity(0.72))
+                .foregroundColor(onboardingPrimaryText.opacity(0.72))
                 .multilineTextAlignment(.center)
 
             Text("Rate your experience")
                 .font(.system(size: 38, weight: .bold))
-                .foregroundColor(.white)
+                .foregroundColor(onboardingPrimaryText)
                 .padding(.top, 4)
 
             HStack(spacing: 12) {
@@ -634,7 +945,7 @@ struct OnboardingReplicaView: View {
             VStack(spacing: 12) {
                 Text("What makes FIT AI special?")
                     .font(.system(size: 22, weight: .bold))
-                    .foregroundColor(.white)
+                    .foregroundColor(onboardingPrimaryText)
                     .padding(.top, 4)
                 featureBenefitCard(featureBenefits[0])
                 featureBenefitCard(featureBenefits[1])
@@ -875,7 +1186,7 @@ struct OnboardingReplicaView: View {
 
             Text("Example: 5 ft 9 in")
                 .font(.system(size: 14, weight: .medium))
-                .foregroundColor(.white.opacity(0.62))
+                .foregroundColor(onboardingPrimaryText.opacity(0.62))
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -1023,17 +1334,17 @@ struct OnboardingReplicaView: View {
                 Text("QUESTION \(index)")
                     .font(.system(size: 12, weight: .bold))
                     .tracking(1.2)
-                    .foregroundColor(.white.opacity(0.5))
+                    .foregroundColor(onboardingPrimaryText.opacity(0.5))
             }
 
             Text(title)
                 .font(.system(size: 42, weight: .bold))
-                .foregroundColor(.white)
+                .foregroundColor(onboardingPrimaryText)
                 .multilineTextAlignment(.center)
 
             Text(subtitle)
                 .font(.system(size: 19, weight: .regular))
-                .foregroundColor(.white.opacity(0.68))
+                .foregroundColor(onboardingPrimaryText.opacity(0.68))
                 .multilineTextAlignment(.center)
         }
     }
@@ -1050,17 +1361,17 @@ struct OnboardingReplicaView: View {
             HStack(spacing: 10) {
                 Image(systemName: icon)
                     .font(.system(size: 16, weight: .semibold))
-                    .foregroundColor(.white.opacity(0.95))
+                    .foregroundColor(isSelected ? .white : onboardingPrimaryText.opacity(0.95))
                     .frame(width: 22)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title)
                         .font(.system(size: 24, weight: .medium))
-                        .foregroundColor(.white)
+                        .foregroundColor(isSelected ? .white : onboardingPrimaryText)
                     if let subtitle {
                         Text(subtitle)
                             .font(.system(size: 14, weight: .regular))
-                            .foregroundColor(.white.opacity(0.66))
+                            .foregroundColor(isSelected ? .white.opacity(0.82) : onboardingPrimaryText.opacity(0.66))
                     }
                 }
 
@@ -1079,12 +1390,12 @@ struct OnboardingReplicaView: View {
                     .fill(
                         isSelected
                         ? LinearGradient(colors: selectedGradient, startPoint: .leading, endPoint: .trailing)
-                        : LinearGradient(colors: [Color.white.opacity(0.08), Color.white.opacity(0.08)], startPoint: .leading, endPoint: .trailing)
+                        : LinearGradient(colors: [onboardingSurfaceTint.opacity(0.08), onboardingSurfaceTint.opacity(0.08)], startPoint: .leading, endPoint: .trailing)
                     )
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(Color.white.opacity(isSelected ? 0.0 : 0.16), lineWidth: 1)
+                    .stroke(onboardingSurfaceTint.opacity(isSelected ? 0.0 : 0.16), lineWidth: 1)
             )
         }
         .buttonStyle(.plain)
@@ -1099,22 +1410,22 @@ struct OnboardingReplicaView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title)
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundColor(.white.opacity(0.65))
+                .foregroundColor(onboardingPrimaryText.opacity(0.65))
 
             TextField(placeholder, text: text)
                 .font(.system(size: 18, weight: .semibold))
-                .foregroundColor(.white)
+                .foregroundColor(onboardingPrimaryText)
                 .keyboardType(keyboardType)
                 .textInputAutocapitalization(.words)
                 .autocorrectionDisabled()
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.white.opacity(0.06))
+        .background(onboardingSurfaceTint.opacity(0.06))
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                .stroke(onboardingSurfaceTint.opacity(0.12), lineWidth: 1)
         )
     }
 
@@ -1126,11 +1437,11 @@ struct OnboardingReplicaView: View {
 
             Text("Building Your Program")
                 .font(.system(size: 32, weight: .bold))
-                .foregroundColor(.white)
+                .foregroundColor(onboardingPrimaryText)
 
             Text("This will only take a moment")
                 .font(.system(size: 18, weight: .regular))
-                .foregroundColor(.white.opacity(0.7))
+                .foregroundColor(onboardingPrimaryText.opacity(0.7))
 
             VStack(alignment: .leading, spacing: 14) {
                 statusRow(index: 1, title: "Analyzing your responses", isComplete: buildingStage > 1, isActive: buildingStage == 1)
@@ -1146,7 +1457,7 @@ struct OnboardingReplicaView: View {
 
             Text("\(Int(buildingProgress * 100))% Complete")
                 .font(.system(size: 17, weight: .semibold))
-                .foregroundColor(.white.opacity(0.74))
+                .foregroundColor(onboardingPrimaryText.opacity(0.74))
         }
         .padding(.horizontal, 2)
     }
@@ -1155,7 +1466,7 @@ struct OnboardingReplicaView: View {
         HStack(spacing: 10) {
             ZStack {
                 Circle()
-                    .fill(isComplete ? Color.green : (isActive ? Color.blue : Color.white.opacity(0.18)))
+                    .fill(isComplete ? Color.green : (isActive ? Color.blue : onboardingSurfaceTint.opacity(0.18)))
                     .frame(width: 24, height: 24)
 
                 if isComplete {
@@ -1169,18 +1480,23 @@ struct OnboardingReplicaView: View {
                 } else {
                     Image(systemName: "gearshape.fill")
                         .font(.system(size: 10, weight: .semibold))
-                        .foregroundColor(.white.opacity(0.68))
+                        .foregroundColor(onboardingPrimaryText.opacity(0.68))
                 }
             }
 
             Text(title)
                 .font(.system(size: 21, weight: isActive ? .semibold : .regular))
-                .foregroundColor(isActive ? .white : .white.opacity(0.58))
+                .foregroundColor(isActive ? onboardingPrimaryText : onboardingPrimaryText.opacity(0.58))
         }
     }
 
     private var potentialStep: some View {
-        VStack(spacing: 12) {
+        let goalTitle = selectedGoal?.title ?? "Build muscle"
+        let daysValue = selectedFrequency ?? 3
+        let focusTitle = selectedFocus?.title ?? "Strength"
+        let durationValue = selectedDuration?.rawValue ?? 45
+
+        return VStack(spacing: 12) {
             Circle()
                 .fill(Color.green.opacity(0.2))
                 .frame(width: 64, height: 64)
@@ -1193,13 +1509,29 @@ struct OnboardingReplicaView: View {
 
             Text("Your Progress Potential")
                 .font(.system(size: 40, weight: .bold))
-                .foregroundColor(.white)
+                .foregroundColor(onboardingPrimaryText)
                 .multilineTextAlignment(.center)
 
             Text("See how FIT AI can accelerate your fitness journey")
                 .font(.system(size: 20, weight: .regular))
-                .foregroundColor(.white.opacity(0.7))
+                .foregroundColor(onboardingPrimaryText.opacity(0.7))
                 .multilineTextAlignment(.center)
+
+            VStack(spacing: 10) {
+                HStack(spacing: 10) {
+                    potentialStatCard(icon: "trophy.fill", title: "Goal", value: goalTitle)
+                    potentialStatCard(icon: "calendar", title: "Days / Week", value: "\(daysValue)")
+                }
+
+                HStack(spacing: 10) {
+                    potentialStatCard(icon: "bolt.fill", title: "Focus", value: focusTitle)
+                    potentialStatCard(icon: "clock.fill", title: "Session", value: "\(durationValue) min")
+                }
+            }
+            .padding(.top, 4)
+
+            momentumBar()
+                .padding(.top, 2)
 
             Text(potentialNarrative)
                 .font(.system(size: 16, weight: .medium))
@@ -1216,20 +1548,360 @@ struct OnboardingReplicaView: View {
         }
     }
 
+    private func potentialStatCard(icon: String, title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Image(systemName: icon)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(.blue)
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(onboardingPrimaryText.opacity(0.65))
+            }
+
+            Text(value)
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundColor(onboardingPrimaryText)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(onboardingSurfaceTint.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(onboardingSurfaceTint.opacity(0.12), lineWidth: 1)
+        )
+    }
+
+    private func momentumBar() -> some View {
+        VStack(spacing: 8) {
+            HStack {
+                Text("Momentum Forecast")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(onboardingPrimaryText.opacity(0.78))
+                Spacer()
+                Text("Steady climb")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(.green)
+            }
+
+            HStack(spacing: 6) {
+                ForEach(0..<6, id: \.self) { index in
+                    Capsule()
+                        .fill(index < 4 ? Color.green.opacity(0.8) : onboardingSurfaceTint.opacity(0.2))
+                        .frame(height: 8)
+                        .frame(maxWidth: .infinity)
+                }
+            }
+        }
+        .padding(12)
+        .background(onboardingSurfaceTint.opacity(0.05))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(onboardingSurfaceTint.opacity(0.1), lineWidth: 1)
+        )
+    }
+
+    private var personalizedGoalsStep: some View {
+        let startWeightValue = parseWeight(currentWeight, fallback: parseWeight(viewModel.form.weightLbs, fallback: 190))
+        let isMaintainGoal = viewModel.form.goal == .maintain
+        let fallbackGoalWeight = isMaintainGoal ? startWeightValue : max(startWeightValue - 8, 120)
+        let targetWeightValue = isMaintainGoal
+            ? startWeightValue
+            : parseWeight(targetWeight, fallback: parseWeight(viewModel.form.goalWeightLbs, fallback: fallbackGoalWeight))
+        let estimatedGoalDate = suggestedTargetDate(
+            currentWeight: startWeightValue,
+            goalWeight: targetWeightValue,
+            goal: viewModel.form.goal
+        )
+        let daysToGoal = max(
+            0,
+            Calendar.current.dateComponents(
+                [.day],
+                from: Calendar.current.startOfDay(for: Date()),
+                to: Calendar.current.startOfDay(for: estimatedGoalDate)
+            ).day ?? 0
+        )
+        let weeksToGoal = max(1, daysToGoal / 7)
+        let delta = targetWeightValue - startWeightValue
+        let deltaText = formatDelta(delta)
+        let deltaColor = delta < 0 ? Color.green : (delta > 0 ? Color.blue : onboardingPrimaryText.opacity(0.5))
+        let ageValue = resolvedAge()
+        let heightFeetValue = Int(heightFeet) ?? Int(viewModel.form.heightFeet) ?? 5
+        let heightInchesValue = Int(heightInches) ?? Int(viewModel.form.heightInches) ?? 9
+        let macroDefaults = roundedMacros(
+            calculateMacroTargets(
+                weightLbs: startWeightValue,
+                heightFeet: heightFeetValue,
+                heightInches: heightInchesValue,
+                age: ageValue,
+                sex: viewModel.form.sex,
+                trainingDaysPerWeek: viewModel.form.workoutDaysPerWeek,
+                goal: viewModel.form.goal,
+                goalWeightLbs: targetWeightValue
+            )
+        )
+        let weeklyRate = healthyWeeklyRate(for: viewModel.form.goal)
+        let paceText = String(format: "%.1f", weeklyRate)
+        let goalsAccent = Color(red: 0.30, green: 0.33, blue: 0.95)
+
+        return VStack(spacing: 16) {
+            VStack(spacing: 6) {
+                Text("Your Personalized Goals")
+                    .font(.system(size: 38, weight: .bold))
+                    .foregroundColor(onboardingPrimaryText)
+                    .multilineTextAlignment(.center)
+                Text("Based on your profile, training schedule, and selected goal.")
+                    .font(.system(size: 16, weight: .regular))
+                    .foregroundColor(onboardingPrimaryText.opacity(0.7))
+                    .multilineTextAlignment(.center)
+            }
+
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Start")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(onboardingPrimaryText.opacity(0.62))
+                        Text("Today")
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundColor(onboardingPrimaryText)
+                        HStack(alignment: .firstTextBaseline, spacing: 3) {
+                            Text(formatWeight(startWeightValue))
+                                .font(.system(size: 40, weight: .bold))
+                                .foregroundColor(onboardingPrimaryText)
+                            Text("lbs")
+                                .font(.system(size: 20, weight: .medium))
+                                .foregroundColor(onboardingPrimaryText.opacity(0.58))
+                        }
+                    }
+
+                    Spacer()
+
+                    Image(systemName: "arrow.right")
+                        .font(.system(size: 19, weight: .semibold))
+                        .foregroundColor(onboardingPrimaryText.opacity(0.42))
+
+                    Spacer()
+
+                    VStack(alignment: .trailing, spacing: 4) {
+                        Text(isMaintainGoal ? "Maintenance" : "Estimated Goal")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(onboardingPrimaryText.opacity(0.62))
+                        Text(isMaintainGoal ? "On your plan" : estimatedGoalDate.formatted(date: .abbreviated, time: .omitted))
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundColor(onboardingPrimaryText)
+                        HStack(alignment: .firstTextBaseline, spacing: 3) {
+                            Text(formatWeight(targetWeightValue))
+                                .font(.system(size: 40, weight: .bold))
+                                .foregroundColor(goalsAccent)
+                            Text("lbs")
+                                .font(.system(size: 20, weight: .medium))
+                                .foregroundColor(onboardingPrimaryText.opacity(0.58))
+                            if !isMaintainGoal {
+                                Text("(\(deltaText))")
+                                    .font(.system(size: 17, weight: .semibold))
+                                    .foregroundColor(deltaColor)
+                            }
+                        }
+                    }
+                }
+
+                HStack(spacing: 8) {
+                    Image(systemName: "clock.fill")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(goalsAccent)
+                    if isMaintainGoal {
+                        Text("Maintaining your current range with adaptive nutrition.")
+                            .font(.system(size: 16, weight: .medium))
+                            .foregroundColor(onboardingPrimaryText.opacity(0.9))
+                    } else {
+                        Text("~\(weeksToGoal) weeks at your \(paceText) lb/week pace")
+                            .font(.system(size: 16, weight: .medium))
+                            .foregroundColor(onboardingPrimaryText.opacity(0.9))
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(goalsAccent.opacity(0.12))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+                PersonalizedGoalsChartView(
+                    startWeight: startWeightValue,
+                    targetWeight: targetWeightValue,
+                    startDate: Date(),
+                    targetDate: estimatedGoalDate,
+                    accent: goalsAccent,
+                    primaryText: onboardingPrimaryText,
+                    gridTint: onboardingSurfaceTint
+                )
+                .frame(height: 220)
+            }
+            .padding(16)
+            .background(onboardingSurfaceTint.opacity(0.05))
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(onboardingSurfaceTint.opacity(0.12), lineWidth: 1)
+            )
+
+            VStack(alignment: .leading, spacing: 11) {
+                Text("Tap to edit your targets")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundColor(onboardingPrimaryText.opacity(0.68))
+
+                personalizedMacroRow(
+                    icon: "flame.fill",
+                    iconColor: .orange,
+                    label: "Daily Calories",
+                    value: Binding(
+                        get: { editedCalories },
+                        set: { editedCalories = sanitizeMacroInput($0, maxLength: 4) }
+                    ),
+                    suffix: "cal"
+                )
+                personalizedMacroRow(
+                    icon: "fish.fill",
+                    iconColor: .yellow,
+                    label: "Protein Target",
+                    value: Binding(
+                        get: { editedProtein },
+                        set: { editedProtein = sanitizeMacroInput($0, maxLength: 3) }
+                    ),
+                    suffix: "g"
+                )
+                personalizedMacroRow(
+                    icon: "leaf.fill",
+                    iconColor: .red,
+                    label: "Carbs Target",
+                    value: Binding(
+                        get: { editedCarbs },
+                        set: { editedCarbs = sanitizeMacroInput($0, maxLength: 4) }
+                    ),
+                    suffix: "g"
+                )
+                personalizedMacroRow(
+                    icon: "drop.fill",
+                    iconColor: goalsAccent,
+                    label: "Fat Target",
+                    value: Binding(
+                        get: { editedFats },
+                        set: { editedFats = sanitizeMacroInput($0, maxLength: 3) }
+                    ),
+                    suffix: "g"
+                )
+            }
+            .padding(16)
+            .background(onboardingSurfaceTint.opacity(0.05))
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(onboardingSurfaceTint.opacity(0.12), lineWidth: 1)
+            )
+
+            Button {
+                shouldApplyPersonalizedMacros.toggle()
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: shouldApplyPersonalizedMacros ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 24, weight: .semibold))
+                        .foregroundColor(goalsAccent)
+
+                    Text("Use these macros")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundColor(goalsAccent)
+
+                    Spacer()
+                }
+                .padding(.horizontal, 2)
+            }
+            .buttonStyle(.plain)
+
+            if let message = viewModel.macroStatusMessage, !message.isEmpty {
+                Text(message)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(.red.opacity(0.86))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .onAppear {
+            initializeGoalMacroInputs(defaults: macroDefaults)
+        }
+    }
+
+    private func personalizedMacroRow(
+        icon: String,
+        iconColor: Color,
+        label: String,
+        value: Binding<String>,
+        suffix: String
+    ) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundColor(iconColor)
+                .frame(width: 24)
+
+            Text(label)
+                .font(.system(size: 21, weight: .medium))
+                .foregroundColor(onboardingPrimaryText)
+
+            Spacer()
+
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                TextField("0", text: value)
+                    .font(.system(size: 21, weight: .semibold))
+                    .foregroundColor(onboardingPrimaryText)
+                    .keyboardType(.numberPad)
+                    .multilineTextAlignment(.trailing)
+                    .frame(minWidth: 70)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(onboardingSurfaceTint.opacity(0.06))
+                    .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 11, style: .continuous)
+                            .stroke(onboardingSurfaceTint.opacity(0.14), lineWidth: 1)
+                    )
+
+                Text(suffix)
+                    .font(.system(size: 19, weight: .medium))
+                    .foregroundColor(onboardingPrimaryText.opacity(0.58))
+            }
+        }
+    }
+
+    private func initializeGoalMacroInputs(defaults: MacroTotals) {
+        guard !goalsMacrosInitialized else { return }
+
+        let savedCalories = Int(viewModel.form.macroCalories)
+        let savedProtein = Int(viewModel.form.macroProtein)
+        let savedCarbs = Int(viewModel.form.macroCarbs)
+        let savedFats = Int(viewModel.form.macroFats)
+
+        editedCalories = "\(max(savedCalories ?? Int(defaults.calories), 0))"
+        editedProtein = "\(max(savedProtein ?? Int(defaults.protein), 0))"
+        editedCarbs = "\(max(savedCarbs ?? Int(defaults.carbs), 0))"
+        editedFats = "\(max(savedFats ?? Int(defaults.fats), 0))"
+        goalsMacrosInitialized = true
+    }
+
     private var projectionStep: some View {
         VStack(spacing: 14) {
             Text("6-Month Progress Projection")
                 .font(.system(size: 29, weight: .bold))
-                .foregroundColor(.white)
+                .foregroundColor(onboardingPrimaryText)
 
             ProjectionChartView()
                 .frame(height: 220)
                 .padding(14)
-                .background(Color.white.opacity(0.05))
+                .background(onboardingSurfaceTint.opacity(0.05))
                 .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                        .stroke(onboardingSurfaceTint.opacity(0.1), lineWidth: 1)
                 )
 
             HStack(spacing: 10) {
@@ -1240,7 +1912,7 @@ struct OnboardingReplicaView: View {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Key Benefits for Your Goals")
                     .font(.system(size: 30, weight: .bold))
-                    .foregroundColor(.white)
+                    .foregroundColor(onboardingPrimaryText)
 
                 benefitRow("Personalized feedback on technique and strategy")
                 benefitRow("Data-driven insight to accelerate development")
@@ -1257,15 +1929,15 @@ struct OnboardingReplicaView: View {
                 .foregroundColor(color)
             Text(title)
                 .font(.system(size: 15, weight: .semibold))
-                .foregroundColor(.white.opacity(0.78))
+                .foregroundColor(onboardingPrimaryText.opacity(0.78))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
-        .background(Color.white.opacity(0.05))
+        .background(onboardingSurfaceTint.opacity(0.05))
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                .stroke(onboardingSurfaceTint.opacity(0.1), lineWidth: 1)
         )
     }
 
@@ -1278,7 +1950,7 @@ struct OnboardingReplicaView: View {
 
             Text(text)
                 .font(.system(size: 17, weight: .regular))
-                .foregroundColor(.white.opacity(0.86))
+                .foregroundColor(onboardingPrimaryText.opacity(0.86))
         }
     }
 
@@ -1286,12 +1958,12 @@ struct OnboardingReplicaView: View {
         VStack(spacing: 14) {
             Text("Personalizing FIT AI")
                 .font(.system(size: 42, weight: .bold))
-                .foregroundColor(.white)
+                .foregroundColor(onboardingPrimaryText)
                 .multilineTextAlignment(.center)
 
             Text("Tailoring every feature to your training journey")
                 .font(.system(size: 19, weight: .regular))
-                .foregroundColor(.white.opacity(0.72))
+                .foregroundColor(onboardingPrimaryText.opacity(0.72))
                 .multilineTextAlignment(.center)
 
             ZStack {
@@ -1343,17 +2015,17 @@ struct OnboardingReplicaView: View {
                     .foregroundColor(.green)
                 Text(subtitle)
                     .font(.system(size: 14, weight: .regular))
-                    .foregroundColor(.white.opacity(0.62))
+                    .foregroundColor(onboardingPrimaryText.opacity(0.62))
             }
 
             Spacer()
         }
         .padding(14)
-        .background(Color.white.opacity(0.05))
+        .background(onboardingSurfaceTint.opacity(0.05))
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                .stroke(onboardingSurfaceTint.opacity(0.1), lineWidth: 1)
         )
     }
 
@@ -1361,7 +2033,7 @@ struct OnboardingReplicaView: View {
         VStack(spacing: 14) {
             Text("Claim Your Plan")
                 .font(.system(size: 46, weight: .bold))
-                .foregroundColor(.white)
+                .foregroundColor(onboardingPrimaryText)
                 .multilineTextAlignment(.center)
 
             Text("Sign in to claim plan")
@@ -1375,7 +2047,7 @@ struct OnboardingReplicaView: View {
 
                 Text("Your training data will be automatically reset in:")
                     .font(.system(size: 16, weight: .regular))
-                    .foregroundColor(.white.opacity(0.8))
+                    .foregroundColor(onboardingPrimaryText.opacity(0.8))
 
                 HStack(spacing: 8) {
                     timerCell(value: claimTime.hours, unit: "hours")
@@ -1404,20 +2076,14 @@ struct OnboardingReplicaView: View {
             VStack(alignment: .leading, spacing: 10) {
                 Text("What You'll Get")
                     .font(.system(size: 40, weight: .bold))
-                    .foregroundColor(.white)
+                    .foregroundColor(onboardingPrimaryText)
 
-                featureBenefitCard(.init(icon: "video.fill", title: "AI Video Analysis", detail: "Instant feedback on technique and form."))
+                featureBenefitCard(.init(icon: "photo.fill", title: "AI Photo Analysis", detail: "Photo-based physique feedback, muscle focus, and body fat insights."))
                 featureBenefitCard(.init(icon: "figure.strengthtraining.traditional", title: "Personalized Training Plans", detail: "Adaptive workouts built around your week."))
                 featureBenefitCard(.init(icon: "chart.line.uptrend.xyaxis", title: "Progress Tracking", detail: "Track trends and improve with coach recaps."))
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            Button("View Premium Plans") {
-                step = .paywallReveal
-            }
-            .font(.system(size: 16, weight: .semibold))
-            .foregroundColor(.white.opacity(0.85))
-            .buttonStyle(.plain)
         }
     }
 
@@ -1428,11 +2094,11 @@ struct OnboardingReplicaView: View {
                 .foregroundColor(.blue)
             Text(unit)
                 .font(.system(size: 11, weight: .medium))
-                .foregroundColor(.white.opacity(0.66))
+                .foregroundColor(onboardingPrimaryText.opacity(0.66))
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 8)
-        .background(Color.white.opacity(0.08))
+        .background(onboardingSurfaceTint.opacity(0.08))
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
@@ -1443,11 +2109,11 @@ struct OnboardingReplicaView: View {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Unlock Your Potential")
                     .font(.system(size: 17, weight: .medium))
-                    .foregroundColor(.white.opacity(0.72))
+                    .foregroundColor(onboardingPrimaryText.opacity(0.72))
 
                 Text("FIT AI")
                     .font(.system(size: 34, weight: .heavy))
-                    .foregroundColor(.white)
+                    .foregroundColor(onboardingPrimaryText)
 
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .fill(Color.blue)
@@ -1472,19 +2138,19 @@ struct OnboardingReplicaView: View {
 
                 Text("Premium Features")
                     .font(.system(size: 32, weight: .bold))
-                    .foregroundColor(.white)
+                    .foregroundColor(onboardingPrimaryText)
 
-                featureBenefitCard(.init(icon: "video.fill", title: "AI Video Analysis", detail: "Instant breakdowns with personalized suggestions."))
+                featureBenefitCard(.init(icon: "photo.fill", title: "AI Photo Analysis", detail: "Track physique changes with photo insights and clear next steps."))
 
                 Spacer(minLength: 0)
             }
             .padding(20)
             .frame(width: 338, height: 560)
-            .background(Color.black.opacity(0.95))
+            .background(onboardingSurfaceTint.opacity(colorScheme == .dark ? 0.95 : 0.06))
             .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 24, style: .continuous)
-                    .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                    .stroke(onboardingSurfaceTint.opacity(0.08), lineWidth: 1)
             )
         }
         .padding(.top, 10)
@@ -1496,11 +2162,11 @@ struct OnboardingReplicaView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Unlock Your Potential")
                         .font(.system(size: 16, weight: .medium))
-                        .foregroundColor(.white.opacity(0.72))
+                        .foregroundColor(onboardingPrimaryText.opacity(0.72))
 
                     Text("FIT AI")
                         .font(.system(size: 36, weight: .heavy))
-                        .foregroundColor(.white)
+                        .foregroundColor(onboardingPrimaryText)
                 }
 
                 Spacer()
@@ -1537,15 +2203,15 @@ struct OnboardingReplicaView: View {
 
             Text("Premium Features")
                 .font(.system(size: 32, weight: .bold))
-                .foregroundColor(.white)
+                .foregroundColor(onboardingPrimaryText)
 
-            featureBenefitCard(.init(icon: "video.fill", title: "AI Video Analysis", detail: "Upload footage and get instant personalized feedback."))
+            featureBenefitCard(.init(icon: "photo.fill", title: "AI Photo Analysis", detail: "Upload photos to get physique feedback and body fat estimates."))
             featureBenefitCard(.init(icon: "brain.head.profile", title: "24/7 AI Coach", detail: "Get guided responses for training and nutrition."))
             featureBenefitCard(.init(icon: "chart.bar.xaxis", title: "Progress Insights", detail: "Track trends and adjust your plan with clarity."))
 
             Text("Trusted by Athletes")
                 .font(.system(size: 30, weight: .bold))
-                .foregroundColor(.white)
+                .foregroundColor(onboardingPrimaryText)
                 .padding(.top, 4)
 
             HStack(spacing: 8) {
@@ -1556,7 +2222,7 @@ struct OnboardingReplicaView: View {
 
             Text("Start Your Journey")
                 .font(.system(size: 30, weight: .bold))
-                .foregroundColor(.white)
+                .foregroundColor(onboardingPrimaryText)
                 .padding(.top, 4)
 
             VStack(spacing: 10) {
@@ -1567,7 +2233,7 @@ struct OnboardingReplicaView: View {
 
             Text("No commitment required, cancel anytime")
                 .font(.system(size: 14, weight: .medium))
-                .foregroundColor(.white.opacity(0.62))
+                .foregroundColor(onboardingPrimaryText.opacity(0.62))
                 .frame(maxWidth: .infinity, alignment: .center)
                 .padding(.bottom, 4)
         }
@@ -1580,11 +2246,11 @@ struct OnboardingReplicaView: View {
                 .foregroundColor(.blue)
             Text(label)
                 .font(.system(size: 12, weight: .medium))
-                .foregroundColor(.white.opacity(0.75))
+                .foregroundColor(onboardingPrimaryText.opacity(0.75))
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 10)
-        .background(Color.white.opacity(0.05))
+        .background(onboardingSurfaceTint.opacity(0.05))
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
@@ -1599,7 +2265,7 @@ struct OnboardingReplicaView: View {
                     HStack(spacing: 8) {
                         Text(plan.name)
                             .font(.system(size: 18, weight: .semibold))
-                            .foregroundColor(.white)
+                            .foregroundColor(onboardingPrimaryText)
 
                         if let badge = plan.badge {
                             Text(badge)
@@ -1618,21 +2284,21 @@ struct OnboardingReplicaView: View {
 
                     Text(plan.detail)
                         .font(.system(size: 14, weight: .medium))
-                        .foregroundColor(.white.opacity(0.72))
+                        .foregroundColor(onboardingPrimaryText.opacity(0.72))
                 }
 
                 Spacer()
 
                 Image(systemName: selected ? "checkmark.circle.fill" : "circle")
                     .font(.system(size: 24, weight: .semibold))
-                    .foregroundColor(selected ? .blue : .white.opacity(0.35))
+                    .foregroundColor(selected ? .blue : onboardingPrimaryText.opacity(0.35))
             }
             .padding(14)
-            .background(Color.white.opacity(selected ? 0.1 : 0.05))
+            .background(onboardingSurfaceTint.opacity(selected ? 0.1 : 0.05))
             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(selected ? Color.blue : Color.white.opacity(0.1), lineWidth: selected ? 1.7 : 1)
+                    .stroke(selected ? Color.blue : onboardingSurfaceTint.opacity(0.1), lineWidth: selected ? 1.7 : 1)
             )
         }
         .buttonStyle(.plain)
@@ -1640,62 +2306,78 @@ struct OnboardingReplicaView: View {
 
     private var featureBenefits: [BenefitItem] {
         [
-            .init(icon: "video.fill", title: "Video Analysis", detail: "AI-powered form checks from your workout clips"),
-            .init(icon: "brain.head.profile", title: "Smart Coaching", detail: "Guidance based on your progress and patterns"),
-            .init(icon: "figure.strengthtraining.traditional", title: "Workout Builder", detail: "Adaptive sessions for your goals and schedule"),
-            .init(icon: "chart.line.uptrend.xyaxis", title: "Progress Tracking", detail: "Clear trends to measure improvement"),
-            .init(icon: "flame.fill", title: "Challenge Mode", detail: "Daily check-ins and streaks for accountability"),
-            .init(icon: "fork.knife", title: "Nutrition Support", detail: "Macro targets and quick logging to stay on track"),
+            .init(icon: "brain.head.profile", title: "Personal AI Coach", detail: "Ask questions and get guidance anytime."),
+            .init(icon: "figure.strengthtraining.traditional", title: "Workout Splits", detail: "AI picks the split that fits your week."),
+            .init(icon: "calendar.badge.clock", title: "Weekly Check-Ins", detail: "Recaps keep you accountable and on track."),
+            .init(icon: "fork.knife", title: "Custom Meal Plans", detail: "Meals and macros built around your goals."),
+            .init(icon: "chart.bar.xaxis", title: "Workout Tracker", detail: "Track every session in one place."),
+            .init(icon: "camera.viewfinder", title: "AI Nutrition Logging", detail: "Log meals fast with photo, scan, or voice."),
         ]
     }
 
     private var currentSlide: ReplicaFeatureSlide {
         switch step {
+        case .featureWorkoutPlans:
+            return .init(
+                title: "Personalized workout splits",
+                subtitle: "AI matches your split to your training days.",
+                media: .video(assetName: "OnboardingWorkoutVideo", range: .range(start: 10, end: 23), fallbackImageName: "OnboardingFeatureTraining"),
+                buttonGradient: [Color(red: 0.33, green: 0.66, blue: 0.95), Color(red: 0.08, green: 0.83, blue: 0.90)],
+                dotColor: Color(red: 0.33, green: 0.66, blue: 0.95)
+            )
+        case .featureMealPlans:
+            return .init(
+                title: "Custom meal plans based on your goals",
+                subtitle: "Meals and macros built around your targets.",
+                media: .swapImages(primary: "OnboardingFeatureNutrition", secondary: "OnboardingMealDetail", delay: 7),
+                buttonGradient: [Color(red: 0.60, green: 0.84, blue: 0.86), Color(red: 0.92, green: 0.82, blue: 0.85)],
+                dotColor: Color(red: 0.60, green: 0.84, blue: 0.86)
+            )
+        case .featureCheckins:
+            return .init(
+                title: "Weekly AI coach check-ins",
+                subtitle: "Weekly recaps keep you accountable.",
+                media: .video(assetName: "OnboardingCoachRecapVideo", range: .full, fallbackImageName: "OnboardingFeatureCheckin"),
+                buttonGradient: [Color(red: 0.95, green: 0.40, blue: 0.64), Color(red: 0.95, green: 0.84, blue: 0.26)],
+                dotColor: Color(red: 0.95, green: 0.40, blue: 0.64)
+            )
         case .featureCoach:
             return .init(
-                title: "AI Fitness Coach",
-                subtitle: "Chat with your personal coach trained on your data",
-                imageAsset: "OnboardingFeatureCoach",
+                title: "Personal AI coach",
+                subtitle: "Ask questions and get guidance anytime.",
+                media: .video(assetName: "OnboardingChatVideo", range: .last(seconds: 10), fallbackImageName: "OnboardingFeatureCoach"),
                 buttonGradient: [Color(red: 0.38, green: 0.50, blue: 0.93), Color(red: 0.44, green: 0.31, blue: 0.75)],
                 dotColor: Color(red: 0.35, green: 0.52, blue: 1.0)
             )
-        case .featureAnalysis:
-            return .init(
-                title: "Workout Analysis",
-                subtitle: "Get detailed feedback and improvement suggestions",
-                imageAsset: "OnboardingFeatureInsights",
-                buttonGradient: [Color(red: 0.85, green: 0.46, blue: 0.90), Color(red: 0.95, green: 0.35, blue: 0.43)],
-                dotColor: Color(red: 0.94, green: 0.46, blue: 0.86)
-            )
         case .featureTraining:
             return .init(
-                title: "Personalized Training",
-                subtitle: "Create custom plans tailored to your level and goals",
-                imageAsset: "OnboardingFeatureTraining",
+                title: "Personalized workout splits",
+                subtitle: "Choose the split that fits your week.",
+                media: .image(name: "OnboardingFeatureTraining"),
                 buttonGradient: [Color(red: 0.33, green: 0.66, blue: 0.95), Color(red: 0.08, green: 0.83, blue: 0.90)],
                 dotColor: Color(red: 0.33, green: 0.66, blue: 0.95)
             )
         case .featureChallenges:
             return .init(
-                title: "Daily Challenges",
-                subtitle: "Complete check-ins and keep your momentum every day",
-                imageAsset: "OnboardingFeatureCheckin",
+                title: "Weekly AI coach check-ins",
+                subtitle: "Stay consistent with weekly nudges.",
+                media: .image(name: "OnboardingFeatureCheckin"),
                 buttonGradient: [Color(red: 0.95, green: 0.40, blue: 0.64), Color(red: 0.95, green: 0.84, blue: 0.26)],
                 dotColor: Color(red: 0.95, green: 0.40, blue: 0.64)
             )
         case .featureNutrition:
             return .init(
-                title: "Nutrition Tracking",
-                subtitle: "Track macros quickly and stay aligned to your goal",
-                imageAsset: "OnboardingFeatureNutrition",
+                title: "AI nutrition logging",
+                subtitle: "Log meals fast with photo, scan, or voice.",
+                media: .image(name: "OnboardingFeatureInsights"),
                 buttonGradient: [Color(red: 0.60, green: 0.84, blue: 0.86), Color(red: 0.92, green: 0.82, blue: 0.85)],
                 dotColor: Color(red: 0.60, green: 0.84, blue: 0.86)
             )
         case .featureProgress:
             return .init(
-                title: "Progress Tracking",
-                subtitle: "Monitor weekly trends and celebrate every win",
-                imageAsset: "OnboardingFeatureProgress",
+                title: "Full built-in workout tracker",
+                subtitle: "See every workout in one place.",
+                media: .video(assetName: "OnboardingWorkoutVideo", range: .range(start: 26, end: 35), fallbackImageName: "OnboardingFeatureProgress"),
                 buttonGradient: [Color(red: 0.93, green: 0.88, blue: 0.80), Color(red: 0.93, green: 0.67, blue: 0.58)],
                 dotColor: Color(red: 0.94, green: 0.84, blue: 0.76)
             )
@@ -1703,7 +2385,7 @@ struct OnboardingReplicaView: View {
             return .init(
                 title: "",
                 subtitle: "",
-                imageAsset: "OnboardingFeatureCoach",
+                media: .image(name: "OnboardingFeatureCoach"),
                 buttonGradient: [Color.blue, Color.blue],
                 dotColor: .blue
             )
@@ -1714,10 +2396,15 @@ struct OnboardingReplicaView: View {
         switch step {
         case .hero:
             return "Get Started"
-        case .featureCoach, .featureAnalysis, .featureTraining, .featureChallenges, .featureNutrition:
-            return "Next Feature"
-        case .featureProgress:
-            return "Continue Journey"
+        case .featureWorkoutPlans,
+             .featureMealPlans,
+             .featureCheckins,
+             .featureCoach,
+             .featureTraining,
+             .featureChallenges,
+             .featureNutrition,
+             .featureProgress:
+            return step.isLastFeatureSlide ? "Continue Journey" : "Next Feature"
         case .featureList, .rating:
             return "Continue"
         case .questionExperience:
@@ -1730,6 +2417,8 @@ struct OnboardingReplicaView: View {
             return "Next"
         case .potential, .projection:
             return "Continue Your Journey"
+        case .personalizedGoals:
+            return viewModel.isApplyingMacros ? "Applying..." : "Continue Your Journey"
         case .claim:
             return "Sign In to Claim Plan"
         case .paywallReveal:
@@ -1758,6 +2447,10 @@ struct OnboardingReplicaView: View {
 
     private var isPrimaryDisabled: Bool {
         if viewModel.isSubmitting {
+            return true
+        }
+
+        if step == .personalizedGoals, viewModel.isApplyingMacros {
             return true
         }
 
@@ -1812,7 +2505,9 @@ struct OnboardingReplicaView: View {
 
     private var showsBackButton: Bool {
         switch step {
-        case .hero, .featureCoach, .featureAnalysis, .featureTraining, .featureChallenges, .featureNutrition, .featureProgress, .building, .personalizing:
+        case .hero, .building, .personalizing:
+            return false
+        case _ where step.isFeatureSlide:
             return false
         default:
             return true
@@ -1829,12 +2524,185 @@ struct OnboardingReplicaView: View {
 
     private var potentialNarrative: String {
         let namePart = fullName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "You" : fullName
+        let verb = namePart == "You" ? "are" : "is"
         let goalText = selectedGoal?.previewText ?? "building muscle"
         let daysText = selectedFrequency ?? 3
         let focusText = selectedFocus?.title.lowercased() ?? "strength"
         let durationText = selectedDuration?.rawValue ?? 45
 
-        return "\(namePart) are set on \(goalText), training \(daysText) days each week with \(focusText) as the priority. FIT AI will build \(durationText)-minute sessions and adaptive nutrition targets so you improve with consistency and clear direction."
+        return "\(namePart) \(verb) set on \(goalText), training \(daysText) days each week with \(focusText) as the priority. FIT AI will build \(durationText)-minute sessions and adaptive nutrition targets so you improve with consistency and clear direction."
+    }
+
+    private func applyPersonalizedMacrosIfEnabled() async {
+        guard shouldApplyPersonalizedMacros else { return }
+        let defaults = personalizedMacroDefaults()
+        let edited = MacroTotals(
+            calories: max(Double(editedCalories) ?? defaults.calories, 0),
+            protein: max(Double(editedProtein) ?? defaults.protein, 0),
+            carbs: max(Double(editedCarbs) ?? defaults.carbs, 0),
+            fats: max(Double(editedFats) ?? defaults.fats, 0)
+        )
+        await viewModel.applyMacros(roundedMacros(edited))
+    }
+
+    private func personalizedMacroDefaults() -> MacroTotals {
+        let startWeightValue = parseWeight(currentWeight, fallback: parseWeight(viewModel.form.weightLbs, fallback: 190))
+        let ageValue = resolvedAge()
+        let heightFeetValue = Int(heightFeet) ?? Int(viewModel.form.heightFeet) ?? 5
+        let heightInchesValue = Int(heightInches) ?? Int(viewModel.form.heightInches) ?? 9
+
+        return roundedMacros(
+            calculateMacroTargets(
+                weightLbs: startWeightValue,
+                heightFeet: heightFeetValue,
+                heightInches: heightInchesValue,
+                age: ageValue,
+                sex: viewModel.form.sex,
+                trainingDaysPerWeek: viewModel.form.workoutDaysPerWeek,
+                goal: viewModel.form.goal,
+                goalWeightLbs: parseWeight(targetWeight, fallback: parseWeight(viewModel.form.goalWeightLbs, fallback: startWeightValue))
+            )
+        )
+    }
+
+    private func parseWeight(_ text: String, fallback: Double) -> Double {
+        let sanitized = text.filter { "0123456789.".contains($0) }
+        guard let value = Double(sanitized), value > 0 else {
+            return fallback
+        }
+        return value
+    }
+
+    private func formatWeight(_ value: Double) -> String {
+        let rounded = (value * 10).rounded() / 10
+        if rounded.truncatingRemainder(dividingBy: 1) == 0 {
+            return "\(Int(rounded))"
+        }
+        return String(format: "%.1f", rounded)
+    }
+
+    private func formatDelta(_ value: Double) -> String {
+        let rounded = (value * 10).rounded() / 10
+        let sign = rounded > 0 ? "+" : (rounded < 0 ? "-" : "")
+        return "\(sign)\(formatWeight(abs(rounded)))"
+    }
+
+    private func sanitizeMacroInput(_ value: String, maxLength: Int) -> String {
+        String(value.filter { "0123456789".contains($0) }.prefix(maxLength))
+    }
+
+    private func resolvedAge() -> Int {
+        if let parsedAge = Int(age), (13...100).contains(parsedAge) {
+            return parsedAge
+        }
+        if let parsedAge = Int(viewModel.form.age), (13...100).contains(parsedAge) {
+            return parsedAge
+        }
+        if let birthday = viewModel.form.birthday {
+            return max(13, min(100, Calendar.current.dateComponents([.year], from: birthday, to: Date()).year ?? 25))
+        }
+        return 25
+    }
+
+    private func clampWeightPaceRate(_ value: Double) -> Double {
+        min(max(value, 0.5), 2.0)
+    }
+
+    private func healthyWeeklyRate(for goal: OnboardingForm.Goal) -> Double {
+        switch goal {
+        case .loseWeight:
+            return clampWeightPaceRate(viewModel.form.weeklyWeightLossLbs)
+        case .loseWeightFast:
+            return max(1.5, clampWeightPaceRate(viewModel.form.weeklyWeightLossLbs))
+        case .gainWeight:
+            return clampWeightPaceRate(viewModel.form.weeklyWeightLossLbs)
+        case .maintain:
+            return 0
+        }
+    }
+
+    private func suggestedTargetDate(currentWeight: Double, goalWeight: Double, goal: OnboardingForm.Goal) -> Date {
+        let delta = abs(goalWeight - currentWeight)
+        let weeklyRate = healthyWeeklyRate(for: goal)
+
+        guard weeklyRate > 0 else {
+            return Calendar.current.date(byAdding: .weekOfYear, value: 12, to: Date()) ?? Date()
+        }
+
+        let weeksNeeded = delta / weeklyRate
+        let daysNeeded = Int(ceil(weeksNeeded * 7))
+        let clampedDays = max(14, min(daysNeeded, 730))
+        return Calendar.current.date(byAdding: .day, value: clampedDays, to: Date()) ?? Date()
+    }
+
+    private func calculateMacroTargets(
+        weightLbs: Double,
+        heightFeet: Int,
+        heightInches: Int,
+        age: Int,
+        sex: OnboardingForm.Sex,
+        trainingDaysPerWeek: Int,
+        goal: OnboardingForm.Goal,
+        goalWeightLbs: Double? = nil
+    ) -> MacroTotals {
+        let weightKg = weightLbs * 0.453592
+        let heightCm = (Double(heightFeet) * 30.48) + (Double(heightInches) * 2.54)
+
+        let bmr: Double
+        switch sex {
+        case .male:
+            bmr = (10 * weightKg) + (6.25 * heightCm) - (5 * Double(age)) + 5
+        case .female:
+            bmr = (10 * weightKg) + (6.25 * heightCm) - (5 * Double(age)) - 161
+        case .other, .preferNotToSay:
+            bmr = (10 * weightKg) + (6.25 * heightCm) - (5 * Double(age)) - 78
+        }
+
+        let activityMultiplier: Double
+        switch trainingDaysPerWeek {
+        case ..<3:
+            activityMultiplier = 1.375
+        case 3...4:
+            activityMultiplier = 1.55
+        case 5...6:
+            activityMultiplier = 1.725
+        default:
+            activityMultiplier = 1.9
+        }
+
+        let maintenanceCalories = bmr * activityMultiplier
+
+        let calories: Double
+        switch goal {
+        case .maintain:
+            calories = maintenanceCalories
+        case .loseWeight, .loseWeightFast:
+            calories = maintenanceCalories * 0.8
+        case .gainWeight:
+            calories = maintenanceCalories * 1.15
+        }
+
+        let macroWeightLbs: Double
+        if goal == .gainWeight, let goalWeightLbs, goalWeightLbs > 0 {
+            macroWeightLbs = goalWeightLbs
+        } else {
+            macroWeightLbs = weightLbs
+        }
+
+        let fats = weightLbs * 0.3
+        let protein = macroWeightLbs * 1.0
+        let carbs = macroWeightLbs * 1.0
+
+        return MacroTotals(calories: calories, protein: protein, carbs: carbs, fats: fats)
+    }
+
+    private func roundedMacros(_ macros: MacroTotals) -> MacroTotals {
+        MacroTotals(
+            calories: macros.calories.rounded(),
+            protein: macros.protein.rounded(),
+            carbs: macros.carbs.rounded(),
+            fats: macros.fats.rounded()
+        )
     }
 
     private func symbolForGoal(_ option: MainGoalOption) -> String {
@@ -1843,10 +2711,8 @@ struct OnboardingReplicaView: View {
             return "dumbbell.fill"
         case .loseFat:
             return "flame.fill"
-        case .recomp:
-            return "arrow.triangle.2.circlepath"
-        case .performance:
-            return "bolt.fill"
+        case .maintain:
+            return "equal.circle.fill"
         }
     }
 
@@ -1891,6 +2757,12 @@ struct OnboardingReplicaView: View {
         switch step {
         case .claim, .paywall:
             viewModel.showEmailSignup = true
+        case .personalizedGoals:
+            Task {
+                await applyPersonalizedMacrosIfEnabled()
+                if Task.isCancelled { return }
+                goNext()
+            }
         default:
             goNext()
         }
@@ -1921,6 +2793,25 @@ struct OnboardingReplicaView: View {
         currentWeight = viewModel.form.weightLbs
         targetWeight = viewModel.form.goalWeightLbs
         foodNotes = viewModel.form.foodAllergies
+
+        let savedCalories = Int(viewModel.form.macroCalories)
+        let savedProtein = Int(viewModel.form.macroProtein)
+        let savedCarbs = Int(viewModel.form.macroCarbs)
+        let savedFats = Int(viewModel.form.macroFats)
+        let hasSavedMacros = (savedCalories ?? 0) > 0 || (savedProtein ?? 0) > 0 || (savedCarbs ?? 0) > 0 || (savedFats ?? 0) > 0
+        if hasSavedMacros {
+            editedCalories = "\(max(savedCalories ?? 0, 0))"
+            editedProtein = "\(max(savedProtein ?? 0, 0))"
+            editedCarbs = "\(max(savedCarbs ?? 0, 0))"
+            editedFats = "\(max(savedFats ?? 0, 0))"
+            goalsMacrosInitialized = true
+        } else {
+            editedCalories = ""
+            editedProtein = ""
+            editedCarbs = ""
+            editedFats = ""
+            goalsMacrosInitialized = false
+        }
 
         if let duration = ReplicaDurationOption(rawValue: viewModel.form.workoutDurationMinutes) {
             selectedDuration = duration
@@ -1989,9 +2880,212 @@ struct OnboardingReplicaView: View {
     }
 }
 
+private struct PersonalizedGoalsChartView: View {
+    let startWeight: Double
+    let targetWeight: Double
+    let startDate: Date
+    let targetDate: Date
+    let accent: Color
+    let primaryText: Color
+    let gridTint: Color
+
+    private let chartInsets = EdgeInsets(top: 12, leading: 38, bottom: 24, trailing: 12)
+    private static let monthFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM"
+        return formatter
+    }()
+
+    var body: some View {
+        GeometryReader { proxy in
+            let size = proxy.size
+            let chartRect = CGRect(
+                x: chartInsets.leading,
+                y: chartInsets.top,
+                width: size.width - chartInsets.leading - chartInsets.trailing,
+                height: size.height - chartInsets.top - chartInsets.bottom
+            )
+            let weights = projectionWeights()
+            let scale = weightScale(for: weights)
+            let points = projectionPoints(weights: weights, scale: scale, in: chartRect)
+            let yLabels = axisLabels(min: scale.min, max: scale.max)
+            let monthLabels = monthMarkers()
+            let xFractions: [CGFloat] = [0.25, 0.5, 0.75]
+
+            ZStack {
+                Path { path in
+                    for index in 0...3 {
+                        let y = chartRect.minY + chartRect.height * CGFloat(index) / 3
+                        path.move(to: CGPoint(x: chartRect.minX, y: y))
+                        path.addLine(to: CGPoint(x: chartRect.maxX, y: y))
+                    }
+                    for fraction in xFractions {
+                        let x = chartRect.minX + chartRect.width * fraction
+                        path.move(to: CGPoint(x: x, y: chartRect.minY))
+                        path.addLine(to: CGPoint(x: x, y: chartRect.maxY))
+                    }
+                }
+                .stroke(gridTint.opacity(0.16), lineWidth: 1)
+
+                if points.count > 1 {
+                    areaPath(points: points, in: chartRect)
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    accent.opacity(0.26),
+                                    accent.opacity(0.04)
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
+
+                    curvePath(points: points)
+                        .stroke(
+                            accent,
+                            style: StrokeStyle(
+                                lineWidth: 3,
+                                lineCap: .round,
+                                lineJoin: .round
+                            )
+                        )
+
+                    ForEach(points.indices, id: \.self) { index in
+                        Circle()
+                            .fill(Color.white)
+                            .frame(width: index == points.count - 1 ? 14 : 12, height: index == points.count - 1 ? 14 : 12)
+                            .overlay(
+                                Circle()
+                                    .stroke(accent, lineWidth: 3)
+                            )
+                            .position(points[index])
+                    }
+                }
+
+                ForEach(yLabels.indices, id: \.self) { index in
+                    let y = chartRect.minY + chartRect.height * CGFloat(index) / 3
+                    Text(yLabels[index])
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(primaryText.opacity(0.58))
+                        .position(x: chartRect.minX - 14, y: y)
+                }
+
+                ForEach(monthLabels.indices, id: \.self) { index in
+                    let x = chartRect.minX + chartRect.width * xFractions[index]
+                    Text(monthLabels[index])
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(primaryText.opacity(0.58))
+                        .position(x: x, y: chartRect.maxY + 14)
+                }
+            }
+        }
+    }
+
+    private func projectionWeights() -> [Double] {
+        let steps: [Double] = [0, 0.22, 0.5, 0.78, 1]
+        let delta = targetWeight - startWeight
+        return steps.map { step in
+            let eased: Double
+            if delta < 0 {
+                eased = 1 - pow(1 - step, 2.2)
+            } else if delta > 0 {
+                eased = pow(step, 1.6)
+            } else {
+                eased = step
+            }
+            return startWeight + delta * eased
+        }
+    }
+
+    private func weightScale(for weights: [Double]) -> (min: Double, max: Double) {
+        let minValue = min(weights.min() ?? startWeight, startWeight, targetWeight)
+        let maxValue = max(weights.max() ?? startWeight, startWeight, targetWeight)
+        let padding = max(2.0, abs(maxValue - minValue) * 0.15)
+        return (minValue - padding, maxValue + padding)
+    }
+
+    private func projectionPoints(weights: [Double], scale: (min: Double, max: Double), in rect: CGRect) -> [CGPoint] {
+        guard weights.count > 1 else { return [] }
+        let range = max(scale.max - scale.min, 1)
+        let stepX = rect.width / CGFloat(weights.count - 1)
+        return weights.enumerated().map { index, weight in
+            let normalized = (weight - scale.min) / range
+            let x = rect.minX + CGFloat(index) * stepX
+            let y = rect.maxY - CGFloat(normalized) * rect.height
+            return CGPoint(x: x, y: y)
+        }
+    }
+
+    private func axisLabels(min: Double, max: Double) -> [String] {
+        let steps = 3
+        let stepValue = (max - min) / Double(steps)
+        return (0...steps).map { index in
+            formatWeight(max - stepValue * Double(index))
+        }
+    }
+
+    private func monthMarkers() -> [String] {
+        let calendar = Calendar.current
+        let totalDays = max(1, calendar.dateComponents([.day], from: startDate, to: targetDate).day ?? 0)
+        let offsets = [totalDays / 3, (totalDays * 2) / 3, totalDays].map { max(1, $0) }
+        return offsets.compactMap { offset in
+            let date = calendar.date(byAdding: .day, value: offset, to: startDate) ?? startDate
+            return Self.monthFormatter.string(from: date)
+        }
+    }
+
+    private func curvePath(points: [CGPoint]) -> Path {
+        var path = Path()
+        guard points.count > 1 else { return path }
+        path.move(to: points[0])
+        for index in 0..<(points.count - 1) {
+            let p0 = index == 0 ? points[index] : points[index - 1]
+            let p1 = points[index]
+            let p2 = points[index + 1]
+            let p3 = index + 2 < points.count ? points[index + 2] : points[index + 1]
+            let control1 = CGPoint(
+                x: p1.x + (p2.x - p0.x) / 6,
+                y: p1.y + (p2.y - p0.y) / 6
+            )
+            let control2 = CGPoint(
+                x: p2.x - (p3.x - p1.x) / 6,
+                y: p2.y - (p3.y - p1.y) / 6
+            )
+            path.addCurve(to: p2, control1: control1, control2: control2)
+        }
+        return path
+    }
+
+    private func areaPath(points: [CGPoint], in rect: CGRect) -> Path {
+        var path = curvePath(points: points)
+        guard let first = points.first, let last = points.last else { return path }
+        path.addLine(to: CGPoint(x: last.x, y: rect.maxY))
+        path.addLine(to: CGPoint(x: first.x, y: rect.maxY))
+        path.closeSubpath()
+        return path
+    }
+
+    private func formatWeight(_ value: Double) -> String {
+        let rounded = (value * 10).rounded() / 10
+        if rounded.truncatingRemainder(dividingBy: 1) == 0 {
+            return "\(Int(rounded))"
+        }
+        return String(format: "%.1f", rounded)
+    }
+}
+
 private struct ProjectionChartView: View {
+    @Environment(\.colorScheme) private var colorScheme
     private let withAI: [CGFloat] = [0.18, 0.42, 0.62, 0.73, 0.80, 0.84]
     private let traditional: [CGFloat] = [0.18, 0.18, 0.20, 0.24, 0.30, 0.38]
+
+    private var onboardingPrimaryText: Color {
+        colorScheme == .dark ? .white : .black
+    }
+
+    private var onboardingSurfaceTint: Color {
+        colorScheme == .dark ? .white : .black
+    }
 
     var body: some View {
         VStack(spacing: 10) {
@@ -2011,7 +3105,7 @@ private struct ProjectionChartView: View {
                         path.move(to: CGPoint(x: 0, y: baselineY))
                         path.addLine(to: CGPoint(x: width, y: baselineY))
                     }
-                    .stroke(Color.white.opacity(0.15), lineWidth: 1)
+                    .stroke(onboardingSurfaceTint.opacity(0.15), lineWidth: 1)
 
                     linePath(points: withAI, width: width, height: height)
                         .stroke(Color.green, style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round))
@@ -2029,7 +3123,7 @@ private struct ProjectionChartView: View {
                 ForEach(1...6, id: \.self) { month in
                     Text("M\(month)")
                         .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(.white.opacity(0.6))
+                        .foregroundColor(onboardingPrimaryText.opacity(0.6))
                         .frame(maxWidth: .infinity)
                 }
             }
@@ -2043,7 +3137,7 @@ private struct ProjectionChartView: View {
                 .frame(width: 8, height: 8)
             Text(text)
                 .font(.system(size: 12, weight: .semibold))
-                .foregroundColor(.white.opacity(0.85))
+                .foregroundColor(onboardingPrimaryText.opacity(0.85))
         }
     }
 
@@ -2072,5 +3166,25 @@ private struct ProjectionChartView: View {
                     .position(x: x, y: y)
             }
         }
+    }
+}
+
+private struct FadeSlideModifier: ViewModifier {
+    let y: CGFloat
+    let opacity: Double
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(opacity)
+            .offset(y: y)
+    }
+}
+
+private extension AnyTransition {
+    static func fadeSlide(y: CGFloat) -> AnyTransition {
+        .modifier(
+            active: FadeSlideModifier(y: y, opacity: 0),
+            identity: FadeSlideModifier(y: 0, opacity: 1)
+        )
     }
 }

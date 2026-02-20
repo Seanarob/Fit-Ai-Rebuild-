@@ -4,11 +4,18 @@ struct CheckinPhoto: Decodable, Identifiable {
     let id = UUID()
     let url: String
     let type: String?
+    let date: String?
 
     enum CodingKeys: String, CodingKey {
         case url
         case type
+        case date
     }
+}
+
+enum CheckinPhotoRetention: String {
+    case store = "store"
+    case deleteAfterScan = "delete_after_scan"
 }
 
 struct CheckinSummaryMeta: Decodable {
@@ -568,7 +575,8 @@ struct ProgressAPIService {
         checkinDate: Date,
         photoType: String?,
         photoCategory: String?,
-        imageData: Data
+        imageData: Data,
+        persistPhoto: Bool = true
     ) async throws -> ProgressPhotoUploadResponse {
         let url = BackendConfig.baseURL.appendingPathComponent("progress/photos")
         var request = URLRequest(url: url)
@@ -591,6 +599,12 @@ struct ProgressAPIService {
         if let photoCategory {
             appendFormField(named: "photo_category", value: photoCategory, to: &body, boundary: boundary)
         }
+        appendFormField(
+            named: "persist_photo",
+            value: persistPhoto ? "true" : "false",
+            to: &body,
+            boundary: boundary
+        )
         appendFileField(
             named: "photo",
             filename: "checkin.jpg",
@@ -676,7 +690,8 @@ struct ProgressAPIService {
         userId: String,
         checkinDate: Date,
         adherence: [String: Any],
-        photos: [[String: String]]
+        photos: [[String: String]],
+        photoRetention: CheckinPhotoRetention = .store
     ) async throws -> CheckinSubmitResponse {
         let url = BackendConfig.baseURL.appendingPathComponent("checkins/")
         var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
@@ -696,6 +711,10 @@ struct ProgressAPIService {
 
         let photoUrls = photos.compactMap { $0["url"] }
         var payload: [String: Any] = ["adherence": adherence]
+        payload["photo_retention"] = photoRetention.rawValue
+        if !photos.isEmpty {
+            payload["photos"] = photos
+        }
         if !photoUrls.isEmpty {
             payload["photo_urls"] = photoUrls
         }

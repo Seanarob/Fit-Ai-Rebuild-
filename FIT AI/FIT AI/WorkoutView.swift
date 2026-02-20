@@ -10,6 +10,11 @@ struct WorkoutView: View {
         var id: String { rawValue }
     }
 
+    private enum SwapDestination {
+        case generate
+        case create
+    }
+
     @Binding private var intent: WorkoutTabIntent?
     @State private var mode: Mode = .generate
     @State private var selectedMuscleGroups: Set<String> = [
@@ -52,6 +57,13 @@ struct WorkoutView: View {
     @State private var alertTitle = ""
     @State private var alertMessage = ""
     @State private var showTunePlanSheet = false
+    @State private var showSwapGeneratePlanSheet = false
+    @State private var pendingSwapDestination: SwapDestination?
+    @State private var workoutBuilderScrollTrigger = 0
+    @State private var spotlightCreateBuilder = false
+    @State private var showSplitEditorSheet = false
+    @State private var showWorkoutWelcome = false
+    @State private var hasSplitPreferences = false
     @State private var todaysWorkout: WorkoutCompletion?
     @State private var showRecoveryAlert = false
     @State private var recoveryInfo: (title: String, exerciseCount: Int, elapsed: Int, savedAt: Date)?
@@ -59,10 +71,16 @@ struct WorkoutView: View {
     @State private var coachPickTitle: String?
     @State private var coachPickExercises: [WorkoutExerciseSession] = []
     @State private var splitSnapshot = SplitSnapshot()
+    @State private var splitPlanExerciseCache: [String: [String]] = [:]
+    @State private var splitGenerationTask: Task<Void, Never>?
+    @State private var isGeneratingSplitWorkouts = false
+    @State private var todaysTrainingSnapshot: TodayTrainingSnapshot?
+    @State private var isTodaysTrainingExpanded = false
     @State private var selectedWeeklyDay: WeeklyDayDetail?
     @State private var weekOffset: Int = 0
 
     let userId: String
+    @EnvironmentObject private var guidedTour: GuidedTourCoordinator
 
     init(userId: String, intent: Binding<WorkoutTabIntent?> = .constant(nil)) {
         self.userId = userId
@@ -70,279 +88,438 @@ struct WorkoutView: View {
     }
 
     var body: some View {
-        ZStack {
-            FitTheme.backgroundGradient
-                .ignoresSafeArea()
+        let base = AnyView(
+            ZStack {
+                FitTheme.backgroundGradient
+                    .ignoresSafeArea()
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    WorkoutStreakBadge(goalOverride: splitSnapshot.daysPerWeek, goalLabel: "session")
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 20) {
+                            WorkoutStreakBadge(goalOverride: splitSnapshot.daysPerWeek, goalLabel: "session")
 
-                    weeklySplitHeader
-                    workoutBuilderSection
+                            weeklySplitHeader
+                                .tourTarget(.workoutWeeklySplit)
+                                .id(GuidedTourTargetID.workoutWeeklySplit)
+                            workoutBuilderSection
+                                .tourTarget(.workoutBuilder)
+                                .id(GuidedTourTargetID.workoutBuilder)
 
-                    if let loadError {
-                        Text(loadError)
-                            .font(FitFont.body(size: 12))
+                            if let loadError {
+                                Text(loadError)
+                                    .font(FitFont.body(size: 12))
+                                    .foregroundColor(FitTheme.textSecondary)
+                            }
+                        }
+                        .padding(.horizontal, 20)
+                        .padding(.top, 12)
+                        .padding(.bottom, 12)
+                    }
+                    .onAppear {
+                        scrollToGuidedTourTarget(using: proxy)
+                    }
+                    .onChange(of: guidedTour.currentStep?.id) { _ in
+                        scrollToGuidedTourTarget(using: proxy)
+                    }
+                    .onChange(of: workoutBuilderScrollTrigger) { _ in
+                        DispatchQueue.main.async {
+                            withAnimation(MotionTokens.springSoft) {
+                                proxy.scrollTo(GuidedTourTargetID.workoutBuilder, anchor: .center)
+                            }
+                        }
+                    }
+                }
+            }
+        )
+
+        let lifecycle = AnyView(
+            base
+                .task {
+                    await loadWorkouts()
+                    todaysWorkout = WorkoutCompletionStore.todaysCompletion()
+                    todaysTrainingSnapshot = TodayTrainingStore.todaysTraining()
+                    refreshSplitSnapshot()
+                    await preloadSplitPlanExerciseNamesIfNeeded()
+                    
+                    // Check for recoverable workout session
+                    if WorkoutSessionStore.hasRecoverableSession() {
+                        recoveryInfo = WorkoutSessionStore.getRecoveryInfo()
+                        showRecoveryAlert = true
+                    }
+                }
+                .onAppear {
+                    Task {
+                        await loadWorkouts()
+                        await preloadSplitPlanExerciseNamesIfNeeded()
+                    }
+                    todaysTrainingSnapshot = TodayTrainingStore.todaysTraining()
+                    refreshSplitSnapshot()
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .fitAIWorkoutCompleted)) { notification in
+                    if let completion = notification.userInfo?["completion"] as? WorkoutCompletion {
+                        todaysWorkout = completion
+                    } else {
+                        todaysWorkout = WorkoutCompletionStore.todaysCompletion()
+                    }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .fitAITodayTrainingUpdated)) { _ in
+                    todaysTrainingSnapshot = TodayTrainingStore.todaysTraining()
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .fitAISplitUpdated)) { _ in
+                    refreshSplitSnapshot()
+                    Task {
+                        await preloadSplitPlanExerciseNamesIfNeeded()
+                    }
+                }
+                .onDisappear {
+                    splitGenerationTask?.cancel()
+                    splitGenerationTask = nil
+                }
+        )
+
+        let withModals = AnyView(
+            lifecycle
+                .sheet(isPresented: $isExercisePickerPresented) {
+                    ExercisePickerModal(
+                        selectedNames: Set(draftExercises.map { $0.name }),
+                        onAdd: { exercise in
+                            let newExercise = WorkoutExerciseDraft(
+                                name: exercise.name,
+                                muscleGroup: exercise.muscleGroups.first ?? "General",
+                                equipment: exercise.equipment.first ?? "Bodyweight",
+                                sets: 3,
+                                reps: 10,
+                                restSeconds: 90,
+                                notes: ""
+                            )
+                            draftExercises.append(newExercise)
+                        },
+                        onClose: { isExercisePickerPresented = false }
+                    )
+                    .presentationDetents([.large])
+                }
+                .sheet(isPresented: $isGeneratedSwapPresented) {
+                    ExercisePickerModal(
+                        selectedNames: Set(generatedExercises.map { $0.name }),
+                        onAdd: { exercise in
+                            guard let index = generatedSwapIndex else { return }
+                            let restSeconds = isCompoundExercise(exercise.name) ? 90 : 60
+                            var replacement = WorkoutExerciseSession(
+                                name: exercise.name,
+                                sets: WorkoutSetEntry.batch(reps: "10", weight: "", count: 4),
+                                restSeconds: restSeconds
+                            )
+                            replacement.warmupRestSeconds = min(60, replacement.restSeconds)
+                            if generatedExercises.indices.contains(index) {
+                                generatedExercises[index] = replacement
+                            }
+                            isGeneratedSwapPresented = false
+                        },
+                        onClose: { isGeneratedSwapPresented = false }
+                    )
+                    .presentationDetents([.large])
+                }
+                .sheet(
+                    isPresented: Binding(
+                        get: { editingGeneratedIndex != nil },
+                        set: { isPresented in
+                            if !isPresented {
+                                editingGeneratedIndex = nil
+                            }
+                        }
+                    )
+                ) {
+                    if let index = editingGeneratedIndex, generatedExercises.indices.contains(index) {
+                        GeneratedExerciseEditor(
+                            exercise: $generatedExercises[index],
+                            onClose: { editingGeneratedIndex = nil }
+                        )
+                        .presentationDetents([.medium, .large])
+                    } else {
+                        EmptyView()
+                    }
+                }
+                .sheet(isPresented: $isTemplateActionsPresented) {
+                    if let template = selectedTemplate {
+                        WorkoutTemplateActionsSheet(
+                            template: template,
+                            onStart: {
+                                Task { @MainActor in
+                                    await startSession(from: template)
+                                }
+                            },
+                            onEdit: {
+                                Task { @MainActor in
+                                    await loadTemplateForEditing(template)
+                                }
+                            },
+                            onDuplicate: {
+                                Task { @MainActor in
+                                    await duplicateTemplate(template)
+                                }
+                            },
+                            onDelete: {
+                                pendingDeleteTemplate = template
+                                showDeleteAlert = true
+                            }
+                        )
+                        .presentationDetents([.medium])
+                        .presentationDragIndicator(.hidden)
+                    } else {
+                        Text("Loading...")
                             .foregroundColor(FitTheme.textSecondary)
                     }
                 }
-                .padding(.horizontal, 20)
-                .padding(.top, 12)
-                .padding(.bottom, 12)
-            }
-        }
-        .task {
-            await loadWorkouts()
-            todaysWorkout = WorkoutCompletionStore.todaysCompletion()
-            refreshSplitSnapshot()
-            
-            // Check for recoverable workout session
-            if WorkoutSessionStore.hasRecoverableSession() {
-                recoveryInfo = WorkoutSessionStore.getRecoveryInfo()
-                showRecoveryAlert = true
-            }
-        }
-        .onAppear {
-            Task {
-                await loadWorkouts()
-            }
-            refreshSplitSnapshot()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .fitAIWorkoutCompleted)) { notification in
-            if let completion = notification.userInfo?["completion"] as? WorkoutCompletion {
-                todaysWorkout = completion
-            } else {
-                todaysWorkout = WorkoutCompletionStore.todaysCompletion()
-            }
-        }
-        .sheet(isPresented: $isExercisePickerPresented) {
-            ExercisePickerModal(
-                selectedNames: Set(draftExercises.map { $0.name }),
-                onAdd: { exercise in
-                    let newExercise = WorkoutExerciseDraft(
-                        name: exercise.name,
-                        muscleGroup: exercise.muscleGroups.first ?? "General",
-                        equipment: exercise.equipment.first ?? "Bodyweight",
-                        sets: 3,
-                        reps: 10,
-                        restSeconds: 90,
-                        notes: ""
-                    )
-                    draftExercises.append(newExercise)
-                },
-                onClose: { isExercisePickerPresented = false }
-            )
-            .presentationDetents([.large])
-        }
-        .sheet(isPresented: $isGeneratedSwapPresented) {
-            ExercisePickerModal(
-                selectedNames: Set(generatedExercises.map { $0.name }),
-                onAdd: { exercise in
-                    guard let index = generatedSwapIndex else { return }
-                    let restSeconds = isCompoundExercise(exercise.name) ? 90 : 60
-                    var replacement = WorkoutExerciseSession(
-                        name: exercise.name,
-                        sets: WorkoutSetEntry.batch(reps: "10", weight: "", count: 4),
-                        restSeconds: restSeconds
-                    )
-                    replacement.warmupRestSeconds = min(60, replacement.restSeconds)
-                    if generatedExercises.indices.contains(index) {
-                        generatedExercises[index] = replacement
-                    }
-                    isGeneratedSwapPresented = false
-                },
-                onClose: { isGeneratedSwapPresented = false }
-            )
-            .presentationDetents([.large])
-        }
-        .sheet(
-            isPresented: Binding(
-                get: { editingGeneratedIndex != nil },
-                set: { isPresented in
-                    if !isPresented {
-                        editingGeneratedIndex = nil
-                    }
-                }
-            )
-        ) {
-            if let index = editingGeneratedIndex, generatedExercises.indices.contains(index) {
-                GeneratedExerciseEditor(
-                    exercise: $generatedExercises[index],
-                    onClose: { editingGeneratedIndex = nil }
-                )
-                .presentationDetents([.medium, .large])
-            } else {
-                EmptyView()
-            }
-        }
-        .sheet(isPresented: $isTemplateActionsPresented) {
-            if let template = selectedTemplate {
-                WorkoutTemplateActionsSheet(
-                    template: template,
-                    onStart: {
-                        Task { @MainActor in
-                            await startSession(from: template)
-                        }
-                    },
-                    onEdit: {
-                        Task { @MainActor in
-                            await loadTemplateForEditing(template)
-                        }
-                    },
-                    onDuplicate: {
-                        Task { @MainActor in
-                            await duplicateTemplate(template)
-                        }
-                    },
-                    onDelete: {
-                        pendingDeleteTemplate = template
-                        showDeleteAlert = true
-                    }
-                )
-                .presentationDetents([.medium])
-                .presentationDragIndicator(.hidden)
-            } else {
-                Text("Loading...")
-                    .foregroundColor(FitTheme.textSecondary)
-            }
-        }
-        .sheet(isPresented: $isTemplatePreviewPresented) {
-            if let template = previewTemplate {
-                WorkoutTemplatePreviewSheet(
-                    template: template,
-                    exercises: previewExercises,
-                    isLoading: isPreviewLoading,
-                    errorMessage: previewError,
-                    onStart: {
-                        isTemplatePreviewPresented = false
-                        Task {
-                            await startSessionFromPreview()
-                        }
-                    },
-                    onClose: {
-                        isTemplatePreviewPresented = false
-                    }
-                )
-                .presentationDetents([.medium, .large])
-            } else {
-                Text("Loading...")
-                    .foregroundColor(FitTheme.textSecondary)
-            }
-        }
-        .sheet(isPresented: $showTunePlanSheet) {
-            WorkoutTunePlanSheet(
-                selectedMuscleGroups: $selectedMuscleGroups,
-                selectedEquipment: $selectedEquipment,
-                selectedDurationMinutes: $selectedDurationMinutes
-            )
-            .presentationDetents([.large])
-        }
-        .fullScreenCover(isPresented: $showActiveSession) {
-            Group {
-                if let session = activeSession, !session.exercises.isEmpty {
-                    WorkoutSessionView(
-                        userId: userId,
-                        title: session.title,
-                        sessionId: session.sessionId,
-                        exercises: session.exercises
-                    )
-                } else {
-                    // Fallback view if session is invalid
-                    VStack(spacing: 20) {
-                        Image(systemName: "exclamationmark.triangle")
-                            .font(.system(size: 48))
-                            .foregroundColor(.orange)
-                        Text("Unable to load workout")
-                            .font(FitFont.heading(size: 20))
-                            .foregroundColor(FitTheme.textPrimary)
-                        Text("Please try again")
-                            .font(FitFont.body(size: 14))
+                .sheet(isPresented: $isTemplatePreviewPresented) {
+                    if let template = previewTemplate {
+                        WorkoutTemplatePreviewSheet(
+                            template: template,
+                            exercises: previewExercises,
+                            isLoading: isPreviewLoading,
+                            errorMessage: previewError,
+                            onStart: {
+                                isTemplatePreviewPresented = false
+                                Task {
+                                    await startSessionFromPreview()
+                                }
+                            },
+                            onClose: {
+                                isTemplatePreviewPresented = false
+                            }
+                        )
+                        .presentationDetents([.medium, .large])
+                    } else {
+                        Text("Loading...")
                             .foregroundColor(FitTheme.textSecondary)
-                        Button("Dismiss") {
-                            showActiveSession = false
-                            activeSession = nil
+                    }
+                }
+                .sheet(isPresented: $showTunePlanSheet) {
+                    WorkoutTunePlanSheet(
+                        selectedMuscleGroups: $selectedMuscleGroups,
+                        selectedEquipment: $selectedEquipment,
+                        selectedDurationMinutes: $selectedDurationMinutes
+                    )
+                    .presentationDetents([.large])
+                }
+                .sheet(isPresented: $showSwapGeneratePlanSheet) {
+                    WorkoutTunePlanSheet(
+                        selectedMuscleGroups: $selectedMuscleGroups,
+                        selectedEquipment: $selectedEquipment,
+                        selectedDurationMinutes: $selectedDurationMinutes,
+                        onGenerate: {
+                            await generateWorkout()
                         }
-                        .foregroundColor(FitTheme.accent)
-                        .padding(.top, 20)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(FitTheme.backgroundGradient.ignoresSafeArea())
+                    )
+                    .presentationDetents([.large])
                 }
-            }
-        }
-        .sheet(isPresented: $isSwapSheetPresented) {
-            WorkoutSwapSheet(
-                templates: templates,
-                onSelect: { template in
-                    Task {
-                        await startSession(from: template)
-                    }
-                    isSwapSheetPresented = false
-                },
-                onClose: { isSwapSheetPresented = false }
-            )
-        }
-        .alert("Delete workout?", isPresented: $showDeleteAlert) {
-            Button("Delete", role: .destructive) {
-                if let template = pendingDeleteTemplate {
-                    Task {
-                        await deleteTemplate(template)
+                .fullScreenCover(isPresented: $showSplitEditorSheet) {
+                    SplitSetupFlowView(
+                        currentMode: splitSnapshot.mode,
+                        currentDaysPerWeek: splitSnapshot.daysPerWeek,
+                        currentTrainingDays: splitSnapshot.trainingDays,
+                        currentSplitType: splitSnapshot.splitType,
+                        currentDayPlans: splitSnapshot.dayPlans,
+                        currentFocus: splitSnapshot.focus,
+                        templates: visibleTemplates,
+                        isEditing: hasSplitPreferences,
+                        onSave: { mode, daysPerWeek, trainingDays, splitType, dayPlans, focus in
+                            applySplitPreferences(
+                                mode: mode,
+                                daysPerWeek: daysPerWeek,
+                                trainingDays: trainingDays,
+                                splitType: splitType,
+                                dayPlans: dayPlans,
+                                focus: focus
+                            )
+                        }
+                    )
+                }
+                .fullScreenCover(isPresented: $showWorkoutWelcome) {
+                    WorkoutWelcomeView(
+                        onGetStarted: {
+                            showWorkoutWelcome = false
+                            UserDefaults.standard.set(true, forKey: hasSeenWorkoutWelcomeKey)
+                            // Small delay to allow modal to dismiss before showing split editor
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                                showSplitEditorSheet = true
+                            }
+                        },
+                        onDismiss: {
+                            showWorkoutWelcome = false
+                            UserDefaults.standard.set(true, forKey: hasSeenWorkoutWelcomeKey)
+                        }
+                    )
+                }
+                .fullScreenCover(isPresented: $showActiveSession) {
+                    Group {
+                        if let session = activeSession, !session.exercises.isEmpty {
+                            WorkoutSessionView(
+                                userId: userId,
+                                title: session.title,
+                                sessionId: session.sessionId,
+                                exercises: session.exercises
+                            )
+                        } else {
+                            // Fallback view if session is invalid
+                            VStack(spacing: 20) {
+                                Image(systemName: "exclamationmark.triangle")
+                                    .font(.system(size: 48))
+                                    .foregroundColor(.orange)
+                                Text("Unable to load workout")
+                                    .font(FitFont.heading(size: 20))
+                                    .foregroundColor(FitTheme.textPrimary)
+                                Text("Please try again")
+                                    .font(FitFont.body(size: 14))
+                                    .foregroundColor(FitTheme.textSecondary)
+                                Button("Dismiss") {
+                                    showActiveSession = false
+                                    activeSession = nil
+                                }
+                                .foregroundColor(FitTheme.accent)
+                                .padding(.top, 20)
+                            }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .background(FitTheme.backgroundGradient.ignoresSafeArea())
+                        }
                     }
                 }
-                pendingDeleteTemplate = nil
-            }
-            Button("Cancel", role: .cancel) {
-                pendingDeleteTemplate = nil
-            }
-        } message: {
-            Text("This removes the saved template.")
+                .sheet(isPresented: $isSwapSheetPresented) {
+                    WorkoutSwapSheet(
+                        templates: templates,
+                        onSelect: { template in
+                            Task {
+                                await startSession(from: template)
+                            }
+                            isSwapSheetPresented = false
+                        },
+                        onGenerate: {
+                            pendingSwapDestination = .generate
+                            isSwapSheetPresented = false
+                        },
+                        onCreate: {
+                            pendingSwapDestination = .create
+                            isSwapSheetPresented = false
+                        },
+                        onClose: { isSwapSheetPresented = false }
+                    )
+                }
+        )
+
+        return AnyView(
+            withModals
+                .alert("Delete workout?", isPresented: $showDeleteAlert) {
+                    Button("Delete", role: .destructive) {
+                        if let template = pendingDeleteTemplate {
+                            Task {
+                                await deleteTemplate(template)
+                            }
+                        }
+                        pendingDeleteTemplate = nil
+                    }
+                    Button("Cancel", role: .cancel) {
+                        pendingDeleteTemplate = nil
+                    }
+                } message: {
+                    Text("This removes the saved template.")
+                }
+                .alert("Start a new template?", isPresented: $showNewTemplateAlert) {
+                    Button("Reset", role: .destructive) {
+                        resetDraftState()
+                        mode = .create
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("This will clear the current draft.")
+                }
+                .alert(alertTitle, isPresented: $showAlert) {
+                    Button("OK", role: .cancel) {}
+                } message: {
+                    Text(alertMessage)
+                }
+                .alert("Resume Workout?", isPresented: $showRecoveryAlert) {
+                    Button("Resume") {
+                        recoverSavedSession()
+                    }
+                    Button("Discard", role: .destructive) {
+                        WorkoutSessionStore.clear()
+                        recoveryInfo = nil
+                    }
+                } message: {
+                    if let info = recoveryInfo {
+                        let elapsed = formatRecoveryTime(info.elapsed)
+                        Text("You have an unfinished workout: \"\(info.title)\" with \(info.exerciseCount) exercises (\(elapsed) elapsed). Would you like to continue?")
+                    } else {
+                        Text("You have an unfinished workout. Would you like to continue?")
+                    }
+                }
+                .onChange(of: generatedExercises) { exercises in
+                    if exercises.isEmpty {
+                        generatedEstimatedMinutes = 0
+                        return
+                    }
+                    let estimate = estimateWorkoutMinutes(exercises)
+                    generatedEstimatedMinutes = clampedEstimateMinutes(
+                        estimate,
+                        targetMinutes: selectedDurationMinutes
+                    )
+                }
+                .onChange(of: intent) { newValue in
+                    guard let newValue else { return }
+                    Task {
+                        await handleIntent(newValue)
+                    }
+                }
+                .onChange(of: isSwapSheetPresented) { isPresented in
+                    guard !isPresented else { return }
+                    guard let destination = pendingSwapDestination else { return }
+                    pendingSwapDestination = nil
+                    routeFromSwap(destination)
+                }
+        )
+    }
+
+    private func scrollToGuidedTourTarget(using proxy: ScrollViewProxy) {
+        guard let step = guidedTour.currentStep else { return }
+        guard step.screen == .workout else { return }
+        guard let target = step.target else { return }
+
+        let anchor: UnitPoint
+        switch target {
+        case .workoutWeeklySplit:
+            anchor = .top
+        case .workoutBuilder:
+            anchor = .center
+        default:
+            return
         }
-        .alert("Start a new template?", isPresented: $showNewTemplateAlert) {
-            Button("Reset", role: .destructive) {
-                resetDraftState()
+
+        DispatchQueue.main.async {
+            withAnimation(.easeInOut(duration: 0.3)) {
+                proxy.scrollTo(target, anchor: anchor)
+            }
+        }
+    }
+
+    private func routeFromSwap(_ destination: SwapDestination) {
+        switch destination {
+        case .generate:
+            withAnimation(MotionTokens.springSoft) {
+                mode = .generate
+            }
+            workoutBuilderScrollTrigger += 1
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                showSwapGeneratePlanSheet = true
+            }
+        case .create:
+            withAnimation(MotionTokens.springSoft) {
                 mode = .create
             }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This will clear the current draft.")
-        }
-        .alert(alertTitle, isPresented: $showAlert) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(alertMessage)
-        }
-        .alert("Resume Workout?", isPresented: $showRecoveryAlert) {
-            Button("Resume") {
-                recoverSavedSession()
-            }
-            Button("Discard", role: .destructive) {
-                WorkoutSessionStore.clear()
-                recoveryInfo = nil
-            }
-        } message: {
-            if let info = recoveryInfo {
-                let elapsed = formatRecoveryTime(info.elapsed)
-                Text("You have an unfinished workout: \"\(info.title)\" with \(info.exerciseCount) exercises (\(elapsed) elapsed). Would you like to continue?")
-            } else {
-                Text("You have an unfinished workout. Would you like to continue?")
-            }
-        }
-        .onChange(of: generatedExercises) { exercises in
-            if exercises.isEmpty {
-                generatedEstimatedMinutes = 0
-                return
-            }
-            let estimate = estimateWorkoutMinutes(exercises)
-            generatedEstimatedMinutes = clampedEstimateMinutes(
-                estimate,
-                targetMinutes: selectedDurationMinutes
-            )
-        }
-        .onChange(of: intent) { newValue in
-            guard let newValue else { return }
-            Task {
-                await handleIntent(newValue)
+            workoutBuilderScrollTrigger += 1
+            spotlightCreateBuilder = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+                withAnimation(.easeOut(duration: 0.35)) {
+                    spotlightCreateBuilder = false
+                }
             }
         }
     }
@@ -358,8 +535,8 @@ struct WorkoutView: View {
 
                 Spacer()
 
-                Button(action: { }) {
-                    Image(systemName: "slider.horizontal.3")
+                Button(action: { guidedTour.startScreenTour(.workout) }) {
+                    Image(systemName: "questionmark.circle.fill")
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundColor(FitTheme.textSecondary)
                         .frame(width: 34, height: 34)
@@ -367,9 +544,45 @@ struct WorkoutView: View {
                         .clipShape(Circle())
                 }
                 .buttonStyle(.plain)
+
+                if hasSplitPreferences {
+                    Button(action: { showSplitEditorSheet = true }) {
+                        Image(systemName: "slider.horizontal.3")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(FitTheme.textSecondary)
+                            .frame(width: 34, height: 34)
+                            .background(FitTheme.cardHighlight)
+                            .clipShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    Button(action: { showSplitEditorSheet = true }) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "plus.circle.fill")
+                                .font(.system(size: 12, weight: .semibold))
+                            Text("Set up")
+                                .font(FitFont.body(size: 12, weight: .semibold))
+                        }
+                        .foregroundColor(FitTheme.buttonText)
+                        .padding(.vertical, 8)
+                        .padding(.horizontal, 12)
+                        .background(FitTheme.accent)
+                        .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
             }
 
-            weeklySplitWeekView
+            if hasSplitPreferences {
+                weeklySplitWeekView
+                if isGeneratingSplitWorkouts {
+                    Text("Generating your weekly workouts...")
+                        .font(FitFont.body(size: 12))
+                        .foregroundColor(FitTheme.textSecondary)
+                }
+            } else {
+                weeklySplitSetupCard
+            }
         }
         .padding(.top, 4)
     }
@@ -377,22 +590,21 @@ struct WorkoutView: View {
     private var weeklySplitWeekView: some View {
         return VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
-                let palette = weeklyAccentPalette
-                ForEach(Array(weekDates.enumerated()), id: \.element) { index, date in
+                let plannedColor = FitTheme.cardWorkoutAccent
+                ForEach(Array(weekDates.enumerated()), id: \.element) { _, date in
                     let label = splitLabel(for: date)
                     let status = weeklyDayStatus(for: date)
                     let dayNumber = Calendar.current.component(.day, from: date)
                     let detailId = dateKey(for: date)
                     let isSelected = selectedWeeklyDay?.id == detailId
                         || (selectedWeeklyDay == nil && Calendar.current.isDateInToday(date))
-                    let accentColor = palette[index % palette.count]
                     WeeklySplitDayCell(
                         daySymbol: shortWeekdaySymbol(for: date),
                         dayNumber: dayNumber,
                         status: status,
                         isSelected: isSelected,
                         isTrainingDay: label != nil,
-                        accentColor: accentColor,
+                        accentColor: plannedColor,
                         action: {
                             let detail = weeklyDayDetail(for: date)
                             if selectedWeeklyDay?.id == detail.id {
@@ -435,35 +647,34 @@ struct WorkoutView: View {
                     }
             )
 
-            if let day = selectedWeeklyDay {
-                WeeklySplitInlineDetailCard(
-                    day: day,
-                    completion: WorkoutCompletionStore.completion(on: day.date),
-                    onPrimaryAction: {
-                        if day.isTrainingDay {
-                            Task {
-                                await startWeeklySplitSession(for: day.date)
-                            }
-                        } else {
-                            mode = .generate
-                            Task {
-                                await generateWorkout()
-                            }
-                        }
-                    },
-                    onSwap: {
-                        isSwapSheetPresented = true
-                    },
-                    onGenerate: {
-                        mode = .generate
-                        Task {
-                            await generateWorkout()
-                        }
-                    }
-                )
-            }
         }
         .frame(maxWidth: .infinity)
+    }
+
+    private var weeklySplitSetupCard: some View {
+        WorkoutCard {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 10) {
+                    Image(systemName: "calendar.badge.plus")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundColor(FitTheme.accent)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Set up weekly split")
+                            .font(FitFont.heading(size: 18))
+                            .foregroundColor(FitTheme.textPrimary)
+                        Text("Answer a few questions to plan your workouts.")
+                            .font(FitFont.body(size: 12))
+                            .foregroundColor(FitTheme.textSecondary)
+                    }
+                    Spacer()
+                }
+
+                ActionButton(title: "Set up", style: .primary) {
+                    showSplitEditorSheet = true
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
     }
 
     private var workoutBuilderSection: some View {
@@ -642,7 +853,7 @@ struct WorkoutView: View {
                     SearchBar(text: $templateSearch, placeholder: "Search saved workouts")
 
                     HStack(spacing: 10) {
-                        SummaryPill(title: "Total", value: "\(templates.count)")
+                        SummaryPill(title: "Total", value: "\(visibleTemplates.count)")
                             .frame(maxWidth: .infinity, alignment: .leading)
                         SummaryPill(title: "Mode", value: "Manual/AI")
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -695,7 +906,23 @@ struct WorkoutView: View {
 
     private var createSection: some View {
         VStack(spacing: 18) {
-            WorkoutCard {
+            if spotlightCreateBuilder {
+                HStack(spacing: 8) {
+                    Image(systemName: "square.and.pencil")
+                        .font(.system(size: 14, weight: .semibold))
+                    Text("Create builder ready")
+                        .font(FitFont.body(size: 12, weight: .semibold))
+                    Spacer()
+                }
+                .foregroundColor(FitTheme.accent)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(FitTheme.accentSoft.opacity(0.65))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
+
+            WorkoutCard(isAccented: spotlightCreateBuilder) {
                 VStack(alignment: .leading, spacing: 16) {
                     HStack(alignment: .top) {
                         SectionHeader(title: "Template builder", subtitle: "Craft a workout from scratch.")
@@ -750,7 +977,17 @@ struct WorkoutView: View {
 
                     Divider().background(FitTheme.cardStroke)
 
-                    BuilderStepHeader(step: 3, title: "Save template", subtitle: "Ready to start lifting?")
+                    BuilderStepHeader(step: 3, title: "Start workout", subtitle: "Start now, save later if you want.")
+                    ActionButton(title: "Start Workout", style: .primary) {
+                        Task {
+                            await startDraftSession()
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+
+                    Divider().background(FitTheme.cardStroke)
+
+                    BuilderStepHeader(step: 4, title: "Save template", subtitle: "Save it for next time.")
                     ActionButton(title: saveTemplateButtonTitle, style: .primary) {
                         Task {
                             if isEditingTemplate {
@@ -770,9 +1007,13 @@ struct WorkoutView: View {
     private var filteredTemplates: [WorkoutTemplate] {
         let trimmed = templateSearch.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
-            return templates
+            return visibleTemplates
         }
-        return templates.filter { $0.title.localizedCaseInsensitiveContains(trimmed) }
+        return visibleTemplates.filter { $0.title.localizedCaseInsensitiveContains(trimmed) }
+    }
+
+    private var visibleTemplates: [WorkoutTemplate] {
+        templates.filter { $0.mode != splitGeneratedTemplateMode }
     }
 
     private var isEditingTemplate: Bool {
@@ -830,98 +1071,159 @@ struct WorkoutView: View {
     }
 
     private var trainingPreviewExercises: [String] {
+        if let snapshot = todaysTrainingSnapshot, !snapshot.exercises.isEmpty {
+            return Array(snapshot.exercises.prefix(3))
+        }
         let names = spotlightExercises.map { $0.name }.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
         return Array(names.prefix(3))
     }
 
+    @ViewBuilder
     private var todaysTrainingCard: some View {
-        let label = splitLabel(for: Date())
-        let completion = todaysWorkout ?? WorkoutCompletionStore.completion(on: Date())
-        let isCompleted = completion != nil
-        let isCoachPick = coachPickTemplateId != nil && !coachPickExercises.isEmpty
-        let titleText = coachPickTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let displayTitle = (titleText?.isEmpty == false ? titleText! : "Today's Training")
-            .replacingOccurrences(of: "Coach's Pick: ", with: "")
-            .replacingOccurrences(of: "Coaches Pick: ", with: "")
-        let subtitle = isCoachPick ? "Coaches Pick" : (label ?? "Push Day")
-        let statusText = isCompleted ? "Completed" : (isCoachPick ? "" : subtitle)
+        let selectedDate = selectedWeeklyDay?.date ?? Date()
+        let selectedDay = weeklyDayDetail(for: selectedDate)
+        let label = splitLabel(for: selectedDate)
+        let isTrainingDay = selectedDay.isTrainingDay
+        let isViewingToday = Calendar.current.isDateInToday(selectedDate)
+        let daySnapshot = isViewingToday ? todaysTrainingSnapshot : nil
+        let hasOverrideTraining = daySnapshot != nil
 
-        let displayList: [String]
-        if let completion, !completion.exercises.isEmpty {
-            displayList = completion.exercises
+        if hasSplitPreferences && !isTrainingDay && !hasOverrideTraining {
+            noTrainingCard(for: selectedDate)
         } else {
-            displayList = trainingPreviewExercises
-        }
-        let previewList = Array(displayList.prefix(2))
+            let completion = workoutCompletion(for: selectedDate)
+            let isCompleted = completion != nil
+            let snapshotIsCoach = daySnapshot?.source == .coach
+            let snapshotTemplateMatchesCoach = daySnapshot?.templateId == coachPickTemplateId
+            let completionMatchesCoach = completionMatchesCoachPick(completion)
+            let isCoachPick = snapshotIsCoach && (snapshotTemplateMatchesCoach || completionMatchesCoach)
+            let snapshotTitle = daySnapshot?.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            let titleText = snapshotTitle?.isEmpty == false ? snapshotTitle : nil
+            let splitTitle = selectedDay.workoutName.trimmingCharacters(in: .whitespacesAndNewlines)
+            let fallbackTitle = Calendar.current.isDateInToday(selectedDate)
+                ? "Today's Training"
+                : "\(weekdayDisplayName(for: selectedDate)) Training"
+            let baseNonCoachTitle = splitTitle.isEmpty ? (titleText ?? fallbackTitle) : splitTitle
+            let nonCoachTitle = baseNonCoachTitle.lowercased().contains("workout")
+                ? baseNonCoachTitle
+                : "\(baseNonCoachTitle) Workout"
+            let cleanedCoachTitle = (titleText ?? fallbackTitle)
+                .replacingOccurrences(of: "Coach's Pick: ", with: "")
+                .replacingOccurrences(of: "Coaches Pick: ", with: "")
+            let displayTitle = isCoachPick ? cleanedCoachTitle : nonCoachTitle
+            let subtitle = isCoachPick
+                ? "Coaches Pick"
+                : trainingCardSubtitle(for: selectedDate, detail: selectedDay, fallbackLabel: label)
+            let statusText = isCompleted ? "Completed" : (isCoachPick ? "" : subtitle)
 
-        return WorkoutCard(isAccented: true) {
-            VStack(alignment: .leading, spacing: 14) {
-                HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack(spacing: 8) {
-                            Image(systemName: isCoachPick ? "sparkles" : "figure.run")
-                                .font(.system(size: 14))
-                                .foregroundColor(isCoachPick ? FitTheme.accent : FitTheme.cardWorkoutAccent)
-                            Text(displayTitle)
-                                .font(FitFont.body(size: 18))
-                                .fontWeight(.semibold)
-                                .foregroundColor(FitTheme.textPrimary)
+            let displayList: [String] = {
+                if let completion, !completion.exercises.isEmpty {
+                    return completion.exercises
+                }
+                if let snapshot = daySnapshot, !snapshot.exercises.isEmpty {
+                    return snapshot.exercises
+                }
+                let planned = plannedExerciseNames(for: selectedDate)
+                if !planned.isEmpty {
+                    return planned
+                }
+                if isViewingToday {
+                    return trainingPreviewExercises
+                }
+                return [selectedDay.workoutName]
+            }()
+            let previewList = isTodaysTrainingExpanded ? displayList : Array(displayList.prefix(2))
+            let estimatedMinutes = selectedDay.estimatedMinutes > 0
+                ? selectedDay.estimatedMinutes
+                : selectedDurationMinutes
+
+            WorkoutCard(isAccented: true) {
+                VStack(alignment: .leading, spacing: 14) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(spacing: 8) {
+                                Image(systemName: isCoachPick ? "sparkles" : "figure.run")
+                                    .font(.system(size: 14))
+                                    .foregroundColor(isCoachPick ? FitTheme.accent : FitTheme.cardWorkoutAccent)
+                                Text(displayTitle)
+                                    .font(FitFont.body(size: 18))
+                                    .fontWeight(.semibold)
+                                    .foregroundColor(FitTheme.textPrimary)
+                            }
+
+                            HStack(spacing: 8) {
+                                if !isCompleted {
+                                    Text("~\(estimatedMinutes) min")
+                                        .font(FitFont.body(size: 12))
+                                        .foregroundColor(FitTheme.textSecondary)
+
+                                    Text("•")
+                                        .font(FitFont.body(size: 12))
+                                        .foregroundColor(FitTheme.textSecondary)
+                                }
+
+                                if !statusText.isEmpty {
+                                    Text(statusText)
+                                        .font(FitFont.body(size: 12))
+                                        .foregroundColor(isCompleted ? FitTheme.success : FitTheme.cardWorkoutAccent)
+                                }
+
+                                if isCoachPick {
+                                    WorkoutCoachPickPill()
+                                }
+                            }
                         }
 
-                        HStack(spacing: 8) {
-                            if !isCompleted {
-                                Text("~\(selectedDurationMinutes) min")
+                        Spacer()
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(previewList, id: \.self) { item in
+                            HStack(spacing: 8) {
+                                Circle()
+                                    .fill(FitTheme.cardWorkoutAccent)
+                                    .frame(width: 6, height: 6)
+                                Text(item)
+                                    .font(FitFont.body(size: 14))
+                                    .foregroundColor(FitTheme.textSecondary)
+                            }
+                        }
+
+                        if !isTodaysTrainingExpanded && displayList.count > previewList.count {
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    isTodaysTrainingExpanded = true
+                                }
+                            } label: {
+                                Text("+\(displayList.count - previewList.count) more exercises")
+                                    .font(FitFont.body(size: 12))
+                                    .foregroundColor(FitTheme.cardWorkoutAccent)
+                            }
+                            .buttonStyle(.plain)
+                        } else if isTodaysTrainingExpanded && displayList.count > 2 {
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    isTodaysTrainingExpanded = false
+                                }
+                            } label: {
+                                Text("Show less")
                                     .font(FitFont.body(size: 12))
                                     .foregroundColor(FitTheme.textSecondary)
-
-                                Text("•")
-                                    .font(FitFont.body(size: 12))
-                                    .foregroundColor(FitTheme.textSecondary)
                             }
-
-                            if !statusText.isEmpty {
-                                Text(statusText)
-                                    .font(FitFont.body(size: 12))
-                                    .foregroundColor(isCompleted ? FitTheme.success : FitTheme.cardWorkoutAccent)
-                            }
-
-                            if isCoachPick {
-                                WorkoutCoachPickPill()
-                            }
+                            .buttonStyle(.plain)
                         }
                     }
 
-                    Spacer()
-                }
-
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(previewList, id: \.self) { item in
-                        HStack(spacing: 8) {
-                            Circle()
-                                .fill(FitTheme.cardWorkoutAccent)
-                                .frame(width: 6, height: 6)
-                            Text(item)
-                                .font(FitFont.body(size: 14))
-                                .foregroundColor(FitTheme.textSecondary)
-                        }
-                    }
-
-                    if displayList.count > previewList.count {
-                        Text("+\(displayList.count - previewList.count) more exercises")
-                            .font(FitFont.body(size: 12))
-                            .foregroundColor(FitTheme.cardWorkoutAccent)
-                    }
-                }
-
-                if !isCompleted {
-                    HStack(spacing: 12) {
-                        ActionButton(title: "Start Workout", style: .primary) {
-                            Task {
-                                await startWeeklySplitSession(for: Date())
+                    if !isCompleted {
+                        HStack(spacing: 12) {
+                            ActionButton(title: "Start Workout", style: .primary) {
+                                Task {
+                                    await startWeeklySplitSession(for: selectedDate)
+                                }
                             }
-                        }
-                        ActionButton(title: "Swap", style: .secondary) {
-                            isSwapSheetPresented = true
+                            ActionButton(title: "Swap", style: .secondary) {
+                                isSwapSheetPresented = true
+                            }
                         }
                     }
                 }
@@ -929,8 +1231,37 @@ struct WorkoutView: View {
         }
     }
 
+    private func noTrainingCard(for date: Date) -> some View {
+        let isToday = Calendar.current.isDateInToday(date)
+        let nextDetail = nextTrainingDayDetail(after: date)
+        return WorkoutCard {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 8) {
+                    Image(systemName: "zzz")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(FitTheme.textSecondary)
+                    Text(isToday ? "No training today" : "No training on \(weekdayDisplayName(for: date))")
+                        .font(FitFont.heading(size: 18))
+                        .foregroundColor(FitTheme.textPrimary)
+                }
+
+                if let nextDetail {
+                    Text("Next training: \(nextDetail.dayName) — \(nextDetail.workoutName)")
+                        .font(FitFont.body(size: 13))
+                        .foregroundColor(FitTheme.textSecondary)
+                } else {
+                    Text("Next training scheduled soon.")
+                        .font(FitFont.body(size: 13))
+                        .foregroundColor(FitTheme.textSecondary)
+                }
+            }
+        }
+    }
+
     private let splitPreferencesKey = "fitai.onboarding.split.preferences"
     private let onboardingFormKey = "fitai.onboarding.form"
+    private let hasSeenWorkoutWelcomeKey = "fitai.workout.hasSeenWelcome"
+    private let splitGeneratedTemplateMode = "split_ai"
 
     private var weekDates: [Date] {
         var calendar = Calendar.current
@@ -942,19 +1273,7 @@ struct WorkoutView: View {
     }
 
     private var splitDayRows: [String] {
-        defaultSplitDayNames(for: splitSnapshot.daysPerWeek)
-    }
-
-    private var weeklyAccentPalette: [Color] {
-        [
-            FitTheme.accent, // streak purple
-            Color(red: 0.10, green: 0.85, blue: 0.45), // bright green
-            Color(red: 0.95, green: 0.36, blue: 0.22), // vivid orange
-            Color(red: 0.10, green: 0.75, blue: 0.95), // bright cyan
-            Color(red: 0.97, green: 0.22, blue: 0.62), // hot pink
-            Color(red: 0.98, green: 0.76, blue: 0.20), // bright amber
-            Color(red: 0.27, green: 0.52, blue: 1.00)  // electric blue
-        ]
+        defaultSplitDayNames(for: splitSnapshot.daysPerWeek, splitType: splitSnapshot.splitType)
     }
 
     private var weekRangeLabel: String {
@@ -962,6 +1281,99 @@ struct WorkoutView: View {
         let formatter = DateFormatter()
         formatter.dateFormat = "MMM d"
         return "\(formatter.string(from: start)) - \(formatter.string(from: end))"
+    }
+
+    private func nextTrainingDayDetail(after date: Date) -> (dayName: String, workoutName: String)? {
+        let calendar = Calendar.current
+        let symbols = calendar.weekdaySymbols
+        for offset in 1...14 {
+            guard let candidate = calendar.date(byAdding: .day, value: offset, to: date) else { continue }
+            guard let label = splitLabel(for: candidate) else { continue }
+            let plan = planForDate(candidate)
+            let workoutName = plannedWorkoutName(plan: plan, fallback: label)
+            let index = max(0, min(symbols.count - 1, calendar.component(.weekday, from: candidate) - 1))
+            let dayName = symbols[index]
+            return (dayName, workoutName)
+        }
+        return nil
+    }
+
+    private func workoutCompletion(for date: Date) -> WorkoutCompletion? {
+        if Calendar.current.isDateInToday(date) {
+            return todaysWorkout ?? WorkoutCompletionStore.completion(on: date)
+        }
+        return WorkoutCompletionStore.completion(on: date)
+    }
+
+    private func trainingCardSubtitle(
+        for date: Date,
+        detail: WeeklyDayDetail,
+        fallbackLabel: String?
+    ) -> String {
+        if Calendar.current.isDateInToday(date) {
+            return fallbackLabel ?? "Today's Training"
+        }
+        switch detail.status {
+        case .completed:
+            return "Completed"
+        case .today:
+            return "Today"
+        case .upcoming:
+            return weekdayDisplayName(for: date)
+        case .rest:
+            return "Rest"
+        }
+    }
+
+    private func plannedExerciseNames(for date: Date) -> [String] {
+        guard let plan = planForDate(date) else { return [] }
+
+        let resolvedNames = resolvedExerciseNames(for: plan)
+        if !resolvedNames.isEmpty {
+            return resolvedNames
+        }
+
+        if let customExercises = plan.customExercises, !customExercises.isEmpty {
+            return customExercises
+                .map { $0.name.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        }
+
+        if let title = cleanedPlanText(plan.templateTitle, source: plan.source) {
+            return [title]
+        }
+
+        if let focus = cleanedPlanText(plan.focus, source: plan.source) {
+            return [focus]
+        }
+
+        return []
+    }
+
+    private func resolvedExerciseNames(for plan: SplitDayPlan) -> [String] {
+        if let stored = plan.exerciseNames {
+            let normalized = normalizedExerciseNames(stored)
+            if !normalized.isEmpty {
+                return normalized
+            }
+        }
+
+        if let templateId = plan.templateId,
+           let cached = splitPlanExerciseCache[templateId] {
+            let normalized = normalizedExerciseNames(cached)
+            if !normalized.isEmpty {
+                return normalized
+            }
+        }
+
+        return []
+    }
+
+    private func weekdayDisplayName(for date: Date) -> String {
+        let calendar = Calendar.current
+        let symbols = calendar.weekdaySymbols
+        let index = max(0, min(symbols.count - 1, calendar.component(.weekday, from: date) - 1))
+        return symbols[index]
     }
 
     private func completionPreview(_ exercises: [String]) -> String {
@@ -980,6 +1392,16 @@ struct WorkoutView: View {
         let symbols = calendar.veryShortWeekdaySymbols.isEmpty ? calendar.shortWeekdaySymbols : calendar.veryShortWeekdaySymbols
         let index = max(0, min(symbols.count - 1, calendar.component(.weekday, from: date) - 1))
         return symbols[index].uppercased()
+    }
+
+    private func completionMatchesCoachPick(_ completion: WorkoutCompletion?) -> Bool {
+        guard let completion, !completion.exercises.isEmpty, !coachPickExercises.isEmpty else { return false }
+        let completed = Set(completion.exercises.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() })
+        let coach = Set(coachPickExercises.map { $0.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() })
+        guard !completed.isEmpty, !coach.isEmpty else { return false }
+        let overlap = completed.intersection(coach).count
+        let ratio = Double(overlap) / Double(completed.count)
+        return overlap >= 2 && ratio >= 0.5
     }
 
     private func weeklyDayStatus(for date: Date) -> WeeklyDayStatus {
@@ -1001,24 +1423,121 @@ struct WorkoutView: View {
     }
 
     private func weeklyDayDetail(for date: Date) -> WeeklyDayDetail {
+        let plan = planForDate(date)
         let label = splitLabel(for: date)
         let status = weeklyDayStatus(for: date)
         let isTrainingDay = label != nil
-        let estimatedMinutes = isTrainingDay ? max(30, selectedDurationMinutes) : 0
-        let workoutName = label ?? "Rest"
+        let estimatedMinutes = plan?.durationMinutes ?? (isTrainingDay ? max(30, selectedDurationMinutes) : 0)
+        let workoutName = plannedWorkoutName(plan: plan, fallback: label ?? "Rest")
+        let focus = plannedFocus(plan: plan) ?? label ?? splitSnapshot.focus
         return WeeklyDayDetail(
             id: dateKey(for: date),
             date: date,
             workoutName: workoutName,
-            focus: splitSnapshot.focus,
+            focus: focus,
             estimatedMinutes: estimatedMinutes,
             status: status,
             isTrainingDay: isTrainingDay
         )
     }
 
+    private func planForDate(_ date: Date) -> SplitDayPlan? {
+        let weekday = weekdaySymbol(for: date)
+        return splitSnapshot.dayPlans[weekday]
+    }
+
+    private func plannedWorkoutName(plan: SplitDayPlan?, fallback: String) -> String {
+        guard let plan else { return fallback }
+        if let title = cleanedPlanText(plan.templateTitle, source: plan.source) {
+            return title
+        }
+        if let focus = cleanedPlanText(plan.focus, source: plan.source) {
+            return focus
+        }
+        if plan.source == .ai, fallback != "Rest" {
+            return fallback
+        }
+        switch plan.source {
+        case .saved:
+            return "Saved workout"
+        case .create:
+            return "Custom workout"
+        case .ai:
+            return "AI workout"
+        }
+    }
+
+    private func plannedFocus(plan: SplitDayPlan?) -> String? {
+        guard let plan else { return nil }
+        return cleanedPlanText(plan.focus, source: plan.source)
+    }
+
+    private func cleanedPlanText(_ text: String?, source: SplitPlanSource) -> String? {
+        guard let text else { return nil }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if source == .ai, trimmed.caseInsensitiveCompare("AI workout") == .orderedSame {
+            return nil
+        }
+        return trimmed
+    }
+
     private func startWeeklySplitSession(for date: Date) async {
-        let title = splitLabel(for: date) ?? "Today's Training"
+        let trainingLabel = splitLabel(for: date)
+        let fallbackTitle = trainingLabel ?? "Today's Training"
+        if let plan = planForDate(date) {
+            switch plan.source {
+            case .saved:
+                if let templateId = plan.templateId {
+                    _ = await startSessionFromTemplateId(
+                        templateId,
+                        titleOverride: plannedWorkoutName(plan: plan, fallback: fallbackTitle)
+                    )
+                    return
+                }
+            case .ai:
+                if let templateId = plan.templateId {
+                    let startedFromTemplate = await startSessionFromTemplateId(
+                        templateId,
+                        titleOverride: plannedWorkoutName(plan: plan, fallback: fallbackTitle)
+                    )
+                    if startedFromTemplate {
+                        return
+                    }
+                }
+                await startGeneratedPlan(plan, fallbackTitle: fallbackTitle)
+                return
+            case .create:
+                if let customExercises = plan.customExercises, !customExercises.isEmpty {
+                    let exercises = sessionExercises(from: customExercises)
+                    let title = plannedWorkoutName(plan: plan, fallback: fallbackTitle)
+                    await startSession(title: title, templateId: nil, exercises: exercises)
+                    return
+                }
+                await MainActor.run {
+                    mode = .create
+                    draftName = plannedFocus(plan: plan) ?? fallbackTitle
+                }
+                return
+            }
+        }
+
+        if let trainingLabel {
+            let inferredMuscles = muscleGroupsForSplitLabel(trainingLabel)
+            let inferredPlan = SplitDayPlan(
+                weekday: weekdaySymbol(for: date),
+                focus: trainingLabel,
+                source: .ai,
+                muscleGroups: inferredMuscles,
+                equipment: [],
+                durationMinutes: selectedDurationMinutes,
+                customExercises: nil
+            )
+            await startGeneratedPlan(inferredPlan, fallbackTitle: fallbackTitle)
+            return
+        }
+
+        let title = fallbackTitle
         if let coachId = coachPickTemplateId, !coachPickExercises.isEmpty {
             await startSession(
                 title: title,
@@ -1031,6 +1550,205 @@ struct WorkoutView: View {
                 templateId: nil,
                 exercises: spotlightExercises
             )
+        }
+    }
+
+    private func startGeneratedPlan(_ plan: SplitDayPlan, fallbackTitle: String) async {
+        let resolvedMuscleGroups = resolvedAIMuscleGroups(plan: plan, fallbackTitle: fallbackTitle)
+        await MainActor.run {
+            mode = .generate
+            selectedMuscleGroups = Set(resolvedMuscleGroups)
+            if !plan.equipment.isEmpty {
+                selectedEquipment = Set(plan.equipment)
+            }
+            if let duration = plan.durationMinutes {
+                selectedDurationMinutes = duration
+            }
+        }
+
+        await generateWorkout()
+
+        let (exercises, generatedTitleValue) = await MainActor.run {
+            (generatedExercises, generatedTitle)
+        }
+
+        guard !exercises.isEmpty else { return }
+        let title = plannedWorkoutName(plan: plan, fallback: generatedTitleValue.isEmpty ? fallbackTitle : generatedTitleValue)
+        await startSession(title: title, templateId: nil, exercises: exercises)
+    }
+
+    private func resolvedAIMuscleGroups(plan: SplitDayPlan?, fallbackTitle: String) -> [String] {
+        let explicit = normalizedUniqueStrings(plan?.muscleGroups ?? [])
+        if !explicit.isEmpty {
+            var expanded: [String] = []
+            for value in explicit {
+                let inferred = muscleGroupsForSplitLabel(value)
+                if inferred.isEmpty {
+                    expanded.append(value)
+                } else {
+                    expanded.append(contentsOf: inferred)
+                }
+            }
+            let normalizedExpanded = normalizedUniqueStrings(expanded)
+            if !normalizedExpanded.isEmpty {
+                return normalizedExpanded
+            }
+        }
+
+        let focusCandidates = [
+            plan?.focus,
+            plan?.templateTitle,
+            fallbackTitle
+        ]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        for candidate in focusCandidates {
+            let inferred = muscleGroupsForSplitLabel(candidate)
+            if !inferred.isEmpty {
+                return inferred
+            }
+        }
+
+        return defaultFullBodyMuscleGroups()
+    }
+
+    private func muscleGroupsForSplitLabel(_ label: String) -> [String] {
+        let normalized = label.lowercased()
+        var groups = Set<MuscleGroup>()
+
+        func add(_ values: [MuscleGroup]) {
+            for value in values {
+                groups.insert(value)
+            }
+        }
+
+        if normalized.contains("full body") {
+            add(defaultFullBodyGroupCases())
+        }
+        if normalized.contains("push") {
+            add([.chest, .shoulders, .triceps])
+        }
+        if normalized.contains("pull") {
+            add([.back, .biceps, .forearms])
+        }
+        if normalized.contains("upper") {
+            add([.chest, .back, .shoulders, .biceps, .triceps])
+        }
+        if normalized.contains("lower") || normalized.contains("leg") {
+            add([.quads, .hamstrings, .glutes, .calves])
+        }
+
+        if normalized.contains("chest") {
+            add([.chest])
+        }
+        if normalized.contains("back") {
+            add([.back])
+        }
+        if normalized.contains("shoulder") || normalized.contains("delt") {
+            add([.shoulders])
+        }
+        if normalized.contains("arm") {
+            add([.arms, .biceps, .triceps, .forearms])
+        }
+        if normalized.contains("bicep") {
+            add([.biceps])
+        }
+        if normalized.contains("tricep") {
+            add([.triceps])
+        }
+        if normalized.contains("quad") {
+            add([.quads])
+        }
+        if normalized.contains("hamstring") {
+            add([.hamstrings])
+        }
+        if normalized.contains("glute") {
+            add([.glutes])
+        }
+        if normalized.contains("calf") {
+            add([.calves])
+        }
+        if normalized.contains("core") || normalized.contains("ab") {
+            add([.core])
+        }
+
+        guard !groups.isEmpty else { return [] }
+        return MuscleGroup.allCases
+            .filter { groups.contains($0) }
+            .map(\.rawValue)
+    }
+
+    private func defaultFullBodyGroupCases() -> [MuscleGroup] {
+        [.chest, .back, .shoulders, .arms, .quads, .hamstrings, .glutes, .core]
+    }
+
+    private func defaultFullBodyMuscleGroups() -> [String] {
+        defaultFullBodyGroupCases().map(\.rawValue)
+    }
+
+    private func normalizedUniqueStrings(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+
+        for value in values {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard !trimmed.isEmpty else { continue }
+            if seen.insert(trimmed).inserted {
+                result.append(trimmed)
+            }
+        }
+
+        return result
+    }
+
+    private func normalizedExerciseNames(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        var names: [String] = []
+        for value in values {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let key = trimmed.lowercased()
+            if seen.insert(key).inserted {
+                names.append(trimmed)
+            }
+        }
+        return names
+    }
+
+    @discardableResult
+    private func startSessionFromTemplateId(_ templateId: String, titleOverride: String?) async -> Bool {
+        guard !userId.isEmpty else {
+            await MainActor.run {
+                loadError = "Missing user session. Please log in again."
+                Haptics.error()
+            }
+            return false
+        }
+
+        await MainActor.run {
+            isLoading = true
+        }
+
+        do {
+            let detail = try await WorkoutAPIService.shared.fetchTemplateDetail(templateId: templateId)
+            let exercises = sessionExercises(from: detail.exercises)
+            let title = {
+                let trimmed = titleOverride?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                return trimmed.isEmpty ? detail.template.title : trimmed
+            }()
+            await MainActor.run {
+                isLoading = false
+            }
+            await startSession(title: title, templateId: templateId, exercises: exercises)
+            return true
+        } catch {
+            await MainActor.run {
+                isLoading = false
+                loadError = "Unable to start workout. \(error.localizedDescription)"
+                Haptics.error()
+            }
+            return false
         }
     }
 
@@ -1084,45 +1802,473 @@ struct WorkoutView: View {
         }
     }
 
-    private func refreshSplitSnapshot() {
-        let calendar = Calendar.current
-        var mode: SplitCreationMode = .ai
-        var daysPerWeek = 3
-        var trainingDays: [String] = []
-        var focus = "Strength"
-
-        if let data = UserDefaults.standard.data(forKey: splitPreferencesKey),
-           let decoded = try? JSONDecoder().decode(SplitSetupPreferences.self, from: data) {
-            mode = SplitCreationMode(rawValue: decoded.mode) ?? .ai
-            daysPerWeek = min(max(decoded.daysPerWeek, 2), 7)
-            trainingDays = normalizedTrainingDays(decoded.trainingDays, targetCount: daysPerWeek)
-        } else if let data = UserDefaults.standard.data(forKey: onboardingFormKey),
-                  let form = try? JSONDecoder().decode(OnboardingForm.self, from: data) {
-            daysPerWeek = min(max(form.workoutDaysPerWeek, 2), 7)
-            trainingDays = normalizedTrainingDays([], targetCount: daysPerWeek)
-            focus = focusForGoal(form.goal)
-        } else {
-            trainingDays = normalizedTrainingDays([], targetCount: daysPerWeek)
+    private func refreshSplitSnapshot(scheduleGeneration: Bool = true) {
+        let loaded = SplitSchedule.loadSnapshot()
+        splitSnapshot = loaded.snapshot
+        hasSplitPreferences = loaded.hasPreferences
+        
+        // Show welcome modal if user hasn't seen it and doesn't have split preferences
+        let hasSeenWelcome = UserDefaults.standard.bool(forKey: hasSeenWorkoutWelcomeKey)
+        if !hasSeenWelcome && !loaded.hasPreferences {
+            showWorkoutWelcome = true
         }
+
+        if scheduleGeneration {
+            scheduleSplitPlanGenerationIfNeeded(snapshot: loaded.snapshot, hasPreferences: loaded.hasPreferences)
+        }
+
+        Task {
+            await preloadSplitPlanExerciseNamesIfNeeded()
+        }
+    }
+
+    private func scheduleSplitPlanGenerationIfNeeded(snapshot: SplitSnapshot, hasPreferences: Bool) {
+        guard hasPreferences else {
+            splitGenerationTask?.cancel()
+            splitGenerationTask = nil
+            isGeneratingSplitWorkouts = false
+            return
+        }
+
+        let trainingDays = normalizedTrainingDays(snapshot.trainingDays, targetCount: snapshot.daysPerWeek)
+        let normalizedPlans = preparedSplitDayPlans(
+            mode: snapshot.mode,
+            daysPerWeek: snapshot.daysPerWeek,
+            trainingDays: trainingDays,
+            splitType: snapshot.splitType,
+            dayPlans: snapshot.dayPlans,
+            focus: snapshot.focus
+        )
+        scheduleSplitPlanGeneration(for: normalizedPlans, trainingDays: trainingDays)
+    }
+
+    private func applySplitPreferences(
+        mode: SplitCreationMode,
+        daysPerWeek: Int,
+        trainingDays: [String],
+        splitType: SplitType,
+        dayPlans: [String: SplitDayPlan],
+        focus: String
+    ) {
+        let clampedDays = min(max(daysPerWeek, 2), 7)
+        let normalizedDays = normalizedTrainingDays(trainingDays, targetCount: clampedDays)
+        let normalizedPlans = preparedSplitDayPlans(
+            mode: mode,
+            daysPerWeek: clampedDays,
+            trainingDays: normalizedDays,
+            splitType: splitType,
+            dayPlans: dayPlans,
+            focus: focus
+        )
+        let preferences = SplitSetupPreferences(
+            mode: mode.rawValue,
+            daysPerWeek: clampedDays,
+            trainingDays: normalizedDays,
+            splitType: splitType,
+            dayPlans: normalizedPlans,
+            focus: focus,
+            isUserConfigured: true
+        )
+        saveSplitPreferences(preferences)
 
         if let data = UserDefaults.standard.data(forKey: onboardingFormKey),
-           let form = try? JSONDecoder().decode(OnboardingForm.self, from: data) {
-            focus = focusForGoal(form.goal)
+           var form = try? JSONDecoder().decode(OnboardingForm.self, from: data) {
+            form.workoutDaysPerWeek = clampedDays
+            form.trainingDaysOfWeek = normalizedDays
+            if let encodedForm = try? JSONEncoder().encode(form) {
+                UserDefaults.standard.set(encodedForm, forKey: onboardingFormKey)
+            }
         }
 
-        if trainingDays.isEmpty {
-            let weekdays = calendar.weekdaySymbols
-            trainingDays = weekdays.prefix(daysPerWeek).map { $0 }
+        refreshSplitSnapshot()
+        hasSplitPreferences = true
+        selectedWeeklyDay = nil
+    }
+
+    private func preparedSplitDayPlans(
+        mode: SplitCreationMode,
+        daysPerWeek: Int,
+        trainingDays: [String],
+        splitType: SplitType,
+        dayPlans: [String: SplitDayPlan],
+        focus: String
+    ) -> [String: SplitDayPlan] {
+        let validWeekdays = Set(Calendar.current.weekdaySymbols)
+        let selectedDays = Set(trainingDays)
+        let filteredPlans = dayPlans.filter { validWeekdays.contains($0.key) && selectedDays.contains($0.key) }
+
+        if mode != .ai {
+            return filteredPlans.mapValues { plan in
+                var updated = plan
+                if plan.source == .create {
+                    let names = normalizedExerciseNames((plan.customExercises ?? []).map(\.name))
+                    updated.exerciseNames = names.isEmpty ? nil : names
+                }
+                return updated
+            }
         }
 
-        let name = splitDisplayName(daysPerWeek: daysPerWeek, mode: mode)
-        splitSnapshot = SplitSnapshot(
-            mode: mode,
-            daysPerWeek: daysPerWeek,
-            trainingDays: trainingDays,
-            focus: focus,
-            name: name
+        let fallbackFocus = focus.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "Strength"
+            : focus.trimmingCharacters(in: .whitespacesAndNewlines)
+        let labels = defaultSplitDayNames(for: daysPerWeek, splitType: splitType)
+        var aiPlans: [String: SplitDayPlan] = [:]
+
+        for (index, day) in trainingDays.enumerated() {
+            let label = index < labels.count ? labels[index] : fallbackFocus
+            let cleanLabel = label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? fallbackFocus : label
+
+            if var existing = filteredPlans[day],
+               existing.source == .ai,
+               let existingTemplateId = existing.templateId,
+               !existingTemplateId.isEmpty {
+                let existingFocus = existing.focus.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                if existingFocus == cleanLabel.lowercased() {
+                    if existing.muscleGroups.isEmpty {
+                        existing.muscleGroups = resolvedAIMuscleGroups(plan: existing, fallbackTitle: cleanLabel)
+                    }
+                    if existing.durationMinutes == nil {
+                        existing.durationMinutes = 45
+                    }
+                    aiPlans[day] = existing
+                    continue
+                }
+            }
+
+            aiPlans[day] = SplitDayPlan(
+                weekday: day,
+                focus: cleanLabel,
+                source: .ai,
+                templateId: nil,
+                templateTitle: nil,
+                muscleGroups: resolvedAIMuscleGroups(plan: nil, fallbackTitle: cleanLabel),
+                equipment: [],
+                durationMinutes: 45,
+                customExercises: nil,
+                exerciseNames: nil
+            )
+        }
+
+        return aiPlans
+    }
+
+    private func scheduleSplitPlanGeneration(for plans: [String: SplitDayPlan], trainingDays: [String]) {
+        splitGenerationTask?.cancel()
+        splitGenerationTask = nil
+
+        let hasWork = trainingDays.contains { day in
+            guard let plan = plans[day] else { return false }
+            switch plan.source {
+            case .ai:
+                if let templateId = plan.templateId, !templateId.isEmpty {
+                    return (plan.exerciseNames ?? []).isEmpty
+                }
+                return true
+            case .saved:
+                guard let templateId = plan.templateId, !templateId.isEmpty else { return false }
+                return (plan.exerciseNames ?? []).isEmpty
+            case .create:
+                return (plan.exerciseNames ?? []).isEmpty
+            }
+        }
+
+        guard hasWork else {
+            isGeneratingSplitWorkouts = false
+            return
+        }
+
+        splitGenerationTask = Task {
+            await MainActor.run {
+                isGeneratingSplitWorkouts = true
+            }
+
+            var updatedPlans = plans
+            var didUpdate = false
+            var firstError: String?
+
+            for day in trainingDays {
+                if Task.isCancelled {
+                    await MainActor.run {
+                        isGeneratingSplitWorkouts = false
+                    }
+                    return
+                }
+                guard let plan = updatedPlans[day] else { continue }
+                let fallback = plan.focus.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? "Training"
+                    : plan.focus
+                do {
+                    let resolved = try await resolveSplitPlanForPersistence(plan, fallbackTitle: fallback)
+                    updatedPlans[day] = resolved
+                    didUpdate = true
+                } catch {
+                    if firstError == nil {
+                        firstError = error.localizedDescription
+                    }
+                }
+            }
+
+            if Task.isCancelled {
+                await MainActor.run {
+                    isGeneratingSplitWorkouts = false
+                }
+                return
+            }
+
+            if didUpdate {
+                await MainActor.run {
+                    persistUpdatedSplitPlans(updatedPlans, trainingDays: trainingDays)
+                }
+                await loadWorkouts()
+                await preloadSplitPlanExerciseNamesIfNeeded()
+            }
+
+            await MainActor.run {
+                isGeneratingSplitWorkouts = false
+                if let firstError {
+                    loadError = "Some split workouts could not be generated. \(firstError)"
+                }
+            }
+        }
+    }
+
+    private func resolveSplitPlanForPersistence(
+        _ plan: SplitDayPlan,
+        fallbackTitle: String
+    ) async throws -> SplitDayPlan {
+        switch plan.source {
+        case .create:
+            var updated = plan
+            let names = normalizedExerciseNames((plan.customExercises ?? []).map(\.name))
+            updated.exerciseNames = names.isEmpty ? nil : names
+            return updated
+        case .saved:
+            guard let templateId = plan.templateId, !templateId.isEmpty else { return plan }
+            if !(plan.exerciseNames ?? []).isEmpty {
+                return plan
+            }
+            let detail = try await WorkoutAPIService.shared.fetchTemplateDetail(templateId: templateId)
+            let exerciseNames = normalizedExerciseNames(detail.exercises.map(\.name))
+            await MainActor.run {
+                splitPlanExerciseCache[templateId] = exerciseNames
+            }
+            var updated = plan
+            updated.templateTitle = detail.template.title
+            updated.exerciseNames = exerciseNames.isEmpty ? nil : exerciseNames
+            return updated
+        case .ai:
+            if let templateId = plan.templateId, !templateId.isEmpty {
+                if !(plan.exerciseNames ?? []).isEmpty {
+                    return plan
+                }
+                let detail = try await WorkoutAPIService.shared.fetchTemplateDetail(templateId: templateId)
+                let exerciseNames = normalizedExerciseNames(detail.exercises.map(\.name))
+                await MainActor.run {
+                    splitPlanExerciseCache[templateId] = exerciseNames
+                }
+                var updated = plan
+                updated.templateTitle = detail.template.title
+                updated.exerciseNames = exerciseNames.isEmpty ? nil : exerciseNames
+                return updated
+            }
+            return try await generateTemplateForSplitPlan(plan, fallbackTitle: fallbackTitle)
+        }
+    }
+
+    private func generateTemplateForSplitPlan(
+        _ plan: SplitDayPlan,
+        fallbackTitle: String
+    ) async throws -> SplitDayPlan {
+        guard !userId.isEmpty else {
+            throw NSError(
+                domain: "WorkoutView.SplitGeneration",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Missing user session."]
+            )
+        }
+
+        let resolvedMuscleGroups = resolvedAIMuscleGroups(plan: plan, fallbackTitle: fallbackTitle)
+        let duration = max(20, plan.durationMinutes ?? 45)
+        let result = try await WorkoutAPIService.shared.generateWorkout(
+            userId: userId,
+            muscleGroups: resolvedMuscleGroups,
+            workoutType: fallbackTitle,
+            equipment: plan.equipment.isEmpty ? nil : plan.equipment,
+            durationMinutes: duration
         )
+        let parsed = parseGeneratedWorkout(result)
+        let fallbackExercises = fallbackSplitExercises(
+            muscleGroups: resolvedMuscleGroups,
+            durationMinutes: duration
+        )
+        let generatedExercises = parsed.exercises.isEmpty ? fallbackExercises : parsed.exercises
+        let exerciseNames = normalizedExerciseNames(generatedExercises.map(\.name))
+        guard !generatedExercises.isEmpty else {
+            throw NSError(
+                domain: "WorkoutView.SplitGeneration",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "Generated split workout had no exercises."]
+            )
+        }
+
+        let rawTitle = parsed.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedTitle: String
+        if rawTitle.isEmpty || rawTitle.caseInsensitiveCompare("AI Generated Workout") == .orderedSame {
+            resolvedTitle = fallbackTitle
+        } else {
+            resolvedTitle = rawTitle
+        }
+
+        let inputs = splitTemplateInputs(
+            from: generatedExercises,
+            muscleGroups: resolvedMuscleGroups,
+            equipment: plan.equipment
+        )
+        let templateId = try await WorkoutAPIService.shared.createTemplate(
+            userId: userId,
+            title: resolvedTitle,
+            description: "Auto-generated for your weekly split",
+            mode: splitGeneratedTemplateMode,
+            exercises: inputs
+        )
+
+        await MainActor.run {
+            splitPlanExerciseCache[templateId] = exerciseNames
+        }
+
+        var updated = plan
+        updated.templateId = templateId
+        updated.templateTitle = resolvedTitle
+        updated.muscleGroups = resolvedMuscleGroups
+        updated.durationMinutes = duration
+        updated.exerciseNames = exerciseNames.isEmpty ? nil : exerciseNames
+        return updated
+    }
+
+    private func fallbackSplitExercises(
+        muscleGroups: [String],
+        durationMinutes: Int
+    ) -> [WorkoutExerciseSession] {
+        let groups = muscleGroups.isEmpty ? defaultFullBodyMuscleGroups() : muscleGroups
+        let config = durationConfig(for: durationMinutes)
+        var exercises: [WorkoutExerciseSession] = []
+
+        for group in groups {
+            if let pool = Self.exerciseLibrary[group],
+               let seed = pool.compound.first ?? pool.isolation.first {
+                exercises.append(makeSessionExercise(from: seed, sets: config.defaultSets))
+            }
+        }
+
+        if exercises.isEmpty {
+            let fallbackSeeds = [
+                ExerciseSeed(name: "Bench Press", restSeconds: 90),
+                ExerciseSeed(name: "Lat Pulldown", restSeconds: 75),
+                ExerciseSeed(name: "Back Squat", restSeconds: 120),
+                ExerciseSeed(name: "Overhead Press", restSeconds: 90),
+                ExerciseSeed(name: "Romanian Deadlift", restSeconds: 120),
+                ExerciseSeed(name: "Cable Crunch", restSeconds: 45)
+            ]
+            exercises = fallbackSeeds.map { makeSessionExercise(from: $0, sets: config.defaultSets) }
+        }
+
+        return exercises
+    }
+
+    private func splitTemplateInputs(
+        from exercises: [WorkoutExerciseSession],
+        muscleGroups: [String],
+        equipment: [String]
+    ) -> [WorkoutExerciseInput] {
+        let resolvedMuscles = muscleGroups.isEmpty ? defaultFullBodyMuscleGroups() : muscleGroups
+        return exercises.map { exercise in
+            let repsValue = parseRepsValue(from: exercise.sets.first?.reps)
+            let notes = exercise.notes.trimmingCharacters(in: .whitespacesAndNewlines)
+            return WorkoutExerciseInput(
+                name: exercise.name,
+                muscleGroups: resolvedMuscles,
+                equipment: equipment,
+                sets: max(exercise.sets.count, 1),
+                reps: repsValue,
+                restSeconds: normalizedRestSeconds(exercise.restSeconds),
+                notes: notes.isEmpty ? nil : notes
+            )
+        }
+    }
+
+    private func parseRepsValue(from text: String?) -> Int {
+        guard let text else { return 10 }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return 10 }
+        if let match = regexMatch(#"(\d+)"#, in: trimmed, captureCount: 1),
+           let value = Int(match.captures[0]) {
+            return min(max(value, 1), 50)
+        }
+        return 10
+    }
+
+    private func persistUpdatedSplitPlans(_ updatedPlans: [String: SplitDayPlan], trainingDays: [String]) {
+        guard var preferences = loadSplitPreferences() else { return }
+        let validDays = Set(trainingDays)
+        var mergedPlans = (preferences.dayPlans ?? [:]).filter { validDays.contains($0.key) }
+        for day in trainingDays {
+            if let updated = updatedPlans[day] {
+                mergedPlans[day] = updated
+            }
+        }
+        preferences.dayPlans = mergedPlans
+        saveSplitPreferences(preferences)
+        refreshSplitSnapshot(scheduleGeneration: false)
+        hasSplitPreferences = true
+        selectedWeeklyDay = nil
+        NotificationCenter.default.post(name: .fitAISplitUpdated, object: nil)
+    }
+
+    private func loadSplitPreferences() -> SplitSetupPreferences? {
+        guard let data = UserDefaults.standard.data(forKey: splitPreferencesKey),
+              let decoded = try? JSONDecoder().decode(SplitSetupPreferences.self, from: data) else {
+            return nil
+        }
+        return decoded
+    }
+
+    private func saveSplitPreferences(_ preferences: SplitSetupPreferences) {
+        if let encoded = try? JSONEncoder().encode(preferences) {
+            UserDefaults.standard.set(encoded, forKey: splitPreferencesKey)
+        }
+    }
+
+    private func preloadSplitPlanExerciseNamesIfNeeded() async {
+        guard !userId.isEmpty else { return }
+        let plans = await MainActor.run { splitSnapshot.dayPlans }
+        let templateIds = Set(plans.values.compactMap { plan -> String? in
+            guard let templateId = plan.templateId, !templateId.isEmpty else { return nil }
+            return templateId
+        })
+        guard !templateIds.isEmpty else { return }
+
+        var fetched: [String: [String]] = [:]
+        for templateId in templateIds {
+            if Task.isCancelled { return }
+            let alreadyCached = await MainActor.run { splitPlanExerciseCache[templateId] != nil }
+            if alreadyCached {
+                continue
+            }
+            do {
+                let detail = try await WorkoutAPIService.shared.fetchTemplateDetail(templateId: templateId)
+                let names = normalizedExerciseNames(detail.exercises.map(\.name))
+                if !names.isEmpty {
+                    fetched[templateId] = names
+                }
+            } catch {
+                continue
+            }
+        }
+
+        guard !fetched.isEmpty else { return }
+        await MainActor.run {
+            splitPlanExerciseCache.merge(fetched) { _, new in new }
+        }
     }
 
     private func focusForGoal(_ goal: OnboardingForm.Goal?) -> String {
@@ -1138,47 +2284,66 @@ struct WorkoutView: View {
         }
     }
 
-    private func splitDisplayName(daysPerWeek: Int, mode: SplitCreationMode) -> String {
+    private func splitDisplayName(daysPerWeek: Int, mode: SplitCreationMode, splitType: SplitType) -> String {
         if mode == .custom {
             return "Custom Split"
         }
-        switch daysPerWeek {
-        case 2:
-            return "Upper / Lower"
-        case 3:
-            return "Full Body"
-        case 4:
-            return "Upper / Lower"
-        case 5:
-            return "Hybrid Split"
-        case 6:
-            return "Push / Pull / Legs"
-        default:
-            return "Full Body"
-        }
+        let resolved = resolvedSplitType(splitType, daysPerWeek: daysPerWeek)
+        return resolved.title
     }
 
-    private func defaultSplitDayNames(for daysPerWeek: Int) -> [String] {
-        switch daysPerWeek {
+    private func defaultSplitDayNames(for daysPerWeek: Int, splitType: SplitType) -> [String] {
+        let clamped = min(max(daysPerWeek, 2), 7)
+        if splitType == .smart {
+            switch clamped {
+            case 2:
+                return ["Upper", "Lower"]
+            case 3:
+                return ["Full Body A", "Full Body B", "Full Body C"]
+            case 4:
+                return ["Upper", "Lower", "Upper", "Lower"]
+            case 5:
+                return ["Push", "Pull", "Legs", "Upper", "Lower"]
+            case 6:
+                return ["Push", "Pull", "Legs", "Push", "Pull", "Legs"]
+            case 7:
+                return ["Full Body", "Full Body", "Full Body", "Full Body", "Full Body", "Full Body", "Full Body"]
+            default:
+                return ["Full Body"]
+            }
+        }
+        return splitType.dayLabels(for: clamped)
+    }
+
+    private func resolvedSplitType(_ splitType: SplitType, daysPerWeek: Int) -> SplitType {
+        let clamped = min(max(daysPerWeek, 2), 7)
+        guard splitType == .smart else { return splitType }
+        switch clamped {
         case 2:
-            return ["Upper", "Lower"]
+            return .upperLower
         case 3:
-            return ["Full Body A", "Full Body B", "Full Body C"]
+            return .fullBody
         case 4:
-            return ["Upper", "Lower", "Upper", "Lower"]
+            return .upperLower
         case 5:
-            return ["Push", "Pull", "Legs", "Upper", "Lower"]
+            return .hybrid
         case 6:
-            return ["Push", "Pull", "Legs", "Push", "Pull", "Legs"]
-        case 7:
-            return ["Full Body", "Full Body", "Full Body", "Full Body", "Full Body", "Full Body", "Full Body"]
+            return .pushPullLegs
         default:
-            return ["Full Body"]
+            return .fullBody
         }
     }
 
     private func splitLabel(for date: Date) -> String? {
         let weekday = weekdaySymbol(for: date)
+        if let plan = splitSnapshot.dayPlans[weekday] {
+            if let focus = cleanedPlanText(plan.focus, source: plan.source) {
+                return focus
+            }
+            if let title = cleanedPlanText(plan.templateTitle, source: plan.source) {
+                return title
+            }
+        }
         guard let index = splitSnapshot.trainingDays.firstIndex(of: weekday) else {
             return nil
         }
@@ -1319,6 +2484,22 @@ struct WorkoutView: View {
             showActiveSession = true
         }
 
+        let source: TodayTrainingSource = {
+            if let templateId, templateId == coachPickTemplateId {
+                return .coach
+            }
+            if templateId != nil {
+                return .saved
+            }
+            return .custom
+        }()
+        TodayTrainingStore.save(
+            title: title,
+            exercises: resolvedExercises.map { $0.name },
+            source: source,
+            templateId: templateId
+        )
+
         guard !userId.isEmpty else { return }
         do {
             let sessionId = try await WorkoutAPIService.shared.startSession(
@@ -1339,6 +2520,24 @@ struct WorkoutView: View {
                 loadError = nil
             }
         }
+    }
+
+    private func startDraftSession() async {
+        let trimmedName = draftName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !draftExercises.isEmpty else {
+            await MainActor.run {
+                loadError = "Add at least one exercise."
+            }
+            return
+        }
+
+        await MainActor.run {
+            loadError = nil
+        }
+
+        let title = trimmedName.isEmpty ? "Custom workout" : trimmedName
+        let exercises = sessionExercises(from: draftExercises)
+        await startSession(title: title, templateId: nil, exercises: exercises)
     }
 
     private func saveDraftTemplate() async {
@@ -1384,6 +2583,12 @@ struct WorkoutView: View {
                 description: nil,
                 mode: "manual",
                 exercises: inputs
+            )
+            TodayTrainingStore.save(
+                title: trimmedName,
+                exercises: draftExercises.map { $0.name },
+                source: .custom,
+                templateId: templateId
             )
             await MainActor.run {
                 let newTemplate = WorkoutTemplate(
@@ -1623,6 +2828,44 @@ struct WorkoutView: View {
                 ),
                 restSeconds: restSeconds
             )
+            return withWarmupRest(session)
+        }
+    }
+
+    private func sessionExercises(from exercises: [WorkoutExerciseDraft]) -> [WorkoutExerciseSession] {
+        exercises.map { exercise in
+            let setCount = normalizedSetCount(exercise.sets)
+            let repsText = normalizedRepsText(exercise.reps)
+            let restSeconds = normalizedRestSeconds(exercise.restSeconds)
+            var session = WorkoutExerciseSession(
+                name: exercise.name,
+                sets: WorkoutSetEntry.batch(
+                    reps: repsText,
+                    weight: "",
+                    count: setCount
+                ),
+                restSeconds: restSeconds
+            )
+            session.notes = exercise.notes
+            return withWarmupRest(session)
+        }
+    }
+
+    private func sessionExercises(from exercises: [SplitPlanExercise]) -> [WorkoutExerciseSession] {
+        exercises.map { exercise in
+            let setCount = max(1, exercise.sets)
+            let repsText = "\(max(1, exercise.reps))"
+            let restSeconds = normalizedRestSeconds(exercise.restSeconds)
+            var session = WorkoutExerciseSession(
+                name: exercise.name,
+                sets: WorkoutSetEntry.batch(
+                    reps: repsText,
+                    weight: "",
+                    count: setCount
+                ),
+                restSeconds: restSeconds
+            )
+            session.notes = exercise.notes ?? ""
             return withWarmupRest(session)
         }
     }
@@ -2453,13 +3696,14 @@ struct WorkoutView: View {
         return RegexMatch(range: match.range, captures: captures)
     }
 
-    private func generateWorkout() async {
-        guard !userId.isEmpty else { return }
+    @discardableResult
+    private func generateWorkout() async -> Bool {
+        guard !userId.isEmpty else { return false }
         guard !selectedMuscleGroups.isEmpty else {
             await MainActor.run {
                 loadError = "Pick at least one muscle group."
             }
-            return
+            return false
         }
         await MainActor.run {
             isGenerating = true
@@ -2488,9 +3732,10 @@ struct WorkoutView: View {
                 estimate,
                 targetMinutes: selectedDurationMinutes
             )
+            let resolvedTitle = parsed.exercises.isEmpty ? "Quick Build" : parsed.title
             await MainActor.run {
                 generatedPreview = result.isEmpty ? "Workout generated." : result
-                generatedTitle = parsed.exercises.isEmpty ? "Quick Build" : parsed.title
+                generatedTitle = resolvedTitle
                 generatedExercises = adjustedExercises
                 generatedEstimatedMinutes = clampedEstimate
                 if generatedExercises.isEmpty && !result.isEmpty {
@@ -2498,6 +3743,14 @@ struct WorkoutView: View {
                 }
                 isGenerating = false
             }
+            if !adjustedExercises.isEmpty {
+                TodayTrainingStore.save(
+                    title: resolvedTitle,
+                    exercises: adjustedExercises.map { $0.name },
+                    source: .generated
+                )
+            }
+            return !adjustedExercises.isEmpty
         } catch {
             let fallback = adjustExercisesToDuration(
                 fallbackGeneratedExercises(),
@@ -2515,6 +3768,14 @@ struct WorkoutView: View {
                 loadError = "Server unavailable. Using quick build."
                 isGenerating = false
             }
+            if !fallback.isEmpty {
+                TodayTrainingStore.save(
+                    title: "Quick Build",
+                    exercises: fallback.map { $0.name },
+                    source: .generated
+                )
+            }
+            return !fallback.isEmpty
         }
     }
 
@@ -2556,6 +3817,20 @@ struct WorkoutView: View {
         do {
             let detail = try await WorkoutAPIService.shared.fetchTemplateDetail(templateId: coachTemplate.id)
             let exercises = sessionExercises(from: detail.exercises)
+            let createdAt = TodayTrainingStore.parseDate(coachTemplate.createdAt)
+            if let createdAt, Calendar.current.isDateInToday(createdAt) {
+                let existing = TodayTrainingStore.todaysTraining()
+                let shouldSaveCoachSnapshot = existing == nil || existing?.source == .coach
+                if shouldSaveCoachSnapshot {
+                    TodayTrainingStore.save(
+                        title: coachTemplate.title,
+                        exercises: detail.exercises.map { $0.name },
+                        source: .coach,
+                        templateId: coachTemplate.id,
+                        createdAt: createdAt
+                    )
+                }
+            }
             await MainActor.run {
                 coachPickTemplateId = coachTemplate.id
                 coachPickTitle = coachTemplate.title
@@ -2643,11 +3918,43 @@ private struct WorkoutHeroCard<Content: View>: View {
 }
 
 private struct WorkoutTunePlanSheet: View {
+    private enum GenerationAlert: Identifiable {
+        case success
+        case failure
+
+        var id: String {
+            switch self {
+            case .success:
+                return "success"
+            case .failure:
+                return "failure"
+            }
+        }
+    }
+
     @Binding var selectedMuscleGroups: Set<String>
     @Binding var selectedEquipment: Set<String>
     @Binding var selectedDurationMinutes: Int
+    let onGenerate: (() async -> Bool)?
+
+    @State private var isGenerating = false
+    @State private var spinnerRotation = 0.0
+    @State private var pulseOuterRing = false
+    @State private var generationAlert: GenerationAlert?
 
     @Environment(\.dismiss) private var dismiss
+
+    init(
+        selectedMuscleGroups: Binding<Set<String>>,
+        selectedEquipment: Binding<Set<String>>,
+        selectedDurationMinutes: Binding<Int>,
+        onGenerate: (() async -> Bool)? = nil
+    ) {
+        _selectedMuscleGroups = selectedMuscleGroups
+        _selectedEquipment = selectedEquipment
+        _selectedDurationMinutes = selectedDurationMinutes
+        self.onGenerate = onGenerate
+    }
 
     var body: some View {
         ZStack {
@@ -2657,7 +3964,7 @@ private struct WorkoutTunePlanSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     HStack {
-                        Text("Tune the plan")
+                        Text(showsGenerateAction ? "Generate workout" : "Tune the plan")
                             .font(FitFont.heading(size: 22))
                             .foregroundColor(FitTheme.textPrimary)
                         Spacer()
@@ -2686,9 +3993,1421 @@ private struct WorkoutTunePlanSheet: View {
                         selectedMinutes: $selectedDurationMinutes,
                         options: [20, 30, 45, 60, 75, 90]
                     )
+
+                    if showsGenerateAction {
+                        Text("Your custom workout will appear in the Workout Builder once generated.")
+                            .font(FitFont.body(size: 12))
+                            .foregroundColor(FitTheme.textSecondary)
+                            .padding(.top, 4)
+                    }
                 }
                 .padding(.horizontal, 20)
                 .padding(.bottom, 32)
+            }
+
+            if isGenerating {
+                generationOverlay
+            }
+        }
+        .safeAreaInset(edge: .bottom) {
+            if showsGenerateAction {
+                ActionButton(
+                    title: isGenerating ? "Generating..." : "Generate Workout",
+                    style: .primary
+                ) {
+                    Task {
+                        await runGeneration()
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 20)
+                .padding(.top, 10)
+                .padding(.bottom, 12)
+                .background(.ultraThinMaterial)
+                .disabled(isGenerating || selectedMuscleGroups.isEmpty)
+            }
+        }
+        .alert(item: $generationAlert) { alert in
+            switch alert {
+            case .success:
+                return Alert(
+                    title: Text("Workout generated"),
+                    message: Text("Your workout has been completely generated."),
+                    dismissButton: .default(Text("Done")) {
+                        dismiss()
+                    }
+                )
+            case .failure:
+                return Alert(
+                    title: Text("Generation failed"),
+                    message: Text("Unable to generate your workout right now. Please try again."),
+                    dismissButton: .default(Text("OK"))
+                )
+            }
+        }
+    }
+
+    private var showsGenerateAction: Bool {
+        onGenerate != nil
+    }
+
+    private var generationOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.45)
+                .ignoresSafeArea()
+
+            VStack(spacing: 14) {
+                ZStack {
+                    Circle()
+                        .fill(FitTheme.cardWorkoutAccent.opacity(0.14))
+                        .frame(width: 118, height: 118)
+                        .scaleEffect(pulseOuterRing ? 1.08 : 0.94)
+
+                    Circle()
+                        .trim(from: 0.18, to: 0.92)
+                        .stroke(
+                            FitTheme.primaryGradient,
+                            style: StrokeStyle(lineWidth: 6, lineCap: .round)
+                        )
+                        .frame(width: 84, height: 84)
+                        .rotationEffect(.degrees(spinnerRotation))
+
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 28, weight: .medium))
+                        .foregroundColor(FitTheme.cardWorkoutAccent)
+                }
+
+                Text("Building your workout")
+                    .font(FitFont.heading(size: 19))
+                    .foregroundColor(FitTheme.textPrimary)
+                Text("This only takes a few seconds.")
+                    .font(FitFont.body(size: 12))
+                    .foregroundColor(FitTheme.textSecondary)
+            }
+            .padding(.vertical, 24)
+            .padding(.horizontal, 26)
+            .background(FitTheme.cardBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .stroke(FitTheme.cardStroke.opacity(0.65), lineWidth: 1)
+            )
+            .shadow(color: FitTheme.shadow.opacity(0.45), radius: 20, x: 0, y: 10)
+            .padding(.horizontal, 20)
+        }
+        .transition(.opacity)
+    }
+
+    private func runGeneration() async {
+        guard let onGenerate else {
+            dismiss()
+            return
+        }
+
+        Haptics.medium()
+        withAnimation(.easeInOut(duration: 0.2)) {
+            isGenerating = true
+        }
+        spinnerRotation = 0
+        pulseOuterRing = false
+
+        withAnimation(.linear(duration: 1.15).repeatForever(autoreverses: false)) {
+            spinnerRotation = 360
+        }
+        withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
+            pulseOuterRing = true
+        }
+
+        let success = await onGenerate()
+
+        withAnimation(.easeInOut(duration: 0.2)) {
+            isGenerating = false
+        }
+        spinnerRotation = 0
+        pulseOuterRing = false
+
+        if success {
+            Haptics.success()
+            generationAlert = .success
+        } else {
+            Haptics.error()
+            generationAlert = .failure
+        }
+    }
+}
+
+private struct SplitSetupFlowView: View {
+    private enum Step: Hashable {
+        case intro
+        case mode
+        case splitStyle
+        case daysPerWeek
+        case trainingDays
+        case focus
+        case weekPlanner
+        case overview
+        case planDay(String)
+    }
+
+    @State private var path: [Step] = []
+    @State private var mode: SplitCreationMode
+    @State private var daysPerWeek: Int
+    @State private var trainingDays: [String]
+    @State private var splitType: SplitType
+    @State private var dayPlans: [String: SplitDayPlan]
+    @State private var focus: String
+
+    let templates: [WorkoutTemplate]
+    let isEditing: Bool
+    let onSave: (SplitCreationMode, Int, [String], SplitType, [String: SplitDayPlan], String) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    private let weekdaySymbols = Calendar.current.weekdaySymbols
+    private let shortWeekdaySymbols = Calendar.current.shortWeekdaySymbols
+
+    init(
+        currentMode: SplitCreationMode,
+        currentDaysPerWeek: Int,
+        currentTrainingDays: [String],
+        currentSplitType: SplitType,
+        currentDayPlans: [String: SplitDayPlan],
+        currentFocus: String,
+        templates: [WorkoutTemplate],
+        isEditing: Bool,
+        onSave: @escaping (SplitCreationMode, Int, [String], SplitType, [String: SplitDayPlan], String) -> Void
+    ) {
+        _mode = State(initialValue: currentMode)
+        _daysPerWeek = State(initialValue: currentDaysPerWeek)
+        _trainingDays = State(initialValue: currentTrainingDays)
+        _splitType = State(initialValue: currentSplitType)
+        _dayPlans = State(initialValue: currentDayPlans)
+        _focus = State(initialValue: currentFocus)
+        self.templates = templates
+        self.isEditing = isEditing
+        self.onSave = onSave
+    }
+
+    var body: some View {
+        NavigationStack(path: $path) {
+            introStep
+                .navigationBarHidden(true)
+                .navigationDestination(for: Step.self) { step in
+                    switch step {
+                    case .intro:
+                        introStep
+                    case .mode:
+                        modeStep
+                    case .splitStyle:
+                        splitStyleStep
+                    case .daysPerWeek:
+                        daysPerWeekStep
+                    case .trainingDays:
+                        trainingDaysStep
+                    case .focus:
+                        focusStep
+                    case .weekPlanner:
+                        weekPlannerStep
+                    case .overview:
+                        overviewStep
+                    case .planDay(let day):
+                        planDayStep(day)
+                    }
+                }
+        }
+    }
+
+    private var introStep: some View {
+        stepLayout(
+            currentStep: .intro,
+            title: isEditing ? "Update your weekly workouts" : "Set up your weekly workouts",
+            subtitle: "Answer a few questions to plan the week.",
+            showsBack: false,
+            primaryTitle: "Get started",
+            primaryAction: {
+                Haptics.light()
+                withAnimation(MotionTokens.springBase) {
+                    path.append(.mode)
+                }
+            },
+            showsSummary: false
+        ) {
+            WorkoutCard {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("What you'll set up")
+                        .font(FitFont.body(size: 12, weight: .semibold))
+                        .foregroundColor(FitTheme.textSecondary)
+                    Label("Choose AI or build your own", systemImage: "sparkles")
+                        .font(FitFont.body(size: 13, weight: .semibold))
+                        .foregroundColor(FitTheme.textPrimary)
+                    Label("Pick your training days", systemImage: "calendar")
+                        .font(FitFont.body(size: 13, weight: .semibold))
+                        .foregroundColor(FitTheme.textPrimary)
+                    Label("Plan each workout", systemImage: "dumbbell")
+                        .font(FitFont.body(size: 13, weight: .semibold))
+                        .foregroundColor(FitTheme.textPrimary)
+                }
+            }
+
+            WorkoutCard(isAccented: true) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Preview your week")
+                        .font(FitFont.body(size: 12, weight: .semibold))
+                        .foregroundColor(FitTheme.textSecondary)
+                    HStack(spacing: 6) {
+                        ForEach(weekdaySymbols.indices, id: \.self) { index in
+                            let day = weekdaySymbols[index]
+                            let shortLabel = index < shortWeekdaySymbols.count
+                                ? shortWeekdaySymbols[index]
+                                : String(day.prefix(3))
+                            MiniDayPill(
+                                title: shortLabel,
+                                isActive: trainingDays.contains(day)
+                            )
+                        }
+                    }
+                    Text("We'll balance training and recovery so your plan feels sustainable.")
+                        .font(FitFont.body(size: 12))
+                        .foregroundColor(FitTheme.textSecondary)
+                }
+            }
+        }
+    }
+
+    private var modeStep: some View {
+        stepLayout(
+            currentStep: .mode,
+            title: "How do you want to build your split?",
+            subtitle: "Pick the setup style that fits you best.",
+            primaryTitle: "Continue",
+            primaryAction: continueFromMode,
+            showsSummary: false
+        ) {
+            VStack(spacing: 12) {
+                ForEach(SplitCreationMode.allCases) { option in
+                    SplitModeCard(
+                        mode: option,
+                        isSelected: mode == option,
+                        action: {
+                            Haptics.selection()
+                            withAnimation(MotionTokens.springQuick) {
+                                mode = option
+                            }
+                        }
+                    )
+                }
+            }
+        }
+    }
+
+    private var splitStyleStep: some View {
+        stepLayout(
+            currentStep: .splitStyle,
+            title: "Choose a split style",
+            subtitle: "We’ll match the split to your training days.",
+            primaryTitle: "Continue",
+            primaryAction: {
+                Haptics.light()
+                withAnimation(MotionTokens.springBase) {
+                    path.append(.daysPerWeek)
+                }
+            },
+            showsSummary: true
+        ) {
+            VStack(spacing: 12) {
+                ForEach(splitStyleOptions) { option in
+                    SplitTypeCard(
+                        splitType: option,
+                        isSelected: splitType == option,
+                        exampleDays: splitTypeExampleDays(option),
+                        action: {
+                            Haptics.selection()
+                            withAnimation(MotionTokens.springQuick) {
+                                splitType = option
+                            }
+                        }
+                    )
+                }
+            }
+        }
+    }
+
+    private var daysPerWeekStep: some View {
+        stepLayout(
+            currentStep: .daysPerWeek,
+            title: "Training days per week",
+            subtitle: "How many days do you want to train?",
+            primaryTitle: "Continue",
+            primaryAction: {
+                Haptics.light()
+                withAnimation(MotionTokens.springBase) {
+                    path.append(.trainingDays)
+                }
+            },
+            showsSummary: true
+        ) {
+            HStack(spacing: 8) {
+                ForEach(2...7, id: \.self) { dayCount in
+                    Button {
+                        setDaysPerWeek(dayCount)
+                    } label: {
+                        Text("\(dayCount)")
+                            .font(FitFont.body(size: 14, weight: .semibold))
+                            .foregroundColor(daysPerWeek == dayCount ? FitTheme.buttonText : FitTheme.textPrimary)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(daysPerWeek == dayCount ? FitTheme.accent : FitTheme.cardBackground)
+                            .clipShape(Capsule())
+                            .overlay(
+                                Capsule()
+                                    .stroke(daysPerWeek == dayCount ? Color.clear : FitTheme.cardStroke, lineWidth: 1)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private var trainingDaysStep: some View {
+        stepLayout(
+            currentStep: .trainingDays,
+            title: "Pick your training days",
+            subtitle: "Select \(daysPerWeek) days so we can schedule rest days.",
+            primaryTitle: "Continue",
+            isPrimaryDisabled: trainingDays.count != daysPerWeek,
+            primaryAction: continueFromTrainingDays,
+            showsSummary: true
+        ) {
+            let columns = Array(repeating: GridItem(.flexible(), spacing: 8), count: 7)
+            LazyVGrid(columns: columns, spacing: 10) {
+                ForEach(weekdaySymbols.indices, id: \.self) { index in
+                    let day = weekdaySymbols[index]
+                    let shortLabel = index < shortWeekdaySymbols.count
+                        ? shortWeekdaySymbols[index]
+                        : String(day.prefix(3))
+                    SplitDayChip(
+                        title: shortLabel,
+                        isSelected: trainingDays.contains(day),
+                        action: { toggleTrainingDay(day) }
+                    )
+                }
+            }
+
+            Text("Select \(daysPerWeek) days. Tap a selected day to free a slot.")
+                .font(FitFont.body(size: 12))
+                .foregroundColor(FitTheme.textSecondary)
+        }
+    }
+
+    private var focusStep: some View {
+        stepLayout(
+            currentStep: .focus,
+            title: "Training focus",
+            subtitle: "Choose the goal that matters most right now.",
+            primaryTitle: "Continue",
+            primaryAction: {
+                Haptics.light()
+                withAnimation(MotionTokens.springBase) {
+                    path.append(.overview)
+                }
+            },
+            showsSummary: true
+        ) {
+            VStack(spacing: 12) {
+                ForEach(focusOptions, id: \.self) { option in
+                    let isSelected = focus == option
+                    Button(action: {
+                        Haptics.selection()
+                        withAnimation(MotionTokens.springQuick) {
+                            focus = option
+                        }
+                    }) {
+                        HStack(spacing: 12) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(option)
+                                    .font(FitFont.body(size: 15, weight: .semibold))
+                                    .foregroundColor(FitTheme.textPrimary)
+                                Text(focusSubtitle(for: option))
+                                    .font(FitFont.body(size: 11))
+                                    .foregroundColor(FitTheme.textSecondary)
+                            }
+                            Spacer()
+                            if isSelected {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundColor(FitTheme.accent)
+                            }
+                        }
+                        .padding(14)
+                        .background(isSelected ? FitTheme.accent.opacity(0.12) : FitTheme.cardBackground)
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .stroke(isSelected ? FitTheme.accent : FitTheme.cardStroke, lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private var weekPlannerStep: some View {
+        stepLayout(
+            currentStep: .weekPlanner,
+            title: "Plan your week",
+            subtitle: "Choose a workout focus and source for each training day.",
+            primaryTitle: "Continue",
+            isPrimaryDisabled: trainingDays.count != daysPerWeek,
+            primaryAction: {
+                Haptics.light()
+                withAnimation(MotionTokens.springBase) {
+                    path.append(.overview)
+                }
+            },
+            showsSummary: true
+        ) {
+            VStack(spacing: 12) {
+                ForEach(trainingDays, id: \.self) { day in
+                    PlanDayRow(
+                        dayLabel: shortLabel(for: day),
+                        plan: dayPlans[day],
+                        action: { path.append(.planDay(day)) }
+                    )
+                }
+            }
+        }
+    }
+
+    private var overviewStep: some View {
+        stepLayout(
+            currentStep: .overview,
+            title: "Weekly overview",
+            subtitle: "Review your plan before saving.",
+            primaryTitle: isEditing ? "Save changes" : "Save split",
+            isPrimaryDisabled: trainingDays.count != daysPerWeek,
+            primaryAction: saveChanges,
+            showsSummary: false
+        ) {
+            WorkoutCard {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Split summary")
+                        .font(FitFont.body(size: 13, weight: .semibold))
+                        .foregroundColor(FitTheme.textSecondary)
+
+                    Text(mode == .custom ? "Custom Split" : resolvedSelectedSplitType.title)
+                        .font(FitFont.heading(size: 20))
+                        .foregroundColor(FitTheme.textPrimary)
+
+                    HStack(spacing: 10) {
+                        SummaryPill(title: "Days", value: "\(daysPerWeek) / week")
+                        SummaryPill(title: "Mode", value: mode.title)
+                        SummaryPill(title: "Focus", value: focus)
+                    }
+
+                    Text(trainingDaysSummary)
+                        .font(FitFont.body(size: 12))
+                        .foregroundColor(FitTheme.textSecondary)
+                }
+            }
+
+            if mode == .custom {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Planned workouts")
+                        .font(FitFont.body(size: 16, weight: .semibold))
+                        .foregroundColor(FitTheme.textPrimary)
+
+                    ForEach(trainingDays, id: \.self) { day in
+                        PlanDayRow(
+                            dayLabel: shortLabel(for: day),
+                            plan: dayPlans[day],
+                            action: { path.append(.planDay(day)) }
+                        )
+                    }
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Split preview")
+                        .font(FitFont.body(size: 16, weight: .semibold))
+                        .foregroundColor(FitTheme.textPrimary)
+
+                    ForEach(Array(trainingDays.enumerated()), id: \.offset) { index, day in
+                        let label = previewDayLabels.indices.contains(index) ? previewDayLabels[index] : "Training"
+                        HStack(spacing: 12) {
+                            Text(shortLabel(for: day))
+                                .font(FitFont.body(size: 14, weight: .semibold))
+                                .foregroundColor(FitTheme.textPrimary)
+                                .frame(width: 40, alignment: .leading)
+                            Text(label)
+                                .font(FitFont.body(size: 14))
+                                .foregroundColor(FitTheme.textSecondary)
+                            Spacer()
+                        }
+                        .padding(12)
+                        .background(FitTheme.cardBackground)
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .stroke(FitTheme.cardStroke.opacity(0.8), lineWidth: 1)
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private func planDayStep(_ day: String) -> some View {
+        WeeklyPlanEditorSheet(
+            weekday: day,
+            shortLabel: shortLabel(for: day),
+            existingPlan: dayPlans[day],
+            templates: templates,
+            showsCloseButton: false,
+            onSave: { updatedPlan in
+                dayPlans[day] = updatedPlan
+            },
+            onClear: {
+                dayPlans.removeValue(forKey: day)
+            }
+        )
+    }
+
+    private func stepLayout<Content: View>(
+        currentStep: Step,
+        title: String,
+        subtitle: String? = nil,
+        showsBack: Bool = true,
+        primaryTitle: String,
+        isPrimaryDisabled: Bool = false,
+        primaryAction: @escaping () -> Void,
+        showsSummary: Bool = true,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        ZStack {
+            FitTheme.backgroundGradient
+                .ignoresSafeArea()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    HStack {
+                        if showsBack {
+                            Button(action: {
+                                guard !path.isEmpty else { return }
+                                Haptics.light()
+                                withAnimation(MotionTokens.springBase) {
+                                    path.removeLast()
+                                }
+                            }) {
+                                Image(systemName: "chevron.left")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundColor(FitTheme.textPrimary)
+                                    .frame(width: 34, height: 34)
+                                    .background(FitTheme.cardHighlight)
+                                    .clipShape(Circle())
+                            }
+                            .buttonStyle(.plain)
+                        } else {
+                            Spacer().frame(width: 34)
+                        }
+
+                        Spacer()
+
+                        Button("Close") {
+                            Haptics.light()
+                            dismiss()
+                        }
+                        .font(FitFont.body(size: 14, weight: .semibold))
+                        .foregroundColor(FitTheme.accent)
+                    }
+                    .padding(.top, 12)
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(progressLabel(for: currentStep))
+                            .font(FitFont.body(size: 11, weight: .semibold))
+                            .foregroundColor(FitTheme.textSecondary)
+
+                        progressBar(value: progressValue(for: currentStep))
+                    }
+
+                    Text(title)
+                        .font(FitFont.heading(size: 24))
+                        .foregroundColor(FitTheme.textPrimary)
+
+                    if let subtitle {
+                        Text(subtitle)
+                            .font(FitFont.body(size: 13))
+                            .foregroundColor(FitTheme.textSecondary)
+                    }
+
+                    if showsSummary {
+                        splitSetupSummaryCard
+                    }
+
+                    content()
+
+                    ActionButton(title: primaryTitle, style: .primary) {
+                        primaryAction()
+                    }
+                    .disabled(isPrimaryDisabled)
+                    .opacity(isPrimaryDisabled ? 0.6 : 1)
+                }
+                .padding(.horizontal, 20)
+                .padding(.bottom, 32)
+            }
+        }
+        .navigationBarHidden(true)
+    }
+
+    private func continueFromMode() {
+        Haptics.light()
+        if mode == .ai {
+            withAnimation(MotionTokens.springBase) {
+                path.append(.splitStyle)
+            }
+        } else {
+            withAnimation(MotionTokens.springBase) {
+                path.append(.daysPerWeek)
+            }
+        }
+    }
+
+    private func continueFromTrainingDays() {
+        Haptics.light()
+        if mode == .ai {
+            withAnimation(MotionTokens.springBase) {
+                path.append(.focus)
+            }
+        } else {
+            withAnimation(MotionTokens.springBase) {
+                path.append(.weekPlanner)
+            }
+        }
+    }
+
+    private func saveChanges() {
+        let normalized = normalizedTrainingDays(trainingDays, targetCount: daysPerWeek)
+        let cleanedPlans = dayPlans.filter { normalized.contains($0.key) }
+        onSave(mode, daysPerWeek, normalized, splitType, cleanedPlans, focus)
+        Haptics.success()
+        dismiss()
+    }
+
+    private func setDaysPerWeek(_ newValue: Int) {
+        let clamped = min(max(newValue, 2), 7)
+        guard clamped != daysPerWeek else { return }
+        Haptics.selection()
+        withAnimation(MotionTokens.springQuick) {
+            daysPerWeek = clamped
+            trainingDays = normalizedTrainingDays(trainingDays, targetCount: clamped)
+            let options = splitStyleOptions
+            if !options.contains(splitType) {
+                splitType = .smart
+            }
+        }
+    }
+
+    private func toggleTrainingDay(_ day: String) {
+        var selected = Set(trainingDays)
+        let startingCount = selected.count
+        if selected.contains(day) {
+            selected.remove(day)
+        } else if selected.count < daysPerWeek {
+            selected.insert(day)
+        } else {
+            Haptics.warning()
+            return
+        }
+        guard selected.count != startingCount else { return }
+        Haptics.selection()
+        withAnimation(MotionTokens.springQuick) {
+            trainingDays = weekdaySymbols.filter { selected.contains($0) }
+        }
+    }
+
+    private func normalizedTrainingDays(_ days: [String], targetCount: Int) -> [String] {
+        let filtered = days.filter { weekdaySymbols.contains($0) }
+        var ordered = weekdaySymbols.filter { filtered.contains($0) }
+
+        if ordered.count > targetCount {
+            ordered = Array(ordered.prefix(targetCount))
+        }
+
+        if ordered.count < targetCount {
+            for day in weekdaySymbols where !ordered.contains(day) {
+                ordered.append(day)
+                if ordered.count == targetCount {
+                    break
+                }
+            }
+        }
+
+        return ordered
+    }
+
+    private func shortLabel(for day: String) -> String {
+        if let index = weekdaySymbols.firstIndex(of: day), index < shortWeekdaySymbols.count {
+            return shortWeekdaySymbols[index]
+        }
+        return String(day.prefix(3))
+    }
+
+    private var splitStyleOptions: [SplitType] {
+        let clamped = min(max(daysPerWeek, 2), 7)
+        switch clamped {
+        case 2:
+            return [.smart, .fullBody, .upperLower]
+        case 3:
+            return [.smart, .fullBody, .pushPullLegs, .arnold]
+        case 4:
+            return [.smart, .upperLower, .hybrid, .bodyPart]
+        case 5:
+            return [.smart, .pushPullLegs, .hybrid, .bodyPart]
+        case 6:
+            return [.smart, .pushPullLegs, .hybrid, .bodyPart, .arnold]
+        default:
+            return [.smart, .fullBody, .bodyPart]
+        }
+    }
+
+    private var resolvedSelectedSplitType: SplitType {
+        resolveSplitType(splitType)
+    }
+
+    private var trainingDaysSummary: String {
+        let labels = weekdaySymbols.enumerated().compactMap { index, day -> String? in
+            guard trainingDays.contains(day) else { return nil }
+            if index < shortWeekdaySymbols.count {
+                return shortWeekdaySymbols[index]
+            }
+            return String(day.prefix(3))
+        }
+        if labels.isEmpty {
+            return "Pick your training days to update the split schedule."
+        }
+        return "Training days: " + labels.joined(separator: ", ")
+    }
+
+    private var previewDayLabels: [String] {
+        resolveSplitType(splitType).dayLabels(for: min(max(daysPerWeek, 2), 7))
+    }
+
+    private func splitTypeExampleDays(_ type: SplitType) -> [String] {
+        let clamped = min(max(daysPerWeek, 2), 7)
+        let resolved = resolveSplitType(type)
+        return Array(resolved.dayLabels(for: clamped).prefix(3))
+    }
+
+    private var focusOptions: [String] {
+        ["Strength", "Hypertrophy", "Fat loss + muscle"]
+    }
+
+    private func focusSubtitle(for focus: String) -> String {
+        switch focus {
+        case "Hypertrophy":
+            return "Size and muscle growth focus."
+        case "Fat loss + muscle":
+            return "Lean out while building muscle."
+        default:
+            return "Strength and performance focus."
+        }
+    }
+
+    private func resolveSplitType(_ type: SplitType) -> SplitType {
+        guard type == .smart else { return type }
+        switch min(max(daysPerWeek, 2), 7) {
+        case 2:
+            return .upperLower
+        case 3:
+            return .fullBody
+        case 4:
+            return .upperLower
+        case 5:
+            return .hybrid
+        case 6:
+            return .pushPullLegs
+        default:
+            return .fullBody
+        }
+    }
+
+    private var splitSetupSummaryCard: some View {
+        WorkoutCard {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Current setup")
+                    .font(FitFont.body(size: 12, weight: .semibold))
+                    .foregroundColor(FitTheme.textSecondary)
+
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        SummaryPill(title: "Mode", value: mode.title)
+                        SummaryPill(title: "Days", value: "\(daysPerWeek)/wk")
+                        SummaryPill(
+                            title: "Split",
+                            value: mode == .ai ? resolvedSelectedSplitType.title : "Custom"
+                        )
+                        SummaryPill(
+                            title: "Focus",
+                            value: focus.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Not set" : focus
+                        )
+                    }
+                }
+
+                Text(trainingDaysSummary)
+                    .font(FitFont.body(size: 12))
+                    .foregroundColor(FitTheme.textSecondary)
+            }
+        }
+    }
+
+    private var progressSteps: [Step] {
+        var steps: [Step] = [.intro, .mode]
+        if mode == .ai {
+            steps.append(contentsOf: [.splitStyle, .daysPerWeek, .trainingDays, .focus, .overview])
+        } else {
+            steps.append(contentsOf: [.daysPerWeek, .trainingDays, .weekPlanner, .overview])
+        }
+        return steps
+    }
+
+    private func normalizedProgressStep(_ step: Step) -> Step {
+        if case .planDay = step {
+            return .weekPlanner
+        }
+        return step
+    }
+
+    private func progressIndex(for step: Step) -> Int {
+        let normalized = normalizedProgressStep(step)
+        return progressSteps.firstIndex(of: normalized) ?? 0
+    }
+
+    private func progressLabel(for step: Step) -> String {
+        let count = max(progressSteps.count, 1)
+        let index = min(progressIndex(for: step) + 1, count)
+        return "Step \(index) of \(count)"
+    }
+
+    private func progressValue(for step: Step) -> Double {
+        let count = max(progressSteps.count, 1)
+        let index = min(progressIndex(for: step) + 1, count)
+        return Double(index) / Double(count)
+    }
+
+    private func progressBar(value: Double) -> some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(FitTheme.cardStroke.opacity(0.6))
+                Capsule()
+                    .fill(FitTheme.accent)
+                    .frame(width: max(proxy.size.width * CGFloat(value), 14))
+            }
+        }
+        .frame(height: 6)
+    }
+}
+
+private struct SplitTypeCard: View {
+    let splitType: SplitType
+    let isSelected: Bool
+    let exampleDays: [String]
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: splitType == .smart ? "sparkles" : "dumbbell")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundColor(FitTheme.accent)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(splitType.title)
+                        .font(FitFont.body(size: 16, weight: .semibold))
+                        .foregroundColor(FitTheme.textPrimary)
+                    Text(splitType.subtitle)
+                        .font(FitFont.body(size: 12))
+                        .foregroundColor(FitTheme.textSecondary)
+
+                    if !exampleDays.isEmpty {
+                        Text(exampleDays.joined(separator: " • "))
+                            .font(FitFont.body(size: 11))
+                            .foregroundColor(FitTheme.textSecondary)
+                    }
+                }
+
+                Spacer()
+
+                if isSelected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(FitTheme.accent)
+                }
+            }
+            .padding(16)
+            .background(isSelected ? FitTheme.accent.opacity(0.12) : FitTheme.cardBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(isSelected ? FitTheme.accent : FitTheme.cardStroke, lineWidth: isSelected ? 2 : 1)
+            )
+            .shadow(color: isSelected ? FitTheme.accent.opacity(0.15) : FitTheme.shadow.opacity(0.6), radius: isSelected ? 14 : 10, x: 0, y: 6)
+            .scaleEffect(isSelected ? 1.01 : 1.0)
+            .animation(MotionTokens.springQuick, value: isSelected)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct MiniDayPill: View {
+    let title: String
+    let isActive: Bool
+
+    var body: some View {
+        Text(title)
+            .font(FitFont.body(size: 10, weight: .semibold))
+            .foregroundColor(isActive ? FitTheme.buttonText : FitTheme.textSecondary)
+            .padding(.vertical, 6)
+            .padding(.horizontal, 8)
+            .background(isActive ? FitTheme.accent : FitTheme.cardHighlight)
+            .clipShape(Capsule())
+            .overlay(
+                Capsule()
+                    .stroke(isActive ? Color.clear : FitTheme.cardStroke.opacity(0.7), lineWidth: 1)
+            )
+    }
+}
+
+private struct PlanDayRow: View {
+    let dayLabel: String
+    let plan: SplitDayPlan?
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: {
+            Haptics.selection()
+            action()
+        }) {
+            HStack(spacing: 12) {
+                Circle()
+                    .fill(plan == nil ? FitTheme.cardStroke : FitTheme.success)
+                    .frame(width: 8, height: 8)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(dayLabel)
+                        .font(FitFont.body(size: 12, weight: .semibold))
+                        .foregroundColor(FitTheme.textSecondary)
+                        .textCase(.uppercase)
+
+                    Text(planTitle)
+                        .font(FitFont.body(size: 15, weight: .semibold))
+                        .foregroundColor(FitTheme.textPrimary)
+
+                    if let plan {
+                        Text(plan.source.title)
+                            .font(FitFont.body(size: 11))
+                            .foregroundColor(FitTheme.textSecondary)
+                    } else {
+                        Text("Tap to plan")
+                            .font(FitFont.body(size: 11))
+                            .foregroundColor(FitTheme.textSecondary)
+                    }
+                }
+
+                Spacer()
+
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(FitTheme.textSecondary)
+            }
+            .padding(14)
+            .background(FitTheme.cardBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(FitTheme.cardStroke.opacity(0.8), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var planTitle: String {
+        guard let plan else { return "Plan workout" }
+        if let title = plan.templateTitle?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty {
+            return title
+        }
+        let trimmed = plan.focus.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "Plan workout" : trimmed
+    }
+}
+
+private struct WeeklyPlanEditorSheet: View {
+    let weekday: String
+    let shortLabel: String
+    let templates: [WorkoutTemplate]
+    let showsCloseButton: Bool
+    let onSave: (SplitDayPlan) -> Void
+    let onClear: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var focus: String
+    @State private var source: SplitPlanSource
+    @State private var selectedTemplateId: String?
+    @State private var selectedTemplateTitle: String?
+    @State private var selectedMuscleGroups: Set<String>
+    @State private var selectedEquipment: Set<String>
+    @State private var durationMinutes: Int
+    @State private var templateSearch: String
+    @State private var customWorkoutName: String
+    @State private var customExercises: [WorkoutExerciseDraft]
+    @State private var isExercisePickerPresented = false
+
+    init(
+        weekday: String,
+        shortLabel: String,
+        existingPlan: SplitDayPlan?,
+        templates: [WorkoutTemplate],
+        showsCloseButton: Bool = true,
+        onSave: @escaping (SplitDayPlan) -> Void,
+        onClear: @escaping () -> Void
+    ) {
+        self.weekday = weekday
+        self.shortLabel = shortLabel
+        self.templates = templates
+        self.showsCloseButton = showsCloseButton
+        self.onSave = onSave
+        self.onClear = onClear
+
+        _focus = State(initialValue: existingPlan?.focus ?? "")
+        _source = State(initialValue: existingPlan?.source ?? .ai)
+        _selectedTemplateId = State(initialValue: existingPlan?.templateId)
+        _selectedTemplateTitle = State(initialValue: existingPlan?.templateTitle)
+        let defaultGroups = existingPlan?.muscleGroups.isEmpty == false
+            ? existingPlan?.muscleGroups ?? []
+            : [MuscleGroup.chest.rawValue, MuscleGroup.back.rawValue]
+        _selectedMuscleGroups = State(initialValue: Set(defaultGroups))
+        _selectedEquipment = State(initialValue: Set(existingPlan?.equipment ?? []))
+        _durationMinutes = State(initialValue: existingPlan?.durationMinutes ?? 45)
+        _templateSearch = State(initialValue: "")
+        _customWorkoutName = State(initialValue: existingPlan?.templateTitle ?? existingPlan?.focus ?? "")
+        let initialCustomExercises = WeeklyPlanEditorSheet.draftExercises(from: existingPlan?.customExercises ?? [])
+        _customExercises = State(initialValue: initialCustomExercises)
+    }
+
+    var body: some View {
+        ZStack {
+            FitTheme.backgroundGradient
+                .ignoresSafeArea()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Plan \(shortLabel)")
+                                .font(FitFont.heading(size: 22))
+                                .foregroundColor(FitTheme.textPrimary)
+                            Text("Set your workout focus and source.")
+                                .font(FitFont.body(size: 12))
+                                .foregroundColor(FitTheme.textSecondary)
+                        }
+                        Spacer()
+                        if showsCloseButton {
+                            Button("Close") {
+                                dismiss()
+                            }
+                            .font(FitFont.body(size: 14, weight: .semibold))
+                            .foregroundColor(FitTheme.accent)
+                        } else {
+                            Button(action: { dismiss() }) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "chevron.left")
+                                        .font(.system(size: 12, weight: .semibold))
+                                    Text("Back")
+                                        .font(FitFont.body(size: 14, weight: .semibold))
+                                }
+                                .foregroundColor(FitTheme.accent)
+                            }
+                        }
+                    }
+                    .padding(.top, 12)
+
+                    FieldLabel(title: "Workout focus")
+                    TextField("e.g., Chest, Upper, Pull", text: $focus)
+                        .font(FitFont.body(size: 15))
+                        .foregroundColor(FitTheme.textPrimary)
+                        .padding(12)
+                        .background(FitTheme.cardHighlight)
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+                    FieldLabel(title: "Plan type")
+                    PlanSourcePicker(source: $source)
+
+                    if source == .saved {
+                        FieldLabel(title: "Saved workouts")
+                        if templates.isEmpty {
+                            Text("No saved workouts yet. Create one in the Workout Builder.")
+                                .font(FitFont.body(size: 12))
+                                .foregroundColor(FitTheme.textSecondary)
+                        } else {
+                            SearchBar(text: $templateSearch, placeholder: "Search saved workouts")
+                                .padding(.bottom, 4)
+                            VStack(spacing: 10) {
+                                if filteredTemplates.isEmpty {
+                                    Text("No saved workouts found.")
+                                        .font(FitFont.body(size: 12))
+                                        .foregroundColor(FitTheme.textSecondary)
+                                } else {
+                                    ForEach(filteredTemplates) { template in
+                                        Button(action: {
+                                            selectedTemplateId = template.id
+                                            selectedTemplateTitle = template.title
+                                        }) {
+                                            HStack(spacing: 10) {
+                                                VStack(alignment: .leading, spacing: 2) {
+                                                    Text(template.title)
+                                                        .font(FitFont.body(size: 14, weight: .semibold))
+                                                        .foregroundColor(FitTheme.textPrimary)
+                                                    if let description = template.description, !description.isEmpty {
+                                                        Text(description)
+                                                            .font(FitFont.body(size: 11))
+                                                            .foregroundColor(FitTheme.textSecondary)
+                                                            .lineLimit(1)
+                                                    }
+                                                }
+                                                Spacer()
+                                                if selectedTemplateId == template.id {
+                                                    Image(systemName: "checkmark.circle.fill")
+                                                        .foregroundColor(FitTheme.accent)
+                                                }
+                                            }
+                                            .padding(12)
+                                            .background(selectedTemplateId == template.id ? FitTheme.accent.opacity(0.12) : FitTheme.cardBackground)
+                                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                                            .overlay(
+                                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                                    .stroke(selectedTemplateId == template.id ? FitTheme.accent : FitTheme.cardStroke, lineWidth: 1)
+                                            )
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if source == .create {
+                        BuilderStepHeader(step: 1, title: "Name your workout", subtitle: "Shown when you start.")
+                        TextField("Workout name", text: $customWorkoutName)
+                            .font(FitFont.body(size: 15))
+                            .foregroundColor(FitTheme.textPrimary)
+                            .padding(12)
+                            .background(FitTheme.cardHighlight)
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+                        Divider().background(FitTheme.cardStroke)
+
+                        BuilderStepHeader(step: 2, title: "Add exercises", subtitle: "Sets, reps, rest, and notes.")
+                        if customExercises.isEmpty {
+                            Text("Add exercises to start building your session.")
+                                .font(FitFont.body(size: 12))
+                                .foregroundColor(FitTheme.textSecondary)
+                        } else {
+                            ForEach(customExercises.indices, id: \.self) { index in
+                                DraftExerciseEditorRow(
+                                    exercise: $customExercises[index],
+                                    onRemove: {
+                                        let id = customExercises[index].id
+                                        customExercises.removeAll { $0.id == id }
+                                    }
+                                )
+                            }
+                        }
+
+                        ActionButton(title: "Add Exercise", style: .secondary) {
+                            isExercisePickerPresented = true
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+
+                    if source == .ai {
+                        FieldLabel(title: "Muscle focus")
+                        MuscleGroupGrid(
+                            selections: $selectedMuscleGroups,
+                            options: MuscleGroup.allCases
+                        )
+
+                        FieldLabel(title: "Available equipment")
+                        EquipmentGrid(
+                            selections: $selectedEquipment,
+                            options: WorkoutEquipment.allCases
+                        )
+
+                        FieldLabel(title: "Target duration")
+                        DurationSelector(
+                            selectedMinutes: $durationMinutes,
+                            options: [20, 30, 45, 60, 75, 90]
+                        )
+                    }
+
+                    HStack(spacing: 12) {
+                        ActionButton(title: "Clear", style: .secondary) {
+                            onClear()
+                            dismiss()
+                        }
+                        .frame(maxWidth: .infinity)
+
+                        ActionButton(title: "Save plan", style: .primary) {
+                            let focusText = resolvedFocus
+                            let trimmedCustomName = customWorkoutName.trimmingCharacters(in: .whitespacesAndNewlines)
+                            let customTitle = trimmedCustomName.isEmpty ? nil : trimmedCustomName
+                            let customPlanExercises = source == .create ? planExercises(from: customExercises) : []
+                            let customExercisesValue = customPlanExercises.isEmpty ? nil : customPlanExercises
+                            let customExerciseNames = customExercisesValue.map { values in
+                                values
+                                    .map(\.name)
+                                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                                    .filter { !$0.isEmpty }
+                            }
+                            let plan = SplitDayPlan(
+                                weekday: weekday,
+                                focus: focusText,
+                                source: source,
+                                templateId: source == .saved ? selectedTemplateId : nil,
+                                templateTitle: source == .saved ? selectedTemplateTitle : customTitle,
+                                muscleGroups: source == .ai ? selectedMuscleGroups.sorted() : [],
+                                equipment: source == .ai ? selectedEquipment.sorted() : [],
+                                durationMinutes: source == .ai ? durationMinutes : nil,
+                                customExercises: source == .create ? customExercisesValue : nil,
+                                exerciseNames: source == .create ? customExerciseNames : nil
+                            )
+                            onSave(plan)
+                            dismiss()
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                    .padding(.bottom, 24)
+                }
+                .padding(.horizontal, 20)
+                .padding(.bottom, 32)
+            }
+        }
+        .navigationBarHidden(true)
+        .sheet(isPresented: $isExercisePickerPresented) {
+            ExercisePickerModal(
+                selectedNames: Set(customExercises.map { $0.name }),
+                onAdd: { exercise in
+                    let newExercise = WorkoutExerciseDraft(
+                        name: exercise.name,
+                        muscleGroup: exercise.muscleGroups.first ?? "General",
+                        equipment: exercise.equipment.first ?? "Bodyweight",
+                        sets: 3,
+                        reps: 10,
+                        restSeconds: defaultRestSeconds(for: exercise.name),
+                        notes: ""
+                    )
+                    customExercises.append(newExercise)
+                },
+                onClose: { isExercisePickerPresented = false }
+            )
+        }
+        .onChange(of: source) { newValue in
+            if newValue != .saved {
+                selectedTemplateId = nil
+                selectedTemplateTitle = nil
+            }
+        }
+    }
+
+    private var filteredTemplates: [WorkoutTemplate] {
+        let trimmed = templateSearch.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            return templates
+        }
+        return templates.filter { $0.title.localizedCaseInsensitiveContains(trimmed) }
+    }
+
+    private var resolvedFocus: String {
+        let trimmed = focus.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty { return trimmed }
+        if source == .create {
+            let trimmedCustom = customWorkoutName.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedCustom.isEmpty { return trimmedCustom }
+        }
+        if source == .saved, let title = selectedTemplateTitle?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty {
+            return title
+        }
+        switch source {
+        case .saved:
+            return "Saved workout"
+        case .create:
+            return "Custom workout"
+        case .ai:
+            return "AI workout"
+        }
+    }
+
+    private func planExercises(from exercises: [WorkoutExerciseDraft]) -> [SplitPlanExercise] {
+        exercises.map { draft in
+            SplitPlanExercise(
+                name: draft.name,
+                muscleGroup: draft.muscleGroup,
+                equipment: draft.equipment,
+                sets: draft.sets,
+                reps: draft.reps,
+                restSeconds: draft.restSeconds,
+                notes: draft.notes.isEmpty ? nil : draft.notes
+            )
+        }
+    }
+
+    private func defaultRestSeconds(for name: String) -> Int {
+        let lower = name.lowercased()
+        let heavyKeywords = ["squat", "deadlift", "bench", "press", "row", "pull"]
+        if heavyKeywords.contains(where: { lower.contains($0) }) {
+            return 90
+        }
+        return 60
+    }
+
+    private static func draftExercises(from exercises: [SplitPlanExercise]) -> [WorkoutExerciseDraft] {
+        exercises.map { exercise in
+            WorkoutExerciseDraft(
+                name: exercise.name,
+                muscleGroup: exercise.muscleGroup,
+                equipment: exercise.equipment,
+                sets: max(1, exercise.sets),
+                reps: max(1, exercise.reps),
+                restSeconds: max(30, exercise.restSeconds),
+                notes: exercise.notes ?? ""
+            )
+        }
+    }
+}
+
+private struct PlanSourcePicker: View {
+    @Binding var source: SplitPlanSource
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ForEach(SplitPlanSource.allCases, id: \.self) { option in
+                let isSelected = option == source
+                Button(action: { source = option }) {
+                    Text(option.shortTitle)
+                        .font(FitFont.body(size: 12, weight: .semibold))
+                        .foregroundColor(isSelected ? FitTheme.buttonText : FitTheme.textPrimary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                        .background(
+                            isSelected
+                                ? AnyShapeStyle(FitTheme.primaryGradient)
+                                : AnyShapeStyle(FitTheme.cardBackground)
+                        )
+                        .clipShape(Capsule())
+                        .overlay(
+                            Capsule()
+                                .stroke(isSelected ? Color.clear : FitTheme.cardStroke.opacity(0.7), lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
             }
         }
     }
@@ -2707,14 +5426,6 @@ private struct WorkoutIconBadge: View {
             .clipShape(Circle())
             .shadow(color: accentColor.opacity(0.4), radius: 10, x: 0, y: 6)
     }
-}
-
-private struct SplitSnapshot {
-    var mode: SplitCreationMode = .ai
-    var daysPerWeek: Int = 3
-    var trainingDays: [String] = []
-    var focus: String = "Strength"
-    var name: String = "Full Body"
 }
 
 private enum WeeklyDayStatus {
@@ -2763,9 +5474,15 @@ private struct WeeklySplitDayCell: View {
                     Text(daySymbol)
                         .font(FitFont.body(size: 10, weight: .semibold))
                         .foregroundColor(topTextColor)
-                    Text("\(dayNumber)")
-                        .font(FitFont.body(size: 18, weight: .bold))
-                        .foregroundColor(mainTextColor)
+                    if status == .completed {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 18, weight: .bold))
+                            .foregroundColor(mainTextColor)
+                    } else {
+                        Text("\(dayNumber)")
+                            .font(FitFont.body(size: 18, weight: .bold))
+                            .foregroundColor(mainTextColor)
+                    }
                 }
                 .frame(maxWidth: .infinity, minHeight: 64)
                 .background(
@@ -2777,54 +5494,29 @@ private struct WeeklySplitDayCell: View {
                         .stroke(borderColor, lineWidth: isSelected ? 0 : 1)
                 )
                 .shadow(color: shadowColor, radius: shadowRadius, x: 0, y: shadowOffsetY)
-
-                if status == .completed {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundColor(FitTheme.textOnAccent)
-                        .padding(6)
-                }
             }
         }
         .buttonStyle(.plain)
     }
 
     private var backgroundColor: Color {
-        if isSelected, isTrainingDay {
-            return accentColor
+        if status == .completed {
+            return FitTheme.success
         }
         if !isTrainingDay {
             return isSelected ? FitTheme.cardHighlight.opacity(0.8) : FitTheme.cardHighlight
         }
-        switch status {
-        case .completed:
-            return accentColor
-        case .today:
-            return accentColor.opacity(0.28)
-        case .upcoming:
-            return accentColor.opacity(0.18)
-        case .rest:
-            return FitTheme.cardHighlight
-        }
+        return isSelected ? accentColor : accentColor.opacity(0.22)
     }
 
     private var borderColor: Color {
-        if isSelected, isTrainingDay {
-            return accentColor
+        if status == .completed {
+            return FitTheme.success
         }
-        if isSelected, !isTrainingDay {
-            return FitTheme.cardStroke.opacity(0.7)
+        if isTrainingDay {
+            return accentColor.opacity(isSelected ? 1 : 0.55)
         }
-        switch status {
-        case .today:
-            return accentColor
-        case .upcoming:
-            return accentColor.opacity(0.5)
-        case .rest:
-            return FitTheme.cardStroke.opacity(0.4)
-        case .completed:
-            return accentColor
-        }
+        return isSelected ? FitTheme.cardStroke.opacity(0.7) : FitTheme.cardStroke.opacity(0.4)
     }
 
     private var shadowColor: Color {
@@ -2840,11 +5532,13 @@ private struct WeeklySplitDayCell: View {
     }
 
     private var topTextColor: Color {
+        if status == .completed { return FitTheme.textOnAccent.opacity(0.9) }
         if isSelected, isTrainingDay { return FitTheme.textOnAccent.opacity(0.9) }
         return FitTheme.textSecondary
     }
 
     private var mainTextColor: Color {
+        if status == .completed { return FitTheme.textOnAccent }
         if isSelected, isTrainingDay { return FitTheme.textOnAccent }
         return FitTheme.textPrimary
     }
@@ -3745,49 +6439,52 @@ private struct WorkoutTemplatePreviewSheet: View {
 private struct WorkoutSwapSheet: View {
     let templates: [WorkoutTemplate]
     let onSelect: (WorkoutTemplate) -> Void
+    let onGenerate: () -> Void
+    let onCreate: () -> Void
     let onClose: () -> Void
 
     @State private var searchText = ""
+    @State private var showIntroMotion = false
+    @State private var animateBackdrop = false
 
     var body: some View {
         ZStack {
             FitTheme.backgroundGradient
                 .ignoresSafeArea()
+            backgroundOrbs
 
-            VStack(spacing: 16) {
-                HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Swap Workout")
-                            .font(FitFont.heading(size: 22))
-                            .foregroundColor(FitTheme.textPrimary)
-                        Text("Pick a saved workout to swap in.")
-                            .font(FitFont.body(size: 12))
-                            .foregroundColor(FitTheme.textSecondary)
-                    }
-                    Spacer()
-                    Button(action: onClose) {
-                        Image(systemName: "xmark")
-                            .font(FitFont.body(size: 14, weight: .semibold))
-                            .foregroundColor(FitTheme.textPrimary)
-                            .padding(10)
-                            .background(FitTheme.cardBackground)
-                            .clipShape(Circle())
-                    }
-                }
-                .padding(.horizontal, 20)
-                .padding(.top, 12)
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 16) {
+                    header
+                    quickActions
+                    searchAndSummary
 
-                SearchBar(text: $searchText, placeholder: "Search saved workouts")
-                    .padding(.horizontal, 20)
-
-                ScrollView {
-                    VStack(spacing: 12) {
-                        if filteredTemplates.isEmpty {
-                            Text("No saved workouts found.")
-                                .font(FitFont.body(size: 13))
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Text("Saved workouts")
+                                .font(FitFont.body(size: 14, weight: .semibold))
+                                .foregroundColor(FitTheme.textPrimary)
+                            Spacer()
+                            Text("\(filteredTemplates.count)")
+                                .font(FitFont.body(size: 11, weight: .semibold))
                                 .foregroundColor(FitTheme.textSecondary)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.horizontal, 20)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(FitTheme.cardHighlight.opacity(0.8))
+                                .clipShape(Capsule())
+                        }
+
+                        if filteredTemplates.isEmpty {
+                            WorkoutCard {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text("No saved workouts found")
+                                        .font(FitFont.body(size: 15, weight: .semibold))
+                                        .foregroundColor(FitTheme.textPrimary)
+                                    Text("Try a different search or use Generate/Create above.")
+                                        .font(FitFont.body(size: 12))
+                                        .foregroundColor(FitTheme.textSecondary)
+                                }
+                            }
                         } else {
                             ForEach(filteredTemplates) { template in
                                 WorkoutSwapRow(template: template) {
@@ -3796,11 +6493,105 @@ private struct WorkoutSwapSheet: View {
                             }
                         }
                     }
-                    .padding(.horizontal, 20)
-                    .padding(.bottom, 24)
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 12)
+                .padding(.bottom, 24)
+            }
+            .opacity(showIntroMotion ? 1 : 0)
+            .offset(y: showIntroMotion ? 0 : 10)
+        }
+        .onAppear {
+            withAnimation(.easeOut(duration: 0.35)) {
+                showIntroMotion = true
+            }
+            withAnimation(.easeInOut(duration: 4.0).repeatForever(autoreverses: true)) {
+                animateBackdrop = true
+            }
+        }
+    }
+
+    private var header: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Swap Workout")
+                    .font(FitFont.heading(size: 22))
+                    .foregroundColor(FitTheme.textPrimary)
+                Text("Choose saved, generate fresh, or create your own.")
+                    .font(FitFont.body(size: 12))
+                    .foregroundColor(FitTheme.textSecondary)
+            }
+            Spacer()
+            Button(action: onClose) {
+                Image(systemName: "xmark")
+                    .font(FitFont.body(size: 14, weight: .semibold))
+                    .foregroundColor(FitTheme.textPrimary)
+                    .padding(10)
+                    .background(FitTheme.cardBackground)
+                    .clipShape(Circle())
+                    .overlay(
+                        Circle()
+                            .stroke(FitTheme.cardStroke.opacity(0.65), lineWidth: 1)
+                    )
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private var quickActions: some View {
+        WorkoutCard(isAccented: true) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Quick actions")
+                    .font(FitFont.body(size: 12, weight: .semibold))
+                    .foregroundColor(FitTheme.textSecondary)
+
+                HStack(spacing: 10) {
+                    SwapActionTile(
+                        icon: "sparkles",
+                        title: "Generate",
+                        subtitle: "Tune plan then generate",
+                        accent: FitTheme.cardWorkoutAccent,
+                        action: onGenerate
+                    )
+                    SwapActionTile(
+                        icon: "square.and.pencil",
+                        title: "Create",
+                        subtitle: "Open template builder",
+                        accent: FitTheme.accent,
+                        action: onCreate
+                    )
                 }
             }
         }
+    }
+
+    private var searchAndSummary: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            SearchBar(text: $searchText, placeholder: "Search saved workouts")
+            HStack(spacing: 10) {
+                SummaryPill(title: "Library", value: "\(templates.count) templates")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                SummaryPill(title: "Ready", value: filteredTemplates.isEmpty ? "No match" : "\(filteredTemplates.count) found")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    private var backgroundOrbs: some View {
+        ZStack {
+            Circle()
+                .fill(FitTheme.cardWorkoutAccent.opacity(0.2))
+                .frame(width: animateBackdrop ? 340 : 280, height: animateBackdrop ? 340 : 280)
+                .blur(radius: 45)
+                .offset(x: animateBackdrop ? 150 : 110, y: -260)
+
+            Circle()
+                .fill(FitTheme.accent.opacity(0.18))
+                .frame(width: animateBackdrop ? 300 : 240, height: animateBackdrop ? 300 : 240)
+                .blur(radius: 38)
+                .offset(x: animateBackdrop ? -120 : -90, y: -90)
+        }
+        .allowsHitTesting(false)
     }
 
     private var filteredTemplates: [WorkoutTemplate] {
@@ -3812,6 +6603,46 @@ private struct WorkoutSwapSheet: View {
     }
 }
 
+private struct SwapActionTile: View {
+    let icon: String
+    let title: String
+    let subtitle: String
+    let accent: Color
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 10) {
+                Image(systemName: icon)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(accent)
+                    .frame(width: 34, height: 34)
+                    .background(accent.opacity(0.15))
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(FitFont.body(size: 15, weight: .semibold))
+                        .foregroundColor(FitTheme.textPrimary)
+                    Text(subtitle)
+                        .font(FitFont.body(size: 11))
+                        .foregroundColor(FitTheme.textSecondary)
+                        .lineLimit(2)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(12)
+            .background(FitTheme.cardBackground.opacity(0.86))
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(accent.opacity(0.28), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 private struct WorkoutSwapRow: View {
     let template: WorkoutTemplate
     let onSelect: () -> Void
@@ -3819,6 +6650,15 @@ private struct WorkoutSwapRow: View {
     var body: some View {
         Button(action: onSelect) {
             HStack(spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(modeAccent.opacity(0.18))
+                        .frame(width: 42, height: 42)
+                    Image(systemName: modeIcon)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(modeAccent)
+                }
+
                 VStack(alignment: .leading, spacing: 4) {
                     Text(template.title)
                         .font(FitFont.body(size: 16, weight: .semibold))
@@ -3826,21 +6666,49 @@ private struct WorkoutSwapRow: View {
                     Text(template.description ?? "Saved workout template")
                         .font(FitFont.body(size: 11))
                         .foregroundColor(FitTheme.textSecondary)
+                        .lineLimit(2)
                 }
+
                 Spacer()
-                Image(systemName: "chevron.right")
-                    .font(FitFont.body(size: 12, weight: .semibold))
-                    .foregroundColor(FitTheme.textSecondary)
+                VStack(alignment: .trailing, spacing: 8) {
+                    Text(modeLabel)
+                        .font(FitFont.body(size: 9, weight: .semibold))
+                        .foregroundColor(modeAccent)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(modeAccent.opacity(0.14))
+                        .clipShape(Capsule())
+                    Image(systemName: "chevron.right")
+                        .font(FitFont.body(size: 12, weight: .semibold))
+                        .foregroundColor(FitTheme.textSecondary)
+                }
             }
-            .padding(12)
-            .background(FitTheme.cardBackground)
+            .padding(14)
+            .background(FitTheme.cardBackground.opacity(0.97))
             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .stroke(FitTheme.cardStroke.opacity(0.6), lineWidth: 1)
             )
+            .shadow(color: FitTheme.shadow.opacity(0.35), radius: 10, x: 0, y: 6)
         }
         .buttonStyle(.plain)
+    }
+
+    private var modeLabel: String {
+        let trimmed = template.mode.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.caseInsensitiveCompare("ai") == .orderedSame {
+            return "AI"
+        }
+        return "MANUAL"
+    }
+
+    private var modeIcon: String {
+        modeLabel == "AI" ? "sparkles" : "dumbbell.fill"
+    }
+
+    private var modeAccent: Color {
+        modeLabel == "AI" ? FitTheme.cardWorkoutAccent : FitTheme.accent
     }
 }
 
@@ -3953,9 +6821,10 @@ private struct ActionButton: View {
                         FitTheme.cardBackground
                     }
                 }
-                .clipShape(Capsule())
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                 .overlay(
-                    Capsule()
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
                         .stroke(style == .secondary ? FitTheme.cardStroke : Color.clear, lineWidth: 1)
                 )
                 .shadow(color: style == .primary ? FitTheme.buttonShadow : .clear, radius: 12, x: 0, y: 6)
@@ -4140,6 +7009,136 @@ private struct SessionDraft: Identifiable {
     }
 }
 
+private struct WorkoutWelcomeView: View {
+    let onGetStarted: () -> Void
+    let onDismiss: () -> Void
+    
+    @Environment(\.dismiss) private var dismiss
+    
+    var body: some View {
+        ZStack {
+            FitTheme.backgroundGradient
+                .ignoresSafeArea()
+            
+            VStack(spacing: 24) {
+                Spacer()
+                
+                VStack(spacing: 16) {
+                    // Icon
+                    ZStack {
+                        Circle()
+                            .fill(FitTheme.cardWorkout)
+                            .frame(width: 80, height: 80)
+                        
+                        Image(systemName: "dumbbell.fill")
+                            .font(.system(size: 36, weight: .semibold))
+                            .foregroundColor(FitTheme.cardWorkoutAccent)
+                    }
+                    
+                    // Title
+                    Text("Welcome to Your Personal Workout Tracker")
+                        .font(FitFont.heading(size: 24, weight: .bold))
+                        .foregroundColor(FitTheme.textPrimary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 20)
+                    
+                    // Subtitle
+                    Text("Let's set up your weekly training schedule to help you reach your fitness goals")
+                        .font(FitFont.body(size: 16))
+                        .foregroundColor(FitTheme.textSecondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 32)
+                }
+                
+                // Features
+                VStack(spacing: 16) {
+                    WelcomeFeatureRow(
+                        icon: "calendar.badge.clock",
+                        title: "Smart Scheduling",
+                        description: "Plan your training days around your life"
+                    )
+                    
+                    WelcomeFeatureRow(
+                        icon: "sparkles",
+                        title: "AI-Powered Workouts",
+                        description: "Get personalized workouts or build your own"
+                    )
+                    
+                    WelcomeFeatureRow(
+                        icon: "chart.line.uptrend.xyaxis",
+                        title: "Track Progress",
+                        description: "Monitor your lifts and celebrate achievements"
+                    )
+                }
+                .padding(.horizontal, 24)
+                
+                Spacer()
+                
+                // Buttons
+                VStack(spacing: 12) {
+                    Button(action: {
+                        Haptics.light()
+                        onGetStarted()
+                    }) {
+                        Text("Get Started")
+                            .font(FitFont.body(size: 16, weight: .semibold))
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 16)
+                            .background(FitTheme.accent)
+                            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    }
+                    
+                    Button(action: {
+                        Haptics.light()
+                        dismiss()
+                        onDismiss()
+                    }) {
+                        Text("Maybe Later")
+                            .font(FitFont.body(size: 14, weight: .medium))
+                            .foregroundColor(FitTheme.textSecondary)
+                    }
+                }
+                .padding(.horizontal, 24)
+                .padding(.bottom, 32)
+            }
+        }
+    }
+}
+
+private struct WelcomeFeatureRow: View {
+    let icon: String
+    let title: String
+    let description: String
+    
+    var body: some View {
+        HStack(spacing: 16) {
+            ZStack {
+                Circle()
+                    .fill(FitTheme.cardWorkout.opacity(0.5))
+                    .frame(width: 48, height: 48)
+                
+                Image(systemName: icon)
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundColor(FitTheme.cardWorkoutAccent)
+            }
+            
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(FitFont.body(size: 15, weight: .semibold))
+                    .foregroundColor(FitTheme.textPrimary)
+                
+                Text(description)
+                    .font(FitFont.body(size: 13))
+                    .foregroundColor(FitTheme.textSecondary)
+            }
+            
+            Spacer()
+        }
+    }
+}
+
 #Preview {
     WorkoutView(userId: "demo-user")
+        .environmentObject(GuidedTourCoordinator())
 }

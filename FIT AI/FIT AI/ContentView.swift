@@ -2,6 +2,8 @@ import SwiftUI
 
 struct ContentView: View {
     @AppStorage("fitai.auth.userId") private var userId = ""
+    @StateObject private var guidedTour = GuidedTourCoordinator()
+    @State private var previousUserId = ""
 
     var body: some View {
         NavigationStack {
@@ -9,11 +11,28 @@ struct ContentView: View {
                 OnboardingReplicaView()
             } else {
                 MainTabView(userId: userId)
+                    .environmentObject(guidedTour)
             }
         }
         .dismissKeyboardOnTap()
         .task(id: userId) {
+            guidedTour.setActiveUserId(userId)
             await syncOnboardingStateIfNeeded(userId: userId)
+            EngagementNotificationsCoordinator.shared.configure(userId: userId)
+        }
+        .onAppear {
+            if previousUserId.isEmpty {
+                previousUserId = userId
+            }
+            guidedTour.setActiveUserId(userId)
+        }
+        .onChange(of: userId) { newValue in
+            let oldValue = previousUserId
+            previousUserId = newValue
+            guidedTour.setActiveUserId(newValue)
+            if oldValue.isEmpty && !newValue.isEmpty {
+                guidedTour.queueOnboardingTourIfNeeded(for: newValue)
+            }
         }
     }
 
@@ -42,5 +61,3 @@ struct ContentView: View {
 #Preview {
     ContentView()
 }
-
-

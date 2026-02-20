@@ -414,7 +414,7 @@ async def log_nutrition(
 ):
     supabase = get_supabase()
     normalized_user_id = _ensure_user_record(supabase, user_id)
-    prompt_input = {"meal_type": meal_type, "photo_url": photo_url}
+    prompt_input = {"meal_type": meal_type, "photo_url": photo_url, "photo_urls": [photo_url] if photo_url else []}
     date_value = log_date or date.today().isoformat()
     try:
         ai_output = run_prompt(

@@ -24,15 +24,18 @@ struct AccountHomeView: View {
 
                 Spacer()
 
-                Button("Log out") {
+                Button {
                     storedUserId = ""
+                } label: {
+                    Text("Log out")
+                        .font(FitFont.body(size: 17, weight: .semibold))
+                        .foregroundColor(FitTheme.buttonText)
+                        .padding(.vertical, 12)
+                        .padding(.horizontal, 24)
+                        .background(FitTheme.primaryGradient)
+                        .clipShape(Capsule())
+                        .contentShape(Capsule())
                 }
-                .font(FitFont.body(size: 17, weight: .semibold))
-                .foregroundColor(FitTheme.buttonText)
-                .padding(.vertical, 12)
-                .padding(.horizontal, 24)
-                .background(FitTheme.primaryGradient)
-                .clipShape(Capsule())
                 .shadow(color: FitTheme.buttonShadow, radius: 12, x: 0, y: 8)
             }
             .padding(24)

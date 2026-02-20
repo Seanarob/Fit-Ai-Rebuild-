@@ -13,11 +13,11 @@ enum FitFont {
     }
 
     static func body(size: CGFloat, weight: Font.Weight = .medium) -> Font {
-        Font.system(size: size, weight: weight, design: .rounded)
+        Font.system(size: size, weight: weight, design: .default)
     }
 
     static func heading(size: CGFloat, weight: Font.Weight = .bold) -> Font {
-        Font.system(size: size, weight: weight, design: .rounded)
+        Font.system(size: size, weight: weight, design: .default)
     }
 
     static func mono(size: CGFloat, weight: Font.Weight = .medium) -> Font {

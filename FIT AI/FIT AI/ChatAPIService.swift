@@ -1,5 +1,94 @@
 import Foundation
 
+enum ChatStreamEvent {
+    case delta(String)
+    case replace(String)
+    case coachAction(CoachActionProposal)
+}
+
+private struct ChatStreamPayload: Decodable {
+    let type: String
+    let text: String?
+    let action: CoachActionProposal?
+}
+
+enum CoachActionType: String, Decodable {
+    case updateMacros = "update_macros"
+    case updateWorkoutSplit = "update_workout_split"
+}
+
+struct CoachMacroTargets: Decodable {
+    let calories: Int?
+    let protein: Int?
+    let carbs: Int?
+    let fats: Int?
+}
+
+struct CoachSplitTargets: Decodable {
+    let daysPerWeek: Int?
+    let trainingDays: [String]?
+    let splitType: String?
+    let mode: String?
+    let focus: String?
+
+    enum CodingKeys: String, CodingKey {
+        case daysPerWeek = "days_per_week"
+        case trainingDays = "training_days"
+        case splitType = "split_type"
+        case mode
+        case focus
+    }
+}
+
+struct CoachActionProposal: Decodable, Identifiable {
+    let id: String
+    let actionType: CoachActionType
+    let title: String
+    let description: String
+    let confirmationPrompt: String?
+    let macros: CoachMacroTargets?
+    let split: CoachSplitTargets?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case actionType = "action_type"
+        case title
+        case description
+        case confirmationPrompt = "confirmation_prompt"
+        case macros
+        case split
+    }
+
+    init(
+        id: String = UUID().uuidString,
+        actionType: CoachActionType,
+        title: String = "Coach update",
+        description: String = "",
+        confirmationPrompt: String? = nil,
+        macros: CoachMacroTargets? = nil,
+        split: CoachSplitTargets? = nil
+    ) {
+        self.id = id
+        self.actionType = actionType
+        self.title = title
+        self.description = description
+        self.confirmationPrompt = confirmationPrompt
+        self.macros = macros
+        self.split = split
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
+        actionType = try container.decode(CoachActionType.self, forKey: .actionType)
+        title = try container.decodeIfPresent(String.self, forKey: .title) ?? "Coach update"
+        description = try container.decodeIfPresent(String.self, forKey: .description) ?? ""
+        confirmationPrompt = try container.decodeIfPresent(String.self, forKey: .confirmationPrompt)
+        macros = try container.decodeIfPresent(CoachMacroTargets.self, forKey: .macros)
+        split = try container.decodeIfPresent(CoachSplitTargets.self, forKey: .split)
+    }
+}
+
 struct ChatThread: Decodable, Identifiable {
     let id: String
     let title: String?
@@ -33,23 +122,39 @@ struct ChatAPIService {
     static let shared = ChatAPIService()
 
     private let session: URLSession
+    private let streamSession: URLSession
 
-    init(session: URLSession = ChatAPIService.defaultSession()) {
+    init(
+        session: URLSession = ChatAPIService.defaultSession(),
+        streamSession: URLSession = ChatAPIService.streamingSession()
+    ) {
         self.session = session
+        self.streamSession = streamSession
     }
 
     private static func defaultSession() -> URLSession {
         let config = URLSessionConfiguration.default
-        // Increased timeouts to accommodate AI model response time
         config.timeoutIntervalForRequest = 30
         config.timeoutIntervalForResource = 90
+        applySupabaseHeaders(to: config)
+        return URLSession(configuration: config)
+    }
+
+    private static func streamingSession() -> URLSession {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 180
+        config.timeoutIntervalForResource = 480
+        applySupabaseHeaders(to: config)
+        return URLSession(configuration: config)
+    }
+
+    private static func applySupabaseHeaders(to config: URLSessionConfiguration) {
         if let anonKey = SupabaseConfig.anonKey {
             config.httpAdditionalHeaders = [
                 "apikey": anonKey,
                 "Authorization": "Bearer \(anonKey)",
             ]
         }
-        return URLSession(configuration: config)
     }
 
     func createThread(userId: String, title: String? = nil) async throws -> ChatThread {
@@ -83,7 +188,11 @@ struct ChatAPIService {
             return []
         }
 
-        let (data, response) = try await session.data(from: finalURL)
+        var request = URLRequest(url: finalURL)
+        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        request.timeoutInterval = 30
+
+        let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             throw OnboardingAPIError.invalidResponse
         }
@@ -102,7 +211,11 @@ struct ChatAPIService {
             throw OnboardingAPIError.invalidResponse
         }
 
-        let (data, response) = try await session.data(from: finalURL)
+        var request = URLRequest(url: finalURL)
+        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        request.timeoutInterval = 30
+
+        let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             throw OnboardingAPIError.invalidResponse
         }
@@ -116,13 +229,14 @@ struct ChatAPIService {
         userId: String,
         threadId: String,
         content: String,
-        onChunk: @escaping (String) -> Void
+        onEvent: @escaping (ChatStreamEvent) -> Void
     ) async throws {
         let url = BackendConfig.baseURL.appendingPathComponent("chat/message")
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        request.timeoutInterval = 240
 
         let payload: [String: Any] = [
             "user_id": userId,
@@ -136,7 +250,7 @@ struct ChatAPIService {
         }
         request.httpBody = try JSONSerialization.data(withJSONObject: payloadWithContext, options: [])
 
-        let (bytes, response) = try await session.bytes(for: request)
+        let (bytes, response) = try await streamSession.bytes(for: request)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             throw OnboardingAPIError.invalidResponse
         }
@@ -148,8 +262,30 @@ struct ChatAPIService {
                 break
             }
             if !chunk.isEmpty {
-                onChunk(chunk)
+                if let event = Self.parseStreamEvent(chunk) {
+                    onEvent(event)
+                } else {
+                    onEvent(.delta(chunk))
+                }
             }
+        }
+    }
+
+    private static func parseStreamEvent(_ chunk: String) -> ChatStreamEvent? {
+        guard let data = chunk.data(using: .utf8) else { return nil }
+        guard let payload = try? JSONDecoder().decode(ChatStreamPayload.self, from: data) else { return nil }
+        switch payload.type {
+        case "delta":
+            guard let text = payload.text else { return nil }
+            return .delta(text)
+        case "replace":
+            guard let text = payload.text else { return nil }
+            return .replace(text)
+        case "coach_action":
+            guard let action = payload.action else { return nil }
+            return .coachAction(action)
+        default:
+            return nil
         }
     }
 

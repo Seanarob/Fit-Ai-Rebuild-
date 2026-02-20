@@ -52,7 +52,8 @@ enum StreakNotifications {
                     id: NotificationID.appStreak6pm,
                     title: "Don't lose your \(currentStreak) day streak! 🔥",
                     body: "Quick check-in takes 10 seconds. Keep the momentum going!",
-                    date: date
+                    date: date,
+                    priority: .normal
                 )
             }
         }
@@ -63,7 +64,8 @@ enum StreakNotifications {
                 id: NotificationID.appStreak10pm,
                 title: "⚠️ Streak at risk!",
                 body: "2 hours left to save your \(currentStreak) day streak. Tap to check in.",
-                date: date
+                date: date,
+                priority: .high
             )
         }
         
@@ -74,7 +76,8 @@ enum StreakNotifications {
                     id: NotificationID.appStreak1130pm,
                     title: "🚨 LAST CHANCE!",
                     body: "30 minutes to save your \(currentStreak) day streak! Don't let it reset!",
-                    date: date
+                    date: date,
+                    priority: .critical
                 )
             }
         }
@@ -103,7 +106,8 @@ enum StreakNotifications {
                 id: NotificationID.nutrition6pm,
                 title: "Hit your macros today! 🥗",
                 body: "Log your remaining meals to keep your nutrition streak alive.",
-                date: date
+                date: date,
+                priority: .low
             )
         }
         
@@ -113,7 +117,8 @@ enum StreakNotifications {
                 id: NotificationID.nutrition8pm,
                 title: "⚠️ Macros at risk!",
                 body: "Still time to hit your targets. Tap to log food.",
-                date: date
+                date: date,
+                priority: .high
             )
         }
     }
@@ -148,7 +153,8 @@ enum StreakNotifications {
                 id: NotificationID.weeklyWin,
                 title: "Time to train! 💪",
                 body: "You need \(workoutsNeeded) more workout\(workoutsNeeded > 1 ? "s" : "") to hit your weekly goal.",
-                date: notificationDate
+                date: notificationDate,
+                priority: .normal
             )
         }
     }
@@ -169,28 +175,53 @@ enum StreakNotifications {
     
     // MARK: - Helper
     
-    private static func scheduleNotification(id: String, title: String, body: String, date: Date) {
+    private static func scheduleNotification(
+        id: String,
+        title: String,
+        body: String,
+        date: Date,
+        priority: FitNotificationPriority = .normal
+    ) {
         // Don't schedule if date is in the past
         guard date > Date() else { return }
-        
-        let content = UNMutableNotificationContent()
-        content.title = title
-        content.body = body
-        content.sound = .default
-        content.categoryIdentifier = "STREAK_REMINDER"
-        content.threadIdentifier = "streak-reminders"
-        
-        let components = Calendar.current.dateComponents(
-            [.year, .month, .day, .hour, .minute],
-            from: date
-        )
-        let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: false)
-        
-        let request = UNNotificationRequest(identifier: id, content: content, trigger: trigger)
-        
-        notificationCenter.add(request) { error in
-            if let error = error {
-                print("Failed to schedule notification \(id): \(error)")
+
+        Task {
+            let categoryKey = NotificationThrottler.defaultCategoryKey(for: id)
+            let decision = await NotificationThrottler.evaluate(
+                center: notificationCenter,
+                identifier: id,
+                fireDate: date,
+                category: categoryKey,
+                priority: priority
+            )
+            guard decision.allow else { return }
+            if !decision.removeIdentifiers.isEmpty {
+                notificationCenter.removePendingNotificationRequests(withIdentifiers: decision.removeIdentifiers)
+            }
+
+            let content = UNMutableNotificationContent()
+            content.title = title
+            content.body = body
+            content.sound = .default
+            content.categoryIdentifier = "STREAK_REMINDER"
+            content.threadIdentifier = "streak-reminders"
+            NotificationThrottler.attachThrottleMetadata(
+                to: content,
+                category: categoryKey,
+                priority: priority
+            )
+
+            let components = Calendar.current.dateComponents(
+                [.year, .month, .day, .hour, .minute],
+                from: date
+            )
+            let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: false)
+
+            let request = UNNotificationRequest(identifier: id, content: content, trigger: trigger)
+            notificationCenter.add(request) { error in
+                if let error = error {
+                    print("Failed to schedule notification \(id): \(error)")
+                }
             }
         }
     }
@@ -238,5 +269,4 @@ extension StreakNotifications {
         notificationCenter.setNotificationCategories([category])
     }
 }
-
 

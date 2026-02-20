@@ -1,5 +1,6 @@
 import SwiftUI
 import Combine
+import UIKit
 
 struct HomeView: View {
     let userId: String
@@ -7,10 +8,12 @@ struct HomeView: View {
     @Binding var workoutIntent: WorkoutTabIntent?
     @Binding var nutritionIntent: NutritionTabIntent?
     @Binding var progressIntent: ProgressTabIntent?
+    @EnvironmentObject private var guidedTour: GuidedTourCoordinator
     @StateObject private var viewModel: HomeViewModel
     @ObservedObject private var streakStore = StreakStore.shared
     @AppStorage("fitai.home.lastGreetingDate") private var lastGreetingDate = ""
     @AppStorage("fitai.home.lastDailyCheckInPromptDate") private var lastDailyCheckInPromptDate = ""
+    @AppStorage("fitai.home.lastWeeklyCheckInPromptDate") private var lastWeeklyCheckInPromptDate = ""
     @State private var showGreeting = false
     @State private var showStreakCelebration = false
     @State private var previousStreak = 0
@@ -19,7 +22,14 @@ struct HomeView: View {
     @State private var showStreakDetail = false
     @State private var showDailyCheckIn = false
     @State private var showSaveStreakMode = false
+    @State private var showWeeklyCheckInPrompt = false
+    @State private var hasLoadedHomeData = false
     @State private var todaysWorkout: WorkoutCompletion?
+    @State private var todaysTrainingSnapshot: TodayTrainingSnapshot?
+    @State private var splitRefreshToken = UUID()
+    @State private var hasActivatedPendingOnboardingTour = false
+    @State private var homeActiveSession: HomeSessionDraft?
+    @State private var showHomeActiveSession = false
 
     private let trainingPreview = [
         "Bench Press · 4 x 8",
@@ -46,98 +56,138 @@ struct HomeView: View {
             FitTheme.backgroundGradient
                 .ignoresSafeArea()
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    // Enhanced Streak Badge with new StreakStore
-                    EnhancedStreakBadge(onTap: {
-                        showStreakDetail = true
-                    })
-                    
-                    // Daily Check-In Card (if not completed today)
-                    if !streakStore.hasCompletedCheckInToday {
-                        DailyCheckInCard(
-                            currentStreak: streakStore.appStreak.currentStreak,
-                            timeRemaining: streakStore.timeUntilMidnight,
-                            onCheckIn: { showDailyCheckIn = true }
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        // Enhanced Streak Badge with new StreakStore
+                        EnhancedStreakBadge(onTap: {
+                            showStreakDetail = true
+                        })
+                        
+                        // Daily Check-In Card (if not completed today)
+                        if !streakStore.hasCompletedCheckInToday {
+                            DailyCheckInCard(
+                                currentStreak: streakStore.appStreak.currentStreak,
+                                timeRemaining: streakStore.timeUntilMidnight,
+                                onCheckIn: { showDailyCheckIn = true }
+                            )
+                        }
+
+                        HomeHeaderView(
+                            name: viewModel.displayName,
+                            onHelpTap: {
+                                guidedTour.startScreenTour(.home)
+                            }
+                        ) {
+                            showSettings = true
+                        }
+                        .tourTarget(.homeHeader)
+                        .id(GuidedTourTargetID.homeHeader)
+
+                        Group {
+                            let schedule = SplitSchedule.loadSnapshot()
+                            let splitLabel = SplitSchedule.splitLabel(for: Date(), snapshot: schedule.snapshot)
+                            let isTrainingDay = splitLabel != nil
+                            let nextTraining = SplitSchedule.nextTrainingDayDetail(after: Date(), snapshot: schedule.snapshot)
+                            let coachPickForToday = viewModel.coachPickWorkout?.isCreatedToday == true ? viewModel.coachPickWorkout : nil
+                            let hasOverrideTraining = (todaysTrainingSnapshot != nil) || (coachPickForToday != nil)
+
+                            if schedule.hasPreferences && !isTrainingDay && !hasOverrideTraining {
+                                NoTrainingTodayCard(nextDetail: nextTraining)
+                                    .tourTarget(.homeTrainingCard)
+                                    .id(GuidedTourTargetID.homeTrainingCard)
+                            } else {
+                                let title = coachPickForToday?.title ?? todaysTrainingSnapshot?.title ?? "Today's Training"
+                                let snapshotExercises = (todaysTrainingSnapshot?.exercises ?? []).isEmpty ? nil : todaysTrainingSnapshot?.exercises
+                                let exercises = coachPickForToday?.exercises ?? snapshotExercises ?? trainingPreview
+                                let subtitle = splitLabel ?? "Today's Training"
+
+                                TodayTrainingCard(
+                                    title: title,
+                                    subtitle: subtitle,
+                                    exercises: exercises,
+                                    completedExercises: todaysWorkout?.exercises ?? [],
+                                    isCompleted: todaysWorkout != nil,
+                                    coachPick: coachPickForToday,
+                                    onStartWorkout: {
+                                        Task {
+                                            await startWorkoutFromHome(coachPick: coachPickForToday)
+                                        }
+                                    },
+                                    onSwap: {
+                                        workoutIntent = .swapSaved
+                                        selectedTab = .workout
+                                    }
+                                )
+                                .tourTarget(.homeTrainingCard)
+                                .id(GuidedTourTargetID.homeTrainingCard)
+                            }
+                        }
+
+                        NutritionSnapshotCard(
+                            caloriesUsed: Int(viewModel.macroTotals.calories),
+                            caloriesTarget: Int(viewModel.macroTargets.calories),
+                            protein: MacroProgress(
+                                name: "Protein",
+                                current: Int(viewModel.macroTotals.protein),
+                                target: Int(viewModel.macroTargets.protein)
+                            ),
+                            carbs: MacroProgress(
+                                name: "Carbs",
+                                current: Int(viewModel.macroTotals.carbs),
+                                target: Int(viewModel.macroTargets.carbs)
+                            ),
+                            fats: MacroProgress(
+                                name: "Fats",
+                                current: Int(viewModel.macroTotals.fats),
+                                target: Int(viewModel.macroTargets.fats)
+                            ),
+                            onLogMeal: {
+                                nutritionIntent = .logMeal
+                                selectedTab = .nutrition
+                            },
+                            onScanFood: {
+                                nutritionIntent = .logMeal
+                                selectedTab = .nutrition
+                            }
+                        )
+                        .tourTarget(.homeNutritionCard)
+                        .id(GuidedTourTargetID.homeNutritionCard)
+
+                        CheckInReminderCard(
+                            daysUntilCheckin: viewModel.daysUntilCheckin,
+                            isOverdue: viewModel.isCheckinOverdue,
+                            statusText: viewModel.checkinStatusText,
+                            checkinDayName: viewModel.checkinDayName,
+                            onCheckinTap: {
+                                progressIntent = .startCheckin
+                                selectedTab = .progress
+                            }
+                        )
+                        .tourTarget(.homeCheckinCard, shape: .roundedRect(cornerRadius: 24), padding: 0)
+                        .id(GuidedTourTargetID.homeCheckinCard)
+                        
+                        ProgressSummaryCard(weight: viewModel.latestWeight, lastPr: viewModel.lastPr)
+                        GoalCard(
+                            name: viewModel.displayName,
+                            goal: viewModel.goal,
+                            height: viewModel.heightText,
+                            gender: viewModel.genderText,
+                            weight: viewModel.latestWeight,
+                            age: viewModel.age,
+                            onTap: { showProfileEdit = true }
                         )
                     }
-
-                    HomeHeaderView(name: viewModel.displayName) {
-                        showSettings = true
-                    }
-
-                    TodayTrainingCard(
-                        exercises: viewModel.coachPickWorkout?.exercises ?? trainingPreview,
-                        completedExercises: todaysWorkout?.exercises ?? [],
-                        isCompleted: todaysWorkout != nil,
-                        coachPick: viewModel.coachPickWorkout,
-                        onStartWorkout: {
-                            if let coachPick = viewModel.coachPickWorkout {
-                                workoutIntent = .startCoachPick(templateId: coachPick.id)
-                            } else {
-                                workoutIntent = .startRecommended
-                            }
-                            selectedTab = .workout
-                        },
-                        onSwap: {
-                            workoutIntent = .swapSaved
-                            selectedTab = .workout
-                        }
-                    )
-
-                    NutritionSnapshotCard(
-                        caloriesUsed: Int(viewModel.macroTotals.calories),
-                        caloriesTarget: Int(viewModel.macroTargets.calories),
-                        protein: MacroProgress(
-                            name: "Protein",
-                            current: Int(viewModel.macroTotals.protein),
-                            target: Int(viewModel.macroTargets.protein)
-                        ),
-                        carbs: MacroProgress(
-                            name: "Carbs",
-                            current: Int(viewModel.macroTotals.carbs),
-                            target: Int(viewModel.macroTargets.carbs)
-                        ),
-                        fats: MacroProgress(
-                            name: "Fats",
-                            current: Int(viewModel.macroTotals.fats),
-                            target: Int(viewModel.macroTargets.fats)
-                        ),
-                        onLogMeal: {
-                            nutritionIntent = .logMeal
-                            selectedTab = .nutrition
-                        },
-                        onScanFood: {
-                            nutritionIntent = .logMeal
-                            selectedTab = .nutrition
-                        }
-                    )
-
-                    CheckInReminderCard(
-                        daysUntilCheckin: viewModel.daysUntilCheckin,
-                        isOverdue: viewModel.isCheckinOverdue,
-                        statusText: viewModel.checkinStatusText,
-                        checkinDayName: viewModel.checkinDayName,
-                        onCheckinTap: {
-                            progressIntent = .startCheckin
-                            selectedTab = .progress
-                        }
-                    )
-                    
-                    ProgressSummaryCard(weight: viewModel.latestWeight, lastPr: viewModel.lastPr)
-                    GoalCard(
-                        name: viewModel.displayName,
-                        goal: viewModel.goal,
-                        height: viewModel.heightText,
-                        gender: viewModel.genderText,
-                        weight: viewModel.latestWeight,
-                        age: viewModel.age,
-                        onTap: { showProfileEdit = true }
-                    )
+                    .padding(.horizontal, 20)
+                    .padding(.top, 12)
+                    .padding(.bottom, 12)
                 }
-                .padding(.horizontal, 20)
-                .padding(.top, 12)
-                .padding(.bottom, 12)
+                .onAppear {
+                    scrollToGuidedTourTarget(using: proxy)
+                }
+                .onChange(of: guidedTour.currentStep?.id) { _ in
+                    scrollToGuidedTourTarget(using: proxy)
+                }
             }
             // Save Your Streak Mode (when <6 hours remaining and streaks at risk)
             if showSaveStreakMode {
@@ -156,7 +206,28 @@ struct HomeView: View {
                 .zIndex(1)
             }
             
-            if showGreeting && !showSaveStreakMode {
+            if showWeeklyCheckInPrompt {
+                WeeklyCheckInDuePromptView(
+                    isOverdue: viewModel.isCheckinOverdue,
+                    statusText: viewModel.checkinStatusText,
+                    onStartCheckIn: {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            showWeeklyCheckInPrompt = false
+                        }
+                        progressIntent = .startCheckin
+                        selectedTab = .progress
+                    },
+                    onDismiss: {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            showWeeklyCheckInPrompt = false
+                        }
+                    }
+                )
+                .transition(.opacity)
+                .zIndex(2)
+            }
+            
+            if showGreeting && !showSaveStreakMode && !showWeeklyCheckInPrompt {
                 DailyCoachGreetingView(
                     name: viewModel.displayName,
                     streakDays: streakStore.appStreak.currentStreak,
@@ -178,7 +249,7 @@ struct HomeView: View {
                     }
                 )
                 .transition(.scale.combined(with: .opacity))
-                .zIndex(2)
+                .zIndex(3)
             }
         }
         .sheet(isPresented: $showSettings) {
@@ -208,18 +279,63 @@ struct HomeView: View {
                 }
             })
         }
+        .fullScreenCover(isPresented: $showHomeActiveSession, onDismiss: {
+            homeActiveSession = nil
+        }) {
+            Group {
+                if let session = homeActiveSession, !session.exercises.isEmpty {
+                    WorkoutSessionView(
+                        userId: userId,
+                        title: session.title,
+                        sessionId: session.sessionId,
+                        exercises: session.exercises
+                    )
+                } else {
+                    VStack(spacing: 20) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.system(size: 48))
+                            .foregroundColor(.orange)
+                        Text("Unable to load workout")
+                            .font(FitFont.heading(size: 20))
+                            .foregroundColor(FitTheme.textPrimary)
+                        Text("Please try again")
+                            .font(FitFont.body(size: 14))
+                            .foregroundColor(FitTheme.textSecondary)
+                        Button("Dismiss") {
+                            showHomeActiveSession = false
+                            homeActiveSession = nil
+                        }
+                        .foregroundColor(FitTheme.accent)
+                        .padding(.top, 20)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(FitTheme.backgroundGradient.ignoresSafeArea())
+                }
+            }
+        }
         .task {
             await viewModel.load()
+            hasLoadedHomeData = true
+            promptWeeklyCheckInIfNeeded()
             promptDailyCheckInIfNeeded()
             updateGreetingIfNeeded()
             todaysWorkout = WorkoutCompletionStore.todaysCompletion()
+            todaysTrainingSnapshot = TodayTrainingStore.todaysTraining()
+            tryActivatePendingOnboardingTourIfNeeded()
         }
         .onAppear {
             promptDailyCheckInIfNeeded()
             updateGreetingIfNeeded()
+            tryActivatePendingOnboardingTourIfNeeded()
         }
         .onReceive(NotificationCenter.default.publisher(for: .fitAIMacrosUpdated)) { _ in
             Task { await viewModel.load() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .fitAISplitUpdated)) { _ in
+            splitRefreshToken = UUID()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .fitAIWalkthroughReplayRequested)) { _ in
+            showSettings = false
         }
         .onReceive(NotificationCenter.default.publisher(for: .fitAIWorkoutStreakUpdated)) { notification in
             if let streak = notification.userInfo?["streak"] as? Int {
@@ -233,20 +349,41 @@ struct HomeView: View {
                 todaysWorkout = WorkoutCompletionStore.todaysCompletion()
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .fitAITodayTrainingUpdated)) { _ in
+            todaysTrainingSnapshot = TodayTrainingStore.todaysTraining()
+        }
         .onReceive(NotificationCenter.default.publisher(for: .fitAINutritionLogged)) { notification in
             // Update macro totals immediately for responsive UI
             Task { @MainActor in
-                if let macros = notification.userInfo?["macros"] as? [String: Any] {
+                let logDate = notification.userInfo?["logDate"] as? String
+                let isTodayLog = (logDate == nil) || (logDate == NutritionLocalStore.todayKey)
+                if isTodayLog, let macros = notification.userInfo?["macros"] as? [String: Any] {
                     viewModel.macroTotals = MacroTotals.fromDictionary(macros)
                 }
-                // Also reload full data to ensure sync
-                await viewModel.load()
+                if isTodayLog {
+                    // Also reload full data to ensure sync
+                    await viewModel.load()
+                }
             }
         }
         .onChange(of: selectedTab) { tab in
             if tab == .home {
                 Task { await viewModel.load() }
+                todaysTrainingSnapshot = TodayTrainingStore.todaysTraining()
+                tryActivatePendingOnboardingTourIfNeeded()
             }
+        }
+        .onChange(of: showGreeting) { _ in
+            tryActivatePendingOnboardingTourIfNeeded()
+        }
+        .onChange(of: showSaveStreakMode) { _ in
+            tryActivatePendingOnboardingTourIfNeeded()
+        }
+        .onChange(of: showWeeklyCheckInPrompt) { _ in
+            tryActivatePendingOnboardingTourIfNeeded()
+        }
+        .onChange(of: showDailyCheckIn) { _ in
+            tryActivatePendingOnboardingTourIfNeeded()
         }
     }
 
@@ -260,7 +397,13 @@ struct HomeView: View {
         lastGreetingDate = today
         
         // Check if we should show Save Your Streak mode instead
-        if streakStore.shouldShowSaveStreakMode && !streakStore.hasCompletedCheckInToday {
+        if shouldPromptWeeklyCheckIn() || showWeeklyCheckInPrompt {
+            showSaveStreakMode = false
+            markWeeklyCheckInPrompted()
+            withAnimation(.easeInOut(duration: 0.2)) {
+                showWeeklyCheckInPrompt = true
+            }
+        } else if streakStore.shouldShowSaveStreakMode && !streakStore.hasCompletedCheckInToday {
             withAnimation(.easeInOut(duration: 0.3)) {
                 showSaveStreakMode = true
             }
@@ -286,6 +429,39 @@ struct HomeView: View {
             }
         }
     }
+
+    private func tryActivatePendingOnboardingTourIfNeeded() {
+        guard !hasActivatedPendingOnboardingTour else { return }
+        guard selectedTab == .home else { return }
+        guard !showGreeting else { return }
+        guard !showSaveStreakMode else { return }
+        guard !showWeeklyCheckInPrompt else { return }
+        guard !showDailyCheckIn else { return }
+        hasActivatedPendingOnboardingTour = true
+        guidedTour.activatePendingOnboardingTourIfNeeded()
+    }
+
+    private func scrollToGuidedTourTarget(using proxy: ScrollViewProxy) {
+        guard let step = guidedTour.currentStep else { return }
+        guard step.screen == .home else { return }
+        guard let target = step.target else { return }
+
+        let anchor: UnitPoint
+        switch target {
+        case .homeHeader:
+            anchor = .top
+        case .homeTrainingCard, .homeNutritionCard, .homeCheckinCard:
+            anchor = .center
+        default:
+            return
+        }
+
+        DispatchQueue.main.async {
+            withAnimation(.easeInOut(duration: 0.3)) {
+                proxy.scrollTo(target, anchor: anchor)
+            }
+        }
+    }
     
     private func handleStreakActionComplete(_ streakType: StreakType) {
         withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
@@ -305,9 +481,107 @@ struct HomeView: View {
             nutritionIntent = .logMeal
             selectedTab = .nutrition
         case .weeklyWin:
-            workoutIntent = .startRecommended
-            selectedTab = .workout
+            let coachPickForToday = viewModel.coachPickWorkout?.isCreatedToday == true ? viewModel.coachPickWorkout : nil
+            Task {
+                await startWorkoutFromHome(coachPick: coachPickForToday)
+            }
         }
+    }
+
+    private func startWorkoutFromHome(coachPick: CoachPickWorkout?) async {
+        let launchPlan = workoutLaunchPlan(coachPick: coachPick)
+
+        await MainActor.run {
+            homeActiveSession = HomeSessionDraft(
+                sessionId: nil,
+                title: launchPlan.title,
+                exercises: launchPlan.exercises
+            )
+            showHomeActiveSession = true
+        }
+
+        TodayTrainingStore.save(
+            title: launchPlan.title,
+            exercises: launchPlan.exercises.map(\.name),
+            source: launchPlan.source,
+            templateId: launchPlan.templateId
+        )
+
+        guard !userId.isEmpty else { return }
+
+        do {
+            let sessionId = try await WorkoutAPIService.shared.startSession(
+                userId: userId,
+                templateId: launchPlan.templateId
+            )
+            await MainActor.run {
+                guard showHomeActiveSession else { return }
+                homeActiveSession = HomeSessionDraft(
+                    sessionId: sessionId,
+                    title: launchPlan.title,
+                    exercises: launchPlan.exercises
+                )
+            }
+        } catch {
+            // Keep the local session running even if backend session creation fails.
+        }
+    }
+
+    private func workoutLaunchPlan(coachPick: CoachPickWorkout?) -> HomeWorkoutLaunchPlan {
+        if let coachPick {
+            let exercises = coachPick.exerciseDetails.map { detail in
+                makeSessionExercise(
+                    name: detail.name,
+                    sets: max(1, detail.sets),
+                    reps: detail.reps,
+                    restSeconds: 60
+                )
+            }
+            return HomeWorkoutLaunchPlan(
+                title: coachPick.title,
+                templateId: coachPick.id,
+                source: .coach,
+                exercises: exercises.isEmpty ? defaultHomeRecommendedExercises : exercises
+            )
+        }
+
+        let snapshotTitle = todaysTrainingSnapshot?.title.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let title = snapshotTitle.isEmpty ? "Today's Training" : snapshotTitle
+        let snapshotExerciseNames = (todaysTrainingSnapshot?.exercises ?? [])
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        let exercises = snapshotExerciseNames.isEmpty
+            ? defaultHomeRecommendedExercises
+            : snapshotExerciseNames.map { makeSessionExercise(name: $0, sets: 3, reps: "10", restSeconds: 90) }
+
+        return HomeWorkoutLaunchPlan(
+            title: title,
+            templateId: nil,
+            source: .custom,
+            exercises: exercises
+        )
+    }
+
+    private var defaultHomeRecommendedExercises: [WorkoutExerciseSession] {
+        [
+            makeSessionExercise(name: "Bench Press", sets: 3, reps: "8", restSeconds: 90),
+            makeSessionExercise(name: "Incline Dumbbell Press", sets: 3, reps: "10", restSeconds: 75),
+            makeSessionExercise(name: "Cable Fly", sets: 3, reps: "12", restSeconds: 60)
+        ]
+    }
+
+    private func makeSessionExercise(name: String, sets: Int, reps: String, restSeconds: Int) -> WorkoutExerciseSession {
+        let repsText = reps.trimmingCharacters(in: .whitespacesAndNewlines)
+        var session = WorkoutExerciseSession(
+            name: name,
+            sets: WorkoutSetEntry.batch(
+                reps: repsText.isEmpty ? "10" : repsText,
+                count: max(1, sets)
+            ),
+            restSeconds: max(30, restSeconds)
+        )
+        session.warmupRestSeconds = min(60, session.restSeconds)
+        return session
     }
     
     private func greetingDateKey() -> String {
@@ -331,8 +605,26 @@ struct HomeView: View {
     private func promptDailyCheckInIfNeeded() {
         guard shouldPromptDailyCheckIn() else { return }
         guard !(streakStore.shouldShowSaveStreakMode && !streakStore.hasCompletedCheckInToday) else { return }
+        guard !showWeeklyCheckInPrompt else { return }
         markDailyCheckInPrompted()
         showDailyCheckIn = true
+    }
+    
+    private func shouldPromptWeeklyCheckIn() -> Bool {
+        guard lastWeeklyCheckInPromptDate != StreakCalculations.localDateKey() else { return false }
+        guard hasLoadedHomeData else { return false }
+        guard !showDailyCheckIn else { return false }
+        return viewModel.isCheckinOverdue || viewModel.daysUntilCheckin == 0
+    }
+    
+    private func markWeeklyCheckInPrompted() {
+        lastWeeklyCheckInPromptDate = StreakCalculations.localDateKey()
+    }
+    
+    private func promptWeeklyCheckInIfNeeded() {
+        guard shouldPromptWeeklyCheckIn() else { return }
+        markWeeklyCheckInPrompted()
+        showWeeklyCheckInPrompt = true
     }
     
     private func dateFromKey(_ key: String) -> Date? {
@@ -344,8 +636,23 @@ struct HomeView: View {
     }
 }
 
+private struct HomeWorkoutLaunchPlan {
+    let title: String
+    let templateId: String?
+    let source: TodayTrainingSource
+    let exercises: [WorkoutExerciseSession]
+}
+
+private struct HomeSessionDraft: Identifiable {
+    let id = UUID()
+    let sessionId: String?
+    let title: String
+    let exercises: [WorkoutExerciseSession]
+}
+
 private struct HomeHeaderView: View {
     let name: String
+    let onHelpTap: () -> Void
     let onSettingsTap: () -> Void
 
     var body: some View {
@@ -363,13 +670,24 @@ private struct HomeHeaderView: View {
 
             Spacer()
 
-            Button(action: onSettingsTap) {
-                Image(systemName: "gearshape.fill")
-                    .font(FitFont.body(size: 18, weight: .semibold))
-                    .foregroundColor(FitTheme.textPrimary)
-                    .padding(10)
-                    .background(FitTheme.cardBackground)
-                    .clipShape(Circle())
+            HStack(spacing: 10) {
+                Button(action: onHelpTap) {
+                    Image(systemName: "questionmark.circle.fill")
+                        .font(FitFont.body(size: 18, weight: .semibold))
+                        .foregroundColor(FitTheme.textPrimary)
+                        .padding(10)
+                        .background(FitTheme.cardBackground)
+                        .clipShape(Circle())
+                }
+
+                Button(action: onSettingsTap) {
+                    Image(systemName: "gearshape.fill")
+                        .font(FitFont.body(size: 18, weight: .semibold))
+                        .foregroundColor(FitTheme.textPrimary)
+                        .padding(10)
+                        .background(FitTheme.cardBackground)
+                        .clipShape(Circle())
+                }
             }
         }
     }
@@ -445,15 +763,16 @@ private struct DailyCoachGreetingView: View {
                             .multilineTextAlignment(.center)
                     }
 
-                    Button("Let's go") {
-                        onDismiss()
+                    Button(action: onDismiss) {
+                        Text("Let's go")
+                            .font(FitFont.body(size: 17, weight: .semibold))
+                            .foregroundColor(FitTheme.buttonText)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 16)
+                            .background(FitTheme.primaryGradient)
+                            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                            .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                     }
-                    .font(FitFont.body(size: 17, weight: .semibold))
-                    .foregroundColor(FitTheme.buttonText)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 16)
-                    .background(FitTheme.primaryGradient)
-                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                     .shadow(color: FitTheme.buttonShadow, radius: 16, x: 0, y: 10)
 
                     Spacer(minLength: 16)
@@ -602,6 +921,8 @@ private struct StreakCelebrationView: View {
 }
 
 private struct TodayTrainingCard: View {
+    let title: String
+    let subtitle: String
     let exercises: [String]
     let completedExercises: [String]
     let isCompleted: Bool
@@ -621,14 +942,16 @@ private struct TodayTrainingCard: View {
                 .replacingOccurrences(of: "Coach's Pick: ", with: "")
                 .replacingOccurrences(of: "Coaches Pick: ", with: "")
         }
-        return "Today's Training"
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "Today's Training" : trimmed
     }
     
     private var cardSubtitle: String {
         if isCoachPick {
             return "Coaches Pick"
         }
-        return isCompleted ? "Completed" : "Push Day"
+        let trimmed = subtitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "Today's Training" : trimmed
     }
 
     private var statusText: String {
@@ -765,6 +1088,35 @@ private struct TodayTrainingCard: View {
                         ActionButton(title: "Start Workout", style: .primary, action: onStartWorkout)
                         ActionButton(title: "Swap", style: .secondary, action: onSwap)
                     }
+                }
+            }
+        }
+    }
+}
+
+private struct NoTrainingTodayCard: View {
+    let nextDetail: (dayName: String, workoutName: String)?
+
+    var body: some View {
+        CardContainer(backgroundColor: FitTheme.cardWorkout, accentBorder: FitTheme.cardWorkoutAccent.opacity(0.2)) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 8) {
+                    Image(systemName: "zzz")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(FitTheme.textSecondary)
+                    Text("No training today")
+                        .font(FitFont.heading(size: 18))
+                        .foregroundColor(FitTheme.textPrimary)
+                }
+
+                if let nextDetail {
+                    Text("Next training: \(nextDetail.dayName) — \(nextDetail.workoutName)")
+                        .font(FitFont.body(size: 13))
+                        .foregroundColor(FitTheme.textSecondary)
+                } else {
+                    Text("Next training scheduled soon.")
+                        .font(FitFont.body(size: 13))
+                        .foregroundColor(FitTheme.textSecondary)
                 }
             }
         }
@@ -1206,10 +1558,22 @@ private struct GoalCard: View {
     let weight: Double?
     let age: Int?
     let onTap: () -> Void
+    @Environment(\.colorScheme) private var colorScheme
     
-    // Use a unique teal/cyan color for profile snapshot
     private let profileColor = Color(red: 0.2, green: 0.6, blue: 0.7)
     private let profileColorLight = Color(red: 0.85, green: 0.95, blue: 0.97)
+
+    private var profileBackground: Color {
+        colorScheme == .dark ? FitTheme.cardBackground : profileColorLight
+    }
+
+    private var profileStroke: Color {
+        profileColor.opacity(colorScheme == .dark ? 0.4 : 0.3)
+    }
+
+    private var profileShadow: Color {
+        colorScheme == .dark ? Color.black.opacity(0.28) : profileColor.opacity(0.15)
+    }
 
     var body: some View {
         Button(action: onTap) {
@@ -1260,13 +1624,13 @@ private struct GoalCard: View {
             }
             .padding(18)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(profileColorLight)
+            .background(profileBackground)
             .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 24, style: .continuous)
-                    .stroke(profileColor.opacity(0.3), lineWidth: 1.5)
+                    .stroke(profileStroke, lineWidth: 1.5)
             )
-            .shadow(color: profileColor.opacity(0.15), radius: 18, x: 0, y: 10)
+            .shadow(color: profileShadow, radius: 18, x: 0, y: 10)
         }
         .buttonStyle(.plain)
     }
@@ -1311,6 +1675,10 @@ private struct NutritionSnapshotCard: View {
     let onScanFood: () -> Void
 
     var body: some View {
+        let calorieDelta = caloriesTarget - caloriesUsed
+        let isOverCalories = calorieDelta < 0
+        let calorieAmount = abs(calorieDelta)
+
         CardContainer {
             VStack(alignment: .leading, spacing: 16) {
                 HStack {
@@ -1327,12 +1695,12 @@ private struct NutritionSnapshotCard: View {
                 }
 
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    Text("\(max(caloriesTarget - caloriesUsed, 0))")
+                    Text("\(calorieAmount)")
                         .font(FitFont.heading(size: 34))
                         .fontWeight(.bold)
                         .foregroundColor(FitTheme.textPrimary)
 
-                    Text("cal left")
+                    Text(isOverCalories ? "cal over" : "cal left")
                         .font(FitFont.body(size: 16))
                         .foregroundColor(FitTheme.textSecondary)
 
@@ -1531,8 +1899,8 @@ private struct StreakBadge: View {
             .background(
                 LinearGradient(
                     colors: [
-                        Color(red: 1.0, green: 0.98, blue: 0.92),  // Light gold tint
-                        Color(red: 1.0, green: 0.96, blue: 0.88)
+                        FitTheme.cardStreak,
+                        FitTheme.cardHighlight
                     ],
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
@@ -1541,9 +1909,9 @@ private struct StreakBadge: View {
             .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .stroke(Color(red: 1.0, green: 0.84, blue: 0.0).opacity(0.3), lineWidth: 1.5)
+                    .stroke(FitTheme.cardStreakAccent.opacity(0.35), lineWidth: 1.5)
             )
-            .shadow(color: Color(red: 1.0, green: 0.84, blue: 0.0).opacity(0.2), radius: 12, x: 0, y: 6)
+            .shadow(color: FitTheme.cardStreakAccent.opacity(0.2), radius: 12, x: 0, y: 6)
         }
         .buttonStyle(.plain)
         .onAppear {
@@ -1640,8 +2008,8 @@ private struct DailyCheckInCard: View {
             .background(
                 LinearGradient(
                     colors: [
-                        Color.orange.opacity(0.08),
-                        Color(red: 1.0, green: 0.98, blue: 0.95)
+                        FitTheme.cardReminder.opacity(0.92),
+                        FitTheme.cardBackground
                     ],
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
@@ -1650,9 +2018,9 @@ private struct DailyCheckInCard: View {
             .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .stroke(Color.orange.opacity(0.25), lineWidth: 1.5)
+                    .stroke(FitTheme.cardReminderAccent.opacity(0.35), lineWidth: 1.5)
             )
-            .shadow(color: Color.orange.opacity(0.15), radius: 12, y: 6)
+            .shadow(color: FitTheme.cardReminderAccent.opacity(0.15), radius: 12, y: 6)
         }
         .buttonStyle(.plain)
     }
@@ -1784,8 +2152,8 @@ private struct EnhancedStreakBadge: View {
             .background(
                 LinearGradient(
                     colors: atRiskCount > 0
-                        ? [Color.red.opacity(0.05), Color(red: 1.0, green: 0.96, blue: 0.88)]
-                        : [Color(red: 1.0, green: 0.98, blue: 0.92), Color(red: 1.0, green: 0.96, blue: 0.88)],
+                        ? [Color.red.opacity(0.12), FitTheme.cardStreak]
+                        : [FitTheme.cardStreak, FitTheme.cardHighlight],
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
                 )
@@ -2006,8 +2374,8 @@ struct StreakDetailView: View {
         .background(
             LinearGradient(
                 colors: [
-                    Color(red: 1.0, green: 0.98, blue: 0.92),
-                    Color(red: 1.0, green: 0.96, blue: 0.88)
+                    FitTheme.cardStreak,
+                    FitTheme.cardHighlight
                 ],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
@@ -2016,7 +2384,7 @@ struct StreakDetailView: View {
         .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .stroke(Color(red: 1.0, green: 0.84, blue: 0.0).opacity(0.3), lineWidth: 1.5)
+                .stroke(FitTheme.cardStreakAccent.opacity(0.35), lineWidth: 1.5)
         )
     }
     
@@ -2144,6 +2512,10 @@ private struct MacroRow: View {
     let progress: MacroProgress
 
     var body: some View {
+        let delta = progress.target - progress.current
+        let amount = abs(delta)
+        let label = delta < 0 ? "over" : "left"
+
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text(progress.name)
@@ -2152,7 +2524,7 @@ private struct MacroRow: View {
 
                 Spacer()
 
-                Text("\(progress.remaining) g left")
+                Text("\(amount) g \(label)")
                     .font(FitFont.body(size: 13))
                     .foregroundColor(FitTheme.accent)
             }
@@ -2205,9 +2577,10 @@ private struct ActionButton: View {
                         FitTheme.cardBackground
                     }
                 }
-                .clipShape(Capsule())
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                 .overlay(
-                    Capsule()
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
                         .stroke(style == .secondary ? FitTheme.cardStroke : Color.clear, lineWidth: 1)
                 )
                 .shadow(color: style == .primary ? FitTheme.buttonShadow : .clear, radius: 12, x: 0, y: 6)
@@ -2252,6 +2625,12 @@ struct CoachPickWorkout: Identifiable {
     let exercises: [String]
     let exerciseDetails: [CoachPickExerciseDetail]
     let exerciseCount: Int
+    let createdAt: Date?
+
+    var isCreatedToday: Bool {
+        guard let createdAt else { return false }
+        return Calendar.current.isDateInToday(createdAt)
+    }
 }
 
 struct CoachPickExerciseDetail: Identifiable {
@@ -2261,6 +2640,7 @@ struct CoachPickExerciseDetail: Identifiable {
     let reps: String
 }
 
+@MainActor
 final class HomeViewModel: ObservableObject {
     @Published var displayName = "Athlete"
     @Published var macroTotals = MacroTotals.zero
@@ -2277,6 +2657,7 @@ final class HomeViewModel: ObservableObject {
     @Published var coachPickWorkout: CoachPickWorkout?
 
     private let userId: String
+    private let localStore = NutritionLocalStore.shared
 
     init(userId: String) {
         self.userId = userId
@@ -2365,24 +2746,33 @@ final class HomeViewModel: ObservableObject {
 
     func load() async {
         guard !userId.isEmpty else { return }
-        
-        // Load local macros first as immediate fallback
+
+        let today = Calendar.current.startOfDay(for: Date())
+
+        // Load local targets and today's macros first as immediate fallback.
         loadLocalMacroTargets()
-        
-        do {
-            async let profileTask = ProfileAPIService.shared.fetchProfile(userId: userId)
-            async let checkinsTask = ProgressAPIService.shared.fetchCheckins(userId: userId, limit: 1)
-            async let logsTask = NutritionAPIService.shared.fetchDailyLogs(userId: userId)
+        let localSnapshot = localStore.snapshot(userId: userId, date: today)
+        if localSnapshot.isPersisted {
+            macroTotals = localSnapshot.totals
+        }
 
-            let profile = try await profileTask
-            let checkins = try await checkinsTask
-            let logs = try await logsTask
+        async let profileTask: [String: Any]? = try? await ProfileAPIService.shared.fetchProfile(userId: userId)
+        async let checkinsTask: [WeeklyCheckin]? = try? await ProgressAPIService.shared.fetchCheckins(userId: userId, limit: 1)
+        async let logsTask: [NutritionLogEntry]? = try? await NutritionAPIService.shared.fetchDailyLogs(userId: userId, date: today)
 
+        if let profile = await profileTask {
             updateFromProfile(profile)
+        }
+        if let checkins = await checkinsTask {
             updateFromCheckins(checkins)
-            updateFromLogs(logs)
-        } catch {
-            // Keep local values if any call fails.
+        }
+        if let logs = await logsTask {
+            let meals = buildMeals(from: logs)
+            let totals = buildTotals(from: logs)
+            if !localSnapshot.isPersisted {
+                macroTotals = totals
+                _ = localStore.replaceDay(userId: userId, date: today, meals: meals)
+            }
         }
         
         // Load coach-generated workouts separately (non-blocking)
@@ -2399,6 +2789,7 @@ final class HomeViewModel: ObservableObject {
             if let coachTemplate = templates.first(where: { $0.mode == "coach" }) {
                 // Fetch exercises for the template
                 let detail = try await WorkoutAPIService.shared.fetchTemplateDetail(templateId: coachTemplate.id)
+                let createdAt = TodayTrainingStore.parseDate(coachTemplate.createdAt)
                 let exerciseNames = detail.exercises.prefix(3).map { ex in
                     "\(ex.name) · \(ex.sets ?? 3) x \(ex.reps ?? 10)"
                 }
@@ -2409,6 +2800,20 @@ final class HomeViewModel: ObservableObject {
                         reps: "\(ex.reps ?? 10)"
                     )
                 }
+
+                if let createdAt, Calendar.current.isDateInToday(createdAt) {
+                    let existing = TodayTrainingStore.todaysTraining()
+                    let shouldSaveCoachSnapshot = existing == nil || existing?.source == .coach
+                    if shouldSaveCoachSnapshot {
+                        TodayTrainingStore.save(
+                            title: coachTemplate.title,
+                            exercises: detail.exercises.map { $0.name },
+                            source: .coach,
+                            templateId: coachTemplate.id,
+                            createdAt: createdAt
+                        )
+                    }
+                }
                 
                 await MainActor.run {
                     coachPickWorkout = CoachPickWorkout(
@@ -2416,7 +2821,8 @@ final class HomeViewModel: ObservableObject {
                         title: coachTemplate.title,
                         exercises: Array(exerciseNames),
                         exerciseDetails: exerciseDetails,
-                        exerciseCount: detail.exercises.count
+                        exerciseCount: detail.exercises.count,
+                        createdAt: createdAt
                     )
                 }
             } else {
@@ -2555,7 +2961,6 @@ final class HomeViewModel: ObservableObject {
         
         // Load preferred check-in day (1 = Sunday through 7 = Saturday)
         // Only update from profile if AppStorage hasn't been set by user
-        let currentAppStorageDay = UserDefaults.standard.integer(forKey: "checkinDay")
         let hasUserSetCheckinDay = UserDefaults.standard.object(forKey: "checkinDay") != nil
         
         if !hasUserSetCheckinDay {
@@ -2591,8 +2996,60 @@ final class HomeViewModel: ObservableObject {
         }
     }
 
-    private func updateFromLogs(_ logs: [NutritionLogEntry]) {
-        macroTotals = buildTotals(from: logs)
+    private func buildMeals(from logs: [NutritionLogEntry]) -> [MealType: [LoggedFoodItem]] {
+        var result: [MealType: [LoggedFoodItem]] = [:]
+        for log in logs {
+            guard let meal = normalizedMealType(from: log.mealType) else { continue }
+            let items = (log.items ?? []).map(makeLoggedItem(from:))
+            if result[meal] != nil {
+                result[meal, default: []].append(contentsOf: items)
+            } else {
+                result[meal] = items
+            }
+        }
+        return result
+    }
+
+    private func normalizedMealType(from rawValue: String) -> MealType? {
+        let cleaned = rawValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let meal = MealType(rawValue: cleaned) {
+            return meal
+        }
+        if cleaned.hasPrefix("breakfast") { return .breakfast }
+        if cleaned.hasPrefix("lunch") { return .lunch }
+        if cleaned.hasPrefix("dinner") { return .dinner }
+        if cleaned.hasPrefix("snack") { return .snacks }
+        return nil
+    }
+
+    private func makeLoggedItem(from item: NutritionLogItem) -> LoggedFoodItem {
+        let portionValue = item.portionValue ?? 0
+        let portionUnit = PortionUnit(rawValue: item.portionUnit ?? "") ?? .grams
+        let macros = MacroTotals(
+            calories: item.calories ?? 0,
+            protein: item.protein ?? 0,
+            carbs: item.carbs ?? 0,
+            fats: item.fats ?? 0
+        )
+        let name = item.name ?? (item.raw == nil ? "Logged item" : "Scan result")
+        let detail: String
+        if let serving = item.serving, !serving.isEmpty {
+            detail = serving
+        } else if portionValue > 0 {
+            detail = "\(formattedPortionValue(portionValue)) \(portionUnit.title)"
+        } else {
+            detail = "Logged"
+        }
+        return LoggedFoodItem(
+            name: name,
+            portionValue: portionValue,
+            portionUnit: portionUnit,
+            macros: macros,
+            detail: detail,
+            brandName: item.brand,
+            restaurantName: item.restaurant,
+            source: item.source
+        )
     }
 
     private func buildTotals(from logs: [NutritionLogEntry]) -> MacroTotals {
@@ -2618,6 +3075,14 @@ final class HomeViewModel: ObservableObject {
         return total
     }
 
+    private func formattedPortionValue(_ value: Double, maxFractionDigits: Int = 2) -> String {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.minimumFractionDigits = 0
+        formatter.maximumFractionDigits = maxFractionDigits
+        return formatter.string(from: NSNumber(value: value)) ?? String(value)
+    }
+
     private func formatHeight(cm: Double) -> String {
         guard cm > 0 else { return "—" }
         let totalInches = cm / 2.54
@@ -2628,36 +3093,91 @@ final class HomeViewModel: ObservableObject {
 }
 
 enum FitTheme {
+    private static func adaptiveColor(light: UIColor, dark: UIColor) -> Color {
+        Color(
+            UIColor { trait in
+                trait.userInterfaceStyle == .dark ? dark : light
+            }
+        )
+    }
+
+    private static let backgroundStart = adaptiveColor(
+        light: UIColor(red: 0.98, green: 0.96, blue: 0.94, alpha: 1.0),
+        dark: UIColor(red: 0.02, green: 0.03, blue: 0.05, alpha: 1.0)
+    )
+    private static let backgroundMiddle = adaptiveColor(
+        light: UIColor(red: 0.97, green: 0.93, blue: 0.91, alpha: 1.0),
+        dark: UIColor(red: 0.03, green: 0.05, blue: 0.08, alpha: 1.0)
+    )
+    private static let backgroundEnd = adaptiveColor(
+        light: UIColor(red: 0.95, green: 0.90, blue: 0.88, alpha: 1.0),
+        dark: UIColor(red: 0.01, green: 0.02, blue: 0.04, alpha: 1.0)
+    )
+
     static let backgroundGradient = LinearGradient(
-        colors: [
-            Color(red: 0.98, green: 0.96, blue: 0.94),
-            Color(red: 0.97, green: 0.93, blue: 0.91),
-            Color(red: 0.95, green: 0.90, blue: 0.88)
-        ],
+        colors: [backgroundStart, backgroundMiddle, backgroundEnd],
         startPoint: .topLeading,
         endPoint: .bottomTrailing
     )
 
-    static let cardBackground = Color(red: 1.0, green: 0.98, blue: 0.97)
-    static let cardHighlight = Color(red: 0.95, green: 0.92, blue: 0.90)
-    static let cardStroke = Color(red: 0.90, green: 0.86, blue: 0.84)
-    static let accent = Color(red: 0.29, green: 0.18, blue: 1.0)
-    static let accentSoft = Color(red: 0.86, green: 0.82, blue: 1.0)
-    static let accentMuted = Color(red: 0.74, green: 0.69, blue: 0.98)
-    static let textPrimary = Color(red: 0.12, green: 0.10, blue: 0.09)
-    static let textSecondary = Color(red: 0.45, green: 0.40, blue: 0.37)
-    static let buttonText = Color.white // White text for buttons on accent/purple backgrounds
-    static let shadow = Color(red: 0.23, green: 0.17, blue: 0.36).opacity(0.12)
-    static let buttonShadow = Color(red: 0.35, green: 0.22, blue: 0.86).opacity(0.35)
-    static let success = Color(red: 0.16, green: 0.66, blue: 0.38)
-    
-    /// White text for use on accent/purple backgrounds
+    static let cardBackground = adaptiveColor(
+        light: UIColor(red: 1.0, green: 0.98, blue: 0.97, alpha: 1.0),
+        dark: UIColor(red: 0.07, green: 0.08, blue: 0.11, alpha: 1.0)
+    )
+    static let cardHighlight = adaptiveColor(
+        light: UIColor(red: 0.95, green: 0.92, blue: 0.90, alpha: 1.0),
+        dark: UIColor(red: 0.10, green: 0.11, blue: 0.14, alpha: 1.0)
+    )
+    static let cardStroke = adaptiveColor(
+        light: UIColor(red: 0.90, green: 0.86, blue: 0.84, alpha: 1.0),
+        dark: UIColor(red: 0.22, green: 0.24, blue: 0.30, alpha: 1.0)
+    )
+    static let accent = adaptiveColor(
+        light: UIColor(red: 0.29, green: 0.18, blue: 1.0, alpha: 1.0),
+        dark: UIColor(red: 0.22, green: 0.50, blue: 1.0, alpha: 1.0)
+    )
+    static let accentSoft = adaptiveColor(
+        light: UIColor(red: 0.86, green: 0.82, blue: 1.0, alpha: 1.0),
+        dark: UIColor(red: 0.22, green: 0.50, blue: 1.0, alpha: 0.18)
+    )
+    static let accentMuted = adaptiveColor(
+        light: UIColor(red: 0.74, green: 0.69, blue: 0.98, alpha: 1.0),
+        dark: UIColor(red: 0.42, green: 0.64, blue: 1.0, alpha: 1.0)
+    )
+    static let textPrimary = adaptiveColor(
+        light: UIColor(red: 0.12, green: 0.10, blue: 0.09, alpha: 1.0),
+        dark: UIColor(red: 0.96, green: 0.97, blue: 1.0, alpha: 1.0)
+    )
+    static let textSecondary = adaptiveColor(
+        light: UIColor(red: 0.45, green: 0.40, blue: 0.37, alpha: 1.0),
+        dark: UIColor(red: 0.62, green: 0.66, blue: 0.74, alpha: 1.0)
+    )
+    static let buttonText = Color.white
+    static let shadow = adaptiveColor(
+        light: UIColor(red: 0.23, green: 0.17, blue: 0.36, alpha: 0.12),
+        dark: UIColor.black.withAlphaComponent(0.45)
+    )
+    static let buttonShadow = adaptiveColor(
+        light: UIColor(red: 0.35, green: 0.22, blue: 0.86, alpha: 0.35),
+        dark: UIColor(red: 0.22, green: 0.50, blue: 1.0, alpha: 0.34)
+    )
+    static let success = adaptiveColor(
+        light: UIColor(red: 0.16, green: 0.66, blue: 0.38, alpha: 1.0),
+        dark: UIColor(red: 0.19, green: 0.82, blue: 0.51, alpha: 1.0)
+    )
+
     static let textOnAccent = Color.white
 
     static let primaryGradient = LinearGradient(
         colors: [
-            Color(red: 0.32, green: 0.20, blue: 1.0),
-            Color(red: 0.45, green: 0.27, blue: 0.98)
+            adaptiveColor(
+                light: UIColor(red: 0.32, green: 0.20, blue: 1.0, alpha: 1.0),
+                dark: UIColor(red: 0.18, green: 0.49, blue: 0.98, alpha: 1.0)
+            ),
+            adaptiveColor(
+                light: UIColor(red: 0.45, green: 0.27, blue: 0.98, alpha: 1.0),
+                dark: UIColor(red: 0.26, green: 0.56, blue: 1.0, alpha: 1.0)
+            )
         ],
         startPoint: .topLeading,
         endPoint: .bottomTrailing
@@ -2665,16 +3185,31 @@ enum FitTheme {
 
     static let streakGradient = LinearGradient(
         colors: [
-            Color(red: 0.30, green: 0.20, blue: 1.0),
-            Color(red: 0.46, green: 0.28, blue: 0.98)
+            adaptiveColor(
+                light: UIColor(red: 0.30, green: 0.20, blue: 1.0, alpha: 1.0),
+                dark: UIColor(red: 0.14, green: 0.34, blue: 0.78, alpha: 1.0)
+            ),
+            adaptiveColor(
+                light: UIColor(red: 0.46, green: 0.28, blue: 0.98, alpha: 1.0),
+                dark: UIColor(red: 0.24, green: 0.51, blue: 1.0, alpha: 1.0)
+            )
         ],
         startPoint: .leading,
         endPoint: .trailing
     )
 
-    static let proteinColor = Color(red: 0.98, green: 0.64, blue: 0.17)
-    static let carbColor = Color(red: 0.98, green: 0.43, blue: 0.55)
-    static let fatColor = Color(red: 0.56, green: 0.33, blue: 0.94)
+    static let proteinColor = adaptiveColor(
+        light: UIColor(red: 0.98, green: 0.64, blue: 0.17, alpha: 1.0),
+        dark: UIColor(red: 0.95, green: 0.65, blue: 0.27, alpha: 1.0)
+    )
+    static let carbColor = adaptiveColor(
+        light: UIColor(red: 0.98, green: 0.43, blue: 0.55, alpha: 1.0),
+        dark: UIColor(red: 0.95, green: 0.34, blue: 0.46, alpha: 1.0)
+    )
+    static let fatColor = adaptiveColor(
+        light: UIColor(red: 0.56, green: 0.33, blue: 0.94, alpha: 1.0),
+        dark: UIColor(red: 0.54, green: 0.38, blue: 0.96, alpha: 1.0)
+    )
 
     static func macroColor(for title: String) -> Color {
         let lower = title.lowercased()
@@ -2684,32 +3219,61 @@ enum FitTheme {
         return accent
     }
     
-    // MARK: - Color Blocked Card Backgrounds
-    // Distinct colors for different card types throughout the app
-    
-    /// Nutrition cards - warm coral/salmon tint
-    static let cardNutrition = Color(red: 1.0, green: 0.96, blue: 0.94)
-    static let cardNutritionAccent = Color(red: 0.98, green: 0.55, blue: 0.48)
-    
-    /// Workout cards - cool blue/indigo tint
-    static let cardWorkout = Color(red: 0.94, green: 0.96, blue: 1.0)
-    static let cardWorkoutAccent = Color(red: 0.35, green: 0.48, blue: 0.95)
-    
-    /// Progress/Goals cards - soft teal/mint tint
-    static let cardProgress = Color(red: 0.94, green: 0.99, blue: 0.97)
-    static let cardProgressAccent = Color(red: 0.22, green: 0.72, blue: 0.58)
-    
-    /// AI Coach cards - warm purple tint
-    static let cardCoach = Color(red: 0.97, green: 0.95, blue: 1.0)
-    static let cardCoachAccent = Color(red: 0.58, green: 0.42, blue: 0.92)
-    
-    /// Check-in/Reminder cards - amber/gold tint
-    static let cardReminder = Color(red: 1.0, green: 0.98, blue: 0.92)
-    static let cardReminderAccent = Color(red: 0.95, green: 0.68, blue: 0.25)
-    
-    /// Streak/Achievement cards - gradient purple-blue
-    static let cardStreak = Color(red: 0.95, green: 0.94, blue: 1.0)
-    static let cardStreakAccent = Color(red: 0.45, green: 0.32, blue: 0.95)
+    // MARK: - Card Surfaces
+
+    static let cardNutrition = adaptiveColor(
+        light: UIColor(red: 1.0, green: 0.96, blue: 0.94, alpha: 1.0),
+        dark: UIColor(red: 0.07, green: 0.08, blue: 0.11, alpha: 1.0)
+    )
+    static let cardNutritionAccent = adaptiveColor(
+        light: UIColor(red: 0.98, green: 0.55, blue: 0.48, alpha: 1.0),
+        dark: UIColor(red: 0.22, green: 0.50, blue: 1.0, alpha: 1.0)
+    )
+
+    static let cardWorkout = adaptiveColor(
+        light: UIColor(red: 0.94, green: 0.96, blue: 1.0, alpha: 1.0),
+        dark: UIColor(red: 0.08, green: 0.09, blue: 0.12, alpha: 1.0)
+    )
+    static let cardWorkoutAccent = adaptiveColor(
+        light: UIColor(red: 0.35, green: 0.48, blue: 0.95, alpha: 1.0),
+        dark: UIColor(red: 0.24, green: 0.53, blue: 1.0, alpha: 1.0)
+    )
+
+    static let cardProgress = adaptiveColor(
+        light: UIColor(red: 0.94, green: 0.99, blue: 0.97, alpha: 1.0),
+        dark: UIColor(red: 0.07, green: 0.10, blue: 0.13, alpha: 1.0)
+    )
+    static let cardProgressAccent = adaptiveColor(
+        light: UIColor(red: 0.22, green: 0.72, blue: 0.58, alpha: 1.0),
+        dark: UIColor(red: 0.22, green: 0.74, blue: 0.63, alpha: 1.0)
+    )
+
+    static let cardCoach = adaptiveColor(
+        light: UIColor(red: 0.97, green: 0.95, blue: 1.0, alpha: 1.0),
+        dark: UIColor(red: 0.09, green: 0.07, blue: 0.13, alpha: 1.0)
+    )
+    static let cardCoachAccent = adaptiveColor(
+        light: UIColor(red: 0.58, green: 0.42, blue: 0.92, alpha: 1.0),
+        dark: UIColor(red: 0.58, green: 0.41, blue: 0.95, alpha: 1.0)
+    )
+
+    static let cardReminder = adaptiveColor(
+        light: UIColor(red: 1.0, green: 0.98, blue: 0.92, alpha: 1.0),
+        dark: UIColor(red: 0.10, green: 0.09, blue: 0.07, alpha: 1.0)
+    )
+    static let cardReminderAccent = adaptiveColor(
+        light: UIColor(red: 0.95, green: 0.68, blue: 0.25, alpha: 1.0),
+        dark: UIColor(red: 0.92, green: 0.67, blue: 0.26, alpha: 1.0)
+    )
+
+    static let cardStreak = adaptiveColor(
+        light: UIColor(red: 0.95, green: 0.94, blue: 1.0, alpha: 1.0),
+        dark: UIColor(red: 0.09, green: 0.09, blue: 0.12, alpha: 1.0)
+    )
+    static let cardStreakAccent = adaptiveColor(
+        light: UIColor(red: 0.45, green: 0.32, blue: 0.95, alpha: 1.0),
+        dark: UIColor(red: 0.24, green: 0.53, blue: 1.0, alpha: 1.0)
+    )
 }
 
 // MARK: - Profile Edit Sheet
@@ -2999,4 +3563,5 @@ private struct ProfileEditPicker: View {
         nutritionIntent: .constant(nil),
         progressIntent: .constant(nil)
     )
+    .environmentObject(GuidedTourCoordinator())
 }

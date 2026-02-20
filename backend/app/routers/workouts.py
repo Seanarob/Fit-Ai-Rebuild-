@@ -61,6 +61,9 @@ class SessionLogRequest(BaseModel):
     reps: int = 0
     weight: float = 0
     duration_minutes: int | None = None
+    duration_seconds: int | None = None
+    is_warmup: bool = False
+    set_index: int | None = None
     notes: str | None = None
 
 
@@ -102,6 +105,18 @@ def _estimate_one_rep_max(weight: float, reps: int) -> float:
     if weight <= 0 or reps <= 0:
         return 0
     return round(weight * (1 + reps / 30), 2)
+
+
+def _is_missing_column_error(exc: Exception, column_name: str) -> bool:
+    message = str(exc).lower()
+    col = column_name.lower()
+    return col in message and "column" in message and "does not exist" in message
+
+
+def _is_missing_table_error(exc: Exception, table_name: str) -> bool:
+    message = str(exc).lower()
+    table = table_name.lower()
+    return table in message and ("does not exist" in message or "relation" in message)
 
 
 def _normalize_user_id(user_id: str | None) -> str | None:
@@ -477,24 +492,64 @@ async def log_exercise(session_id: str, payload: SessionLogRequest):
     try:
         duration_minutes = payload.duration_minutes or 0
         has_duration = duration_minutes > 0
-        rows = (
-            supabase.table("exercise_logs")
-            .insert(
-                {
-                    "session_id": session_id,
-                    "exercise_name": payload.exercise_name,
-                    "sets": 0 if has_duration else payload.sets,
-                    "reps": 0 if has_duration else payload.reps,
-                    "weight": 0 if has_duration else payload.weight,
-                    "duration_minutes": duration_minutes if has_duration else 0,
-                    "notes": payload.notes,
-                }
-            )
-            .execute()
-            .data
-        )
+        duration_seconds = payload.duration_seconds
+        if duration_seconds is None and has_duration:
+            duration_seconds = duration_minutes * 60
+        duration_seconds = duration_seconds or 0
+        is_warmup = bool(payload.is_warmup)
+        set_index = payload.set_index if payload.set_index and payload.set_index > 0 else 1
+        insert_payload = {
+            "session_id": session_id,
+            "exercise_name": payload.exercise_name,
+            "sets": 0 if has_duration else payload.sets,
+            "reps": 0 if has_duration else payload.reps,
+            "weight": 0 if has_duration else payload.weight,
+            "duration_minutes": duration_minutes if has_duration else 0,
+            "notes": payload.notes,
+        }
+        try:
+            rows = supabase.table("exercise_logs").insert(insert_payload).execute().data
+        except Exception as exc:
+            if not _is_missing_column_error(exc, "duration_minutes"):
+                raise
+            # Back-compat: older schemas may not have `duration_minutes`.
+            # Store cardio duration in `reps` so the client can still render minutes.
+            fallback = dict(insert_payload)
+            fallback.pop("duration_minutes", None)
+            if has_duration:
+                fallback["reps"] = duration_minutes
+            rows = supabase.table("exercise_logs").insert(fallback).execute().data
         if not rows:
             raise HTTPException(status_code=500, detail="Failed to log exercise")
+        log_id = rows[0]["id"]
+
+        set_payload = {
+            "exercise_log_id": log_id,
+            "set_index": set_index,
+            "is_warmup": is_warmup,
+            "reps": 0 if has_duration else payload.reps,
+            "weight": 0 if has_duration else payload.weight,
+            "duration_seconds": duration_seconds,
+        }
+        try:
+            supabase.table("exercise_sets").insert(set_payload).execute()
+        except Exception as exc:
+            if _is_missing_table_error(exc, "exercise_sets"):
+                pass
+            elif _is_missing_column_error(exc, "duration_seconds"):
+                fallback = dict(set_payload)
+                fallback.pop("duration_seconds", None)
+                supabase.table("exercise_sets").insert(fallback).execute()
+            elif _is_missing_column_error(exc, "is_warmup"):
+                fallback = dict(set_payload)
+                fallback.pop("is_warmup", None)
+                supabase.table("exercise_sets").insert(fallback).execute()
+            elif _is_missing_column_error(exc, "set_index"):
+                fallback = dict(set_payload)
+                fallback.pop("set_index", None)
+                supabase.table("exercise_sets").insert(fallback).execute()
+            else:
+                raise
         return {"log_id": rows[0]["id"]}
     except HTTPException:
         raise
@@ -596,15 +651,60 @@ async def complete_session(session_id: str, payload: CompleteSessionRequest):
 async def session_logs(session_id: str):
     supabase: Client = get_supabase()
     try:
-        logs = (
-            supabase.table("exercise_logs")
-            .select("id,exercise_name,sets,reps,weight,duration_minutes,notes,created_at")
-            .eq("session_id", session_id)
-            .order("created_at")
-            .execute()
-            .data
-        )
-        return {"session_id": session_id, "logs": logs or []}
+        try:
+            logs = (
+                supabase.table("exercise_logs")
+                .select("id,exercise_name,sets,reps,weight,duration_minutes,notes,created_at")
+                .eq("session_id", session_id)
+                .order("created_at")
+                .execute()
+                .data
+            )
+        except Exception as exc:
+            if not _is_missing_column_error(exc, "duration_minutes"):
+                raise
+            logs = (
+                supabase.table("exercise_logs")
+                .select("id,exercise_name,sets,reps,weight,notes,created_at")
+                .eq("session_id", session_id)
+                .order("created_at")
+                .execute()
+                .data
+            )
+        logs = logs or []
+        log_ids = [log.get("id") for log in logs if log.get("id")]
+        if log_ids:
+            try:
+                set_rows = (
+                    supabase.table("exercise_sets")
+                    .select(
+                        "exercise_log_id,set_index,reps,weight,is_warmup,duration_seconds"
+                    )
+                    .in_("exercise_log_id", log_ids)
+                    .order("set_index")
+                    .execute()
+                    .data
+                )
+                set_map: dict[str, list[dict]] = {}
+                for row in set_rows or []:
+                    log_id = row.get("exercise_log_id")
+                    if not log_id:
+                        continue
+                    set_map.setdefault(log_id, []).append(
+                        {
+                            "set_index": row.get("set_index"),
+                            "reps": row.get("reps") or 0,
+                            "weight": row.get("weight") or 0,
+                            "is_warmup": row.get("is_warmup") or False,
+                            "duration_seconds": row.get("duration_seconds") or 0,
+                        }
+                    )
+                for log in logs:
+                    log["set_details"] = set_map.get(log.get("id"), [])
+            except Exception as exc:
+                if not _is_missing_table_error(exc, "exercise_sets"):
+                    raise
+        return {"session_id": session_id, "logs": logs}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 

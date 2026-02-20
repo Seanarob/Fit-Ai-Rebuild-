@@ -9,6 +9,8 @@ final class NutritionViewModel: ObservableObject {
     @Published var errorMessage: String?
 
     let userId: String
+    private let localStore = NutritionLocalStore.shared
+    private var isSyncingPending = false
 
     init(userId: String) {
         self.userId = userId
@@ -16,6 +18,17 @@ final class NutritionViewModel: ObservableObject {
 
     func loadDailyLogs(date: Date = Date(), silently: Bool = false) async {
         guard !userId.isEmpty else { return }
+        Task { await syncPendingLogs() }
+        let localSnapshot = localStore.snapshot(userId: userId, date: date)
+
+        if localSnapshot.isPersisted {
+            dailyMeals = localSnapshot.meals
+            totals = localSnapshot.totals
+        } else {
+            dailyMeals = [:]
+            totals = .zero
+        }
+
         if !silently {
             isLoading = true
             errorMessage = nil
@@ -24,11 +37,14 @@ final class NutritionViewModel: ObservableObject {
             let logs = try await NutritionAPIService.shared.fetchDailyLogs(userId: userId, date: date)
             let meals = buildMeals(from: logs)
             let totalMacros = buildTotals(from: logs, meals: meals)
-            dailyMeals = meals
-            totals = totalMacros
+            if !localSnapshot.isPersisted {
+                dailyMeals = meals
+                totals = totalMacros
+                localStore.replaceDay(userId: userId, date: date, meals: meals)
+            }
         } catch {
-            if !silently {
-                errorMessage = nil
+            if !silently, !localSnapshot.isPersisted {
+                errorMessage = "Unable to load nutrition logs."
             }
         }
         if !silently {
@@ -38,14 +54,10 @@ final class NutritionViewModel: ObservableObject {
 
     func logManualItem(item: LoggedFoodItem, mealType: MealType, date: Date = Date()) async -> Bool {
         guard !userId.isEmpty else { return false }
-        applyLocalLog(item, mealType: mealType)
+        applyLocalLog(item, mealType: mealType, date: date)
         errorMessage = nil
         Haptics.success()
-        NotificationCenter.default.post(
-            name: .fitAINutritionLogged,
-            object: nil,
-            userInfo: ["macros": macroDictionary(from: totals)]
-        )
+        postNutritionLoggedNotification(for: date)
         
         // Check nutrition streak after logging
         checkNutritionStreak()
@@ -57,11 +69,20 @@ final class NutritionViewModel: ObservableObject {
                 mealType: mealType.rawValue,
                 item: item
             )
+            let pendingForItem = Set(
+                localStore.pendingLogs(userId: userId)
+                    .filter { $0.item.id == item.id }
+                    .map(\.id)
+            )
+            localStore.removePendingLogs(userId: userId, ids: pendingForItem)
+            Task { await syncPendingLogs() }
             Task { await loadDailyLogs(date: date, silently: true) }
             return true
         } catch {
-            errorMessage = "Unable to log item."
-            return false
+            // Keep offline-first behavior: the meal is already persisted locally.
+            localStore.queuePendingLog(userId: userId, date: date, mealType: mealType, item: item)
+            errorMessage = "Saved locally. Will sync when connection is available."
+            return true
         }
     }
     
@@ -97,63 +118,52 @@ final class NutritionViewModel: ObservableObject {
         )
     }
 
-    private func applyLocalLog(_ item: LoggedFoodItem, mealType: MealType) {
-        var updated = dailyMeals
-        updated[mealType, default: []].append(item)
-        dailyMeals = updated
-        totals = totals.adding(item.macros)
+    private func applyLocalLog(_ item: LoggedFoodItem, mealType: MealType, date: Date) {
+        let snapshot = localStore.appendItem(
+            userId: userId,
+            date: date,
+            mealType: mealType,
+            item: item
+        )
+        dailyMeals = snapshot.meals
+        totals = snapshot.totals
     }
 
     /// Update a logged food item with new values
     func updateLoggedItem(original: LoggedFoodItem, updated: LoggedFoodItem, mealType: MealType, date: Date) async {
-        // Update local state immediately for responsive UI
-        var meals = dailyMeals
-        if var items = meals[mealType] {
-            if let index = items.firstIndex(where: { $0.id == original.id }) {
-                // Subtract old macros and add new ones
-                totals = totals.subtracting(items[index].macros)
-                items[index] = updated
-                totals = totals.adding(updated.macros)
-                meals[mealType] = items
-                dailyMeals = meals
-            }
-        }
+        let snapshot = localStore.updateItem(
+            userId: userId,
+            date: date,
+            mealType: mealType,
+            original: original,
+            updated: updated
+        )
+        dailyMeals = snapshot.meals
+        totals = snapshot.totals
         
         Haptics.success()
-        NotificationCenter.default.post(
-            name: .fitAINutritionLogged,
-            object: nil,
-            userInfo: ["macros": macroDictionary(from: totals)]
-        )
+        postNutritionLoggedNotification(for: date)
         
         // TODO: Sync update to backend when API supports it
-        // For now, just reload to ensure consistency
-        await loadDailyLogs(date: date, silently: true)
+        // Local persistence is the source of truth until backend update support exists.
     }
     
     /// Delete a logged food item
     func deleteLoggedItem(item: LoggedFoodItem, mealType: MealType, date: Date) async {
-        // Update local state immediately
-        var meals = dailyMeals
-        if var items = meals[mealType] {
-            if let index = items.firstIndex(where: { $0.id == item.id }) {
-                totals = totals.subtracting(items[index].macros)
-                items.remove(at: index)
-                meals[mealType] = items
-                dailyMeals = meals
-            }
-        }
+        let snapshot = localStore.deleteItem(
+            userId: userId,
+            date: date,
+            mealType: mealType,
+            item: item
+        )
+        dailyMeals = snapshot.meals
+        totals = snapshot.totals
         
         Haptics.medium()
-        NotificationCenter.default.post(
-            name: .fitAINutritionLogged,
-            object: nil,
-            userInfo: ["macros": macroDictionary(from: totals)]
-        )
+        postNutritionLoggedNotification(for: date)
         
         // TODO: Sync deletion to backend when API supports it
-        // For now, just reload to ensure consistency
-        await loadDailyLogs(date: date, silently: true)
+        // Local persistence is the source of truth until backend deletion support exists.
     }
 
     private func macroDictionary(from totals: MacroTotals) -> [String: Any] {
@@ -163,6 +173,44 @@ final class NutritionViewModel: ObservableObject {
             "carbs": totals.carbs,
             "fats": totals.fats
         ]
+    }
+
+    private func postNutritionLoggedNotification(for date: Date) {
+        NotificationCenter.default.post(
+            name: .fitAINutritionLogged,
+            object: nil,
+            userInfo: [
+                "macros": macroDictionary(from: totals),
+                "logDate": NutritionLocalStore.dayKey(for: date),
+            ]
+        )
+    }
+
+    private func syncPendingLogs() async {
+        guard !isSyncingPending else { return }
+        let pending = localStore.pendingLogs(userId: userId)
+        guard !pending.isEmpty else { return }
+
+        isSyncingPending = true
+        defer { isSyncingPending = false }
+
+        var syncedIds = Set<UUID>()
+        for entry in pending {
+            guard let logDate = NutritionLocalStore.date(from: entry.dateKey) else { continue }
+            do {
+                try await NutritionAPIService.shared.logManualItem(
+                    userId: userId,
+                    date: logDate,
+                    mealType: entry.mealType.rawValue,
+                    item: entry.item
+                )
+                syncedIds.insert(entry.id)
+            } catch {
+                // Keep pending log for a later retry.
+            }
+        }
+
+        localStore.removePendingLogs(userId: userId, ids: syncedIds)
     }
 
     private func buildMeals(from logs: [NutritionLogEntry]) -> [MealType: [LoggedFoodItem]] {
@@ -242,7 +290,10 @@ final class NutritionViewModel: ObservableObject {
             portionValue: portionValue,
             portionUnit: portionUnit,
             macros: macros,
-            detail: detail
+            detail: detail,
+            brandName: item.brand,
+            restaurantName: item.restaurant,
+            source: item.source
         )
     }
 

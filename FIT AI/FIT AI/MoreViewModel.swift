@@ -334,4 +334,5 @@ extension Notification.Name {
     static let fitAIStartingPhotosUpdated = Notification.Name("fitai.startingPhotos.updated")
     static let fitAIMacrosUpdated = Notification.Name("fitai.macros.updated")
     static let fitAIProfileUpdated = Notification.Name("fitai.profile.updated")
+    static let fitAISplitUpdated = Notification.Name("fitai.split.updated")
 }

@@ -67,7 +67,7 @@ async def scan_meal_photo(
             file_options={"content-type": photo.content_type or "image/jpeg"},
         )
         public_url = supabase.storage.from_(bucket).get_public_url(path)
-        prompt_input = {"meal_type": meal_type, "photo_url": public_url}
+        prompt_input = {"meal_type": meal_type, "photo_url": public_url, "photo_urls": [public_url]}
         ai_output = run_prompt(
             "meal_photo_parse", user_id=normalized_user_id, inputs=prompt_input
         )

@@ -7,6 +7,16 @@ from openai import OpenAI
 
 from .supabase_client import get_supabase
 
+WEEKLY_CHECKIN_FOCUS_APPENDIX = (
+    "If the input includes physique_priority and optional secondary_priority or secondary_goals, "
+    "anchor the recap on those areas. Call out wins and gaps tied to those priorities when possible. "
+    "Evaluate progress photos with those priorities in mind and list them in photo_focus. "
+    "Targets should prioritize extra training volume for those areas. "
+    "If the input includes physique_goal_description, reference the user's specific goal description "
+    "throughout the feedback. Use their own words and acknowledge their specific targets. "
+    "Make the feedback feel personalized to their exact goals."
+)
+
 def _get_client() -> OpenAI:
     api_key = os.environ.get("OPENAI_API_KEY", "")
     if not api_key:
@@ -112,6 +122,11 @@ def run_prompt(name: str, user_id=None, inputs=None):
         input_payload = inputs or {}
         user_content: list[dict] | str
         photo_urls = _extract_photo_urls(input_payload.get("photo_urls")) if isinstance(input_payload, dict) else []
+        single_photo_url = (
+            _clean_photo_url(input_payload.get("photo_url")) if isinstance(input_payload, dict) else None
+        )
+        if single_photo_url:
+            photo_urls = [single_photo_url, *photo_urls]
         comparison_urls = (
             _extract_photo_urls(input_payload.get("comparison_photo_urls")) if isinstance(input_payload, dict) else []
         )
@@ -123,12 +138,21 @@ def run_prompt(name: str, user_id=None, inputs=None):
             user_content = json.dumps(input_payload)
         client = _get_client()
         # Use gpt-4o for check-in analysis (better image analysis for progress photos)
+        # Use gpt-4.1-mini for meal photo parsing (better food identification + portions)
         # Use gpt-4o-mini for other prompts (faster and cheaper)
-        model = "gpt-4o" if name == "weekly_checkin_analysis" else "gpt-4o-mini"
+        if name == "weekly_checkin_analysis":
+            model = "gpt-4o"
+        elif name == "meal_photo_parse":
+            model = "gpt-4.1-mini"
+        else:
+            model = "gpt-4o-mini"
+        template = prompt["template"]
+        if name == "weekly_checkin_analysis":
+            template = f"{template}\n\n{WEEKLY_CHECKIN_FOCUS_APPENDIX}"
         response = client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": prompt["template"]},
+                {"role": "system", "content": template},
                 {"role": "user", "content": user_content},
             ],
         )

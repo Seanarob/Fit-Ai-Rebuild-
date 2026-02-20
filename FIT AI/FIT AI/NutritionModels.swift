@@ -2,7 +2,7 @@ import Combine
 import Foundation
 import SwiftUI
 
-struct MacroTotals: Equatable {
+struct MacroTotals: Equatable, Codable {
     let calories: Double
     let protein: Double
     let carbs: Double
@@ -48,7 +48,7 @@ struct MacroTotals: Equatable {
     }
 }
 
-enum MealType: String, CaseIterable, Identifiable {
+enum MealType: String, CaseIterable, Identifiable, Codable {
     case breakfast
     case lunch
     case dinner
@@ -66,7 +66,7 @@ enum MealType: String, CaseIterable, Identifiable {
     }
 }
 
-enum PortionUnit: String, CaseIterable, Identifiable {
+enum PortionUnit: String, CaseIterable, Identifiable, Codable {
     case grams = "g"
     case ounces = "oz"
     case serving = "serving"  // Natural serving (1 egg, 1 banana, etc.)
@@ -104,13 +104,38 @@ struct ServingOption: Identifiable, Equatable {
     }
 }
 
-struct LoggedFoodItem: Identifiable {
-    let id = UUID()
+struct LoggedFoodItem: Identifiable, Codable, Equatable {
+    let id: UUID
     let name: String
     let portionValue: Double
     let portionUnit: PortionUnit
     let macros: MacroTotals
     let detail: String
+    let brandName: String?
+    let restaurantName: String?
+    let source: String?
+
+    init(
+        id: UUID = UUID(),
+        name: String,
+        portionValue: Double,
+        portionUnit: PortionUnit,
+        macros: MacroTotals,
+        detail: String,
+        brandName: String? = nil,
+        restaurantName: String? = nil,
+        source: String? = nil
+    ) {
+        self.id = id
+        self.name = name
+        self.portionValue = portionValue
+        self.portionUnit = portionUnit
+        self.macros = macros
+        self.detail = detail
+        self.brandName = brandName
+        self.restaurantName = restaurantName
+        self.source = source
+    }
 }
 
 struct NutritionLogTotals: Decodable {
@@ -129,6 +154,10 @@ struct NutritionLogItem: Decodable {
     let protein: Double?
     let carbs: Double?
     let fats: Double?
+    let brand: String?
+    let restaurant: String?
+    let foodType: String?
+    let source: String?
     let raw: String?
 
     enum CodingKeys: String, CodingKey {
@@ -140,6 +169,10 @@ struct NutritionLogItem: Decodable {
         case protein
         case carbs
         case fats
+        case brand
+        case restaurant
+        case foodType = "food_type"
+        case source
         case raw
     }
 }
@@ -333,5 +366,218 @@ final class SavedMealsStore: ObservableObject {
     private func persistMeals() {
         guard let data = try? JSONEncoder().encode(meals) else { return }
         UserDefaults.standard.set(data, forKey: storageKey)
+    }
+}
+
+// MARK: - Local Nutrition Logs Cache
+
+struct NutritionDaySnapshot {
+    let dateKey: String
+    let meals: [MealType: [LoggedFoodItem]]
+    let totals: MacroTotals
+    let isPersisted: Bool
+
+    var hasMeals: Bool {
+        meals.values.contains { !$0.isEmpty }
+    }
+}
+
+struct PendingNutritionLog: Codable, Identifiable, Equatable {
+    let id: UUID
+    let dateKey: String
+    let mealType: MealType
+    let item: LoggedFoodItem
+
+    init(id: UUID = UUID(), dateKey: String, mealType: MealType, item: LoggedFoodItem) {
+        self.id = id
+        self.dateKey = dateKey
+        self.mealType = mealType
+        self.item = item
+    }
+}
+
+@MainActor
+final class NutritionLocalStore {
+    static let shared = NutritionLocalStore()
+
+    private struct PersistedNutritionLogs: Codable {
+        var schemaVersion: Int = 1
+        var days: [String: [String: [LoggedFoodItem]]] = [:]
+        var pendingLogs: [PendingNutritionLog] = []
+    }
+
+    private let storagePrefix = "fitai.nutrition.logs.v1."
+    private let decoder = JSONDecoder()
+    private let encoder = JSONEncoder()
+
+    private static let dayFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        return formatter
+    }()
+
+    private init() {}
+
+    static func dayKey(for date: Date) -> String {
+        dayFormatter.string(from: date)
+    }
+
+    static var todayKey: String {
+        dayKey(for: Calendar.current.startOfDay(for: Date()))
+    }
+
+    static func date(from dayKey: String) -> Date? {
+        dayFormatter.date(from: dayKey)
+    }
+
+    func snapshot(userId: String, date: Date = Date()) -> NutritionDaySnapshot {
+        let dayKey = Self.dayKey(for: date)
+        let payload = loadPayload(userId: userId)
+        let isPersisted = payload.days[dayKey] != nil
+        let rawMeals = payload.days[dayKey] ?? [:]
+        let meals = decodeMeals(rawMeals)
+        return NutritionDaySnapshot(
+            dateKey: dayKey,
+            meals: meals,
+            totals: totals(for: meals),
+            isPersisted: isPersisted
+        )
+    }
+
+    @discardableResult
+    func replaceDay(
+        userId: String,
+        date: Date,
+        meals: [MealType: [LoggedFoodItem]]
+    ) -> NutritionDaySnapshot {
+        let dayKey = Self.dayKey(for: date)
+        var payload = loadPayload(userId: userId)
+        payload.days[dayKey] = encodeMeals(meals)
+        persistPayload(payload, userId: userId)
+        return snapshot(userId: userId, date: date)
+    }
+
+    @discardableResult
+    func appendItem(
+        userId: String,
+        date: Date,
+        mealType: MealType,
+        item: LoggedFoodItem
+    ) -> NutritionDaySnapshot {
+        let dayKey = Self.dayKey(for: date)
+        var payload = loadPayload(userId: userId)
+        var rawMeals = payload.days[dayKey] ?? [:]
+        var items = rawMeals[mealType.rawValue] ?? []
+        items.append(item)
+        rawMeals[mealType.rawValue] = items
+        payload.days[dayKey] = rawMeals
+        persistPayload(payload, userId: userId)
+        return snapshot(userId: userId, date: date)
+    }
+
+    @discardableResult
+    func updateItem(
+        userId: String,
+        date: Date,
+        mealType: MealType,
+        original: LoggedFoodItem,
+        updated: LoggedFoodItem
+    ) -> NutritionDaySnapshot {
+        let dayKey = Self.dayKey(for: date)
+        var payload = loadPayload(userId: userId)
+        var rawMeals = payload.days[dayKey] ?? [:]
+        var items = rawMeals[mealType.rawValue] ?? []
+        if let index = items.firstIndex(where: { $0.id == original.id }) {
+            items[index] = updated
+        }
+        rawMeals[mealType.rawValue] = items
+        payload.days[dayKey] = rawMeals
+        persistPayload(payload, userId: userId)
+        return snapshot(userId: userId, date: date)
+    }
+
+    @discardableResult
+    func deleteItem(
+        userId: String,
+        date: Date,
+        mealType: MealType,
+        item: LoggedFoodItem
+    ) -> NutritionDaySnapshot {
+        let dayKey = Self.dayKey(for: date)
+        var payload = loadPayload(userId: userId)
+        var rawMeals = payload.days[dayKey] ?? [:]
+        var items = rawMeals[mealType.rawValue] ?? []
+        items.removeAll { $0.id == item.id }
+        rawMeals[mealType.rawValue] = items
+        payload.days[dayKey] = rawMeals
+        persistPayload(payload, userId: userId)
+        return snapshot(userId: userId, date: date)
+    }
+
+    func queuePendingLog(userId: String, date: Date, mealType: MealType, item: LoggedFoodItem) {
+        var payload = loadPayload(userId: userId)
+        let dayKey = Self.dayKey(for: date)
+        let alreadyQueued = payload.pendingLogs.contains { pending in
+            pending.item.id == item.id && pending.dateKey == dayKey && pending.mealType == mealType
+        }
+        guard !alreadyQueued else { return }
+        payload.pendingLogs.append(
+            PendingNutritionLog(dateKey: dayKey, mealType: mealType, item: item)
+        )
+        persistPayload(payload, userId: userId)
+    }
+
+    func pendingLogs(userId: String) -> [PendingNutritionLog] {
+        loadPayload(userId: userId).pendingLogs
+    }
+
+    func removePendingLogs(userId: String, ids: Set<UUID>) {
+        guard !ids.isEmpty else { return }
+        var payload = loadPayload(userId: userId)
+        payload.pendingLogs.removeAll { ids.contains($0.id) }
+        persistPayload(payload, userId: userId)
+    }
+
+    private func storageKey(for userId: String) -> String {
+        storagePrefix + userId
+    }
+
+    private func loadPayload(userId: String) -> PersistedNutritionLogs {
+        guard !userId.isEmpty,
+              let data = UserDefaults.standard.data(forKey: storageKey(for: userId)),
+              let decoded = try? decoder.decode(PersistedNutritionLogs.self, from: data) else {
+            return PersistedNutritionLogs()
+        }
+        return decoded
+    }
+
+    private func persistPayload(_ payload: PersistedNutritionLogs, userId: String) {
+        guard !userId.isEmpty, let data = try? encoder.encode(payload) else { return }
+        UserDefaults.standard.set(data, forKey: storageKey(for: userId))
+    }
+
+    private func decodeMeals(_ raw: [String: [LoggedFoodItem]]) -> [MealType: [LoggedFoodItem]] {
+        var meals: [MealType: [LoggedFoodItem]] = [:]
+        for (mealRaw, items) in raw {
+            guard let mealType = MealType(rawValue: mealRaw) else { continue }
+            meals[mealType] = items
+        }
+        return meals
+    }
+
+    private func encodeMeals(_ meals: [MealType: [LoggedFoodItem]]) -> [String: [LoggedFoodItem]] {
+        var raw: [String: [LoggedFoodItem]] = [:]
+        for (mealType, items) in meals {
+            raw[mealType.rawValue] = items
+        }
+        return raw
+    }
+
+    private func totals(for meals: [MealType: [LoggedFoodItem]]) -> MacroTotals {
+        meals.values.flatMap { $0 }.reduce(.zero) { partial, item in
+            partial.adding(item.macros)
+        }
     }
 }

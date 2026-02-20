@@ -30,6 +30,18 @@ def _build_tags(category: str | None, date_value: str | None):
         tags.append(f"date:{date_value}")
     return tags
 
+
+def _to_bool(value, default: bool = True) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off"}:
+            return False
+    return default
+
 def _decorate_photo_row(row: dict):
     tags = row.get("tags")
     if "category" not in row:
@@ -53,6 +65,7 @@ async def upload_progress_photo(
     photo_type: str | None = Form(None),
     photo_category: str | None = Form(None),
     checkin_date: str | None = Form(None),
+    persist_photo: bool | str = Form(True),
 ):
     supabase = get_supabase()
     image_bytes = await photo.read()
@@ -72,20 +85,23 @@ async def upload_progress_photo(
         )
         public_url = supabase.storage.from_(bucket).get_public_url(path)
         tags = _build_tags(photo_category, date_value)
-        supabase.table("progress_photos").insert(
-            {
-                "user_id": user_id,
-                "url": public_url,
-                "photo_type": photo_type or "checkin",
-                "tags": tags or None,
-            }
-        ).execute()
+        should_persist = _to_bool(persist_photo, default=True)
+        if should_persist:
+            supabase.table("progress_photos").insert(
+                {
+                    "user_id": user_id,
+                    "url": public_url,
+                    "photo_type": photo_type or "checkin",
+                    "tags": tags or None,
+                }
+            ).execute()
         return {
             "status": "uploaded",
             "photo_url": public_url,
             "photo_type": photo_type or "checkin",
             "photo_category": photo_category,
             "date": date_value,
+            "persisted": should_persist,
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))

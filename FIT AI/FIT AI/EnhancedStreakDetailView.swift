@@ -8,6 +8,9 @@ struct EnhancedStreakDetailView: View {
     
     @State private var showingGoalPicker = false
     @State private var goalChangeMessage: String?
+    @State private var selectedBadge: StreakBadgeDefinition?
+
+    private let badgeColumns = [GridItem(.adaptive(minimum: 70), spacing: 12)]
     
     var body: some View {
         ZStack {
@@ -57,6 +60,8 @@ struct EnhancedStreakDetailView: View {
                         status: streakStore.weeklyWinStatus,
                         onChangeGoal: { showingGoalPicker = true }
                     )
+
+                    streakBadgesSection
                     
                     // Motivational section
                     StreakMilestoneView(
@@ -87,6 +92,14 @@ struct EnhancedStreakDetailView: View {
             Button("Got it") { goalChangeMessage = nil }
         } message: {
             Text(goalChangeMessage ?? "")
+        }
+        .sheet(item: $selectedBadge) { badge in
+            StreakBadgeDetailSheet(
+                badge: badge,
+                isEarned: badgeEarned(badge),
+                longestStreak: streakStore.appStreak.longestStreak
+            )
+            .presentationDetents([.medium])
         }
     }
     
@@ -128,6 +141,80 @@ struct EnhancedStreakDetailView: View {
         .padding(18)
         .background(FitTheme.cardBackground)
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+    }
+
+    private func badgeEarned(_ badge: StreakBadgeDefinition) -> Bool {
+        streakStore.appStreak.longestStreak >= badge.requiredDays
+    }
+
+    private var streakBadgesSection: some View {
+        let earnedCount = StreakBadgeCatalog.all.filter { badgeEarned($0) }.count
+
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Streak Badges")
+                    .font(FitFont.heading(size: 18))
+                    .foregroundColor(FitTheme.textPrimary)
+
+                Spacer()
+
+                Text("\(earnedCount)/\(StreakBadgeCatalog.all.count)")
+                    .font(FitFont.body(size: 12, weight: .semibold))
+                    .foregroundColor(FitTheme.textSecondary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .background(FitTheme.cardHighlight)
+                    .clipShape(Capsule())
+            }
+
+            Text("Tap a badge to see rarity, requirements, and character nickname.")
+                .font(FitFont.body(size: 13))
+                .foregroundColor(FitTheme.textSecondary)
+
+            LazyVGrid(columns: badgeColumns, spacing: 12) {
+                ForEach(StreakBadgeCatalog.all) { badge in
+                    let earned = badgeEarned(badge)
+                    Button {
+                        selectedBadge = badge
+                    } label: {
+                        VStack(spacing: 6) {
+                            ZStack(alignment: .topTrailing) {
+                                HoloBadgeView(
+                                    image: Image(badge.imageName),
+                                    cornerRadius: 16,
+                                    isEarned: earned
+                                )
+                                .frame(height: 78)
+                                .shadow(color: Color.black.opacity(0.2), radius: 8, x: 0, y: 5)
+
+                                if !earned {
+                                    Image(systemName: "lock.fill")
+                                        .font(.system(size: 10, weight: .bold))
+                                        .foregroundColor(.white)
+                                        .padding(6)
+                                        .background(Color.black.opacity(0.6))
+                                        .clipShape(Circle())
+                                        .padding(6)
+                                }
+                            }
+
+                            Text(badge.title)
+                                .font(FitFont.body(size: 11, weight: .semibold))
+                                .foregroundColor(FitTheme.textPrimary)
+                                .lineLimit(1)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .padding(16)
+        .background(FitTheme.cardBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(FitTheme.cardStroke.opacity(0.5), lineWidth: 1)
+        )
     }
 }
 
@@ -474,6 +561,83 @@ struct StreakMilestoneView: View {
     }
 }
 
+// MARK: - Streak Badge Detail Sheet
+
+struct StreakBadgeDetailSheet: View {
+    let badge: StreakBadgeDefinition
+    let isEarned: Bool
+    let longestStreak: Int
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 16) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(badge.title)
+                            .font(FitFont.heading(size: 22))
+                            .foregroundColor(FitTheme.textPrimary)
+                        Text("Nickname: \(badge.nickname)")
+                            .font(FitFont.body(size: 14))
+                            .foregroundColor(FitTheme.textSecondary)
+                    }
+                    Spacer()
+                    RarityPill(rarity: badge.rarity)
+                }
+
+                HoloBadgeView(
+                    image: Image(badge.imageName),
+                    cornerRadius: 24,
+                    isEarned: isEarned
+                )
+                .frame(width: 160, height: 160)
+                .shadow(color: Color.black.opacity(0.25), radius: 12, x: 0, y: 8)
+
+                VStack(alignment: .leading, spacing: 10) {
+                    detailRow(label: "Requirement", value: badge.requirementText)
+                    if isEarned {
+                        detailRow(label: "Status", value: "Unlocked")
+                    } else {
+                        detailRow(label: "Status", value: "Locked")
+                        detailRow(label: "Current Best", value: "\(max(longestStreak, 0)) days")
+                    }
+                }
+                .padding(14)
+                .background(FitTheme.cardHighlight)
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+            .padding(20)
+        }
+        .background(FitTheme.backgroundGradient.ignoresSafeArea())
+    }
+
+    private func detailRow(label: String, value: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text(label)
+                .font(FitFont.body(size: 12, weight: .semibold))
+                .foregroundColor(FitTheme.textSecondary)
+                .frame(width: 95, alignment: .leading)
+            Text(value)
+                .font(FitFont.body(size: 13))
+                .foregroundColor(FitTheme.textPrimary)
+            Spacer()
+        }
+    }
+}
+
+struct RarityPill: View {
+    let rarity: StreakBadgeRarity
+
+    var body: some View {
+        Text(rarity.rawValue)
+            .font(FitFont.body(size: 12, weight: .semibold))
+            .foregroundColor(rarity.color)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .background(rarity.color.opacity(0.15))
+            .clipShape(Capsule())
+    }
+}
+
 // MARK: - Streak Tip Row
 
 struct StreakTipRow: View {
@@ -499,4 +663,3 @@ struct StreakTipRow: View {
 #Preview {
     EnhancedStreakDetailView()
 }
-

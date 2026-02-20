@@ -115,7 +115,7 @@ struct ExercisePickerModal: View {
     @State private var selectedEquipment: Set<String> = []
     @State private var catalog: [ExerciseDefinition] = []
     @State private var isLoading = false
-    @State private var submitTask: Task<Void, Never>?
+    @State private var searchTask: Task<Void, Never>?
     @State private var lastQuery = ""
     @State private var isActive = true
     private let localFallbackCatalog: [ExerciseDefinition] = [
@@ -233,12 +233,13 @@ struct ExercisePickerModal: View {
         .onAppear {
             isActive = true
             if catalog.isEmpty {
-                isLoading = false
+                searchTask?.cancel()
+                searchTask = Task { await performSearch(for: "") }
             }
         }
         .onDisappear {
             isActive = false
-            submitTask?.cancel()
+            searchTask?.cancel()
         }
     }
 
@@ -277,12 +278,15 @@ struct ExercisePickerModal: View {
                 .disableAutocorrection(true)
                 .submitLabel(.search)
                 .onSubmit {
-                    submitTask?.cancel()
+                    searchTask?.cancel()
                     let snapshot = searchText
-                    submitTask = Task {
+                    searchTask = Task {
                         await logSearchEvent("submit query=\"\(snapshot)\"")
                         await performSearch(for: snapshot)
                     }
+                }
+                .onChange(of: searchText) { newValue in
+                    scheduleSearch(for: newValue)
                 }
         }
         .padding(12)
@@ -389,6 +393,16 @@ struct ExercisePickerModal: View {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !trimmed.isEmpty else { return localFallbackCatalog }
         return localFallbackCatalog.filter { $0.name.lowercased().contains(trimmed) }
+    }
+
+    private func scheduleSearch(for query: String) {
+        searchTask?.cancel()
+        let snapshot = query
+        searchTask = Task {
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard !Task.isCancelled else { return }
+            await performSearch(for: snapshot)
+        }
     }
 
     private func logSearchEvent(_ message: String) async {
@@ -579,6 +593,8 @@ struct WorkoutSessionView: View {
     @State private var showNewPRCelebration = false
     @State private var newPRExercise = ""
     @State private var newPRWeight: Double = 0
+    @State private var loggedSetIds: Set<UUID> = []
+    @State private var loggedCardioExerciseNames: Set<String> = []
 
     private let restTicker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     private let workoutTicker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
@@ -597,107 +613,105 @@ struct WorkoutSessionView: View {
             FitTheme.backgroundGradient
                 .ignoresSafeArea()
 
-            VStack(spacing: 16) {
-                sessionHeader
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    sessionHeader
 
-                workoutDurationHeader
+                    workoutDurationHeader
 
-                if restActive {
-                    RestTimerCard(
-                        remaining: restRemaining,
-                        onSkip: stopRestTimer,
-                        onAdjust: adjustRestTimer
-                    )
-                        .padding(.horizontal, 20)
-                }
-
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
-                        Text(sessionTitle.isEmpty ? title : sessionTitle)
-                            .font(FitFont.heading(size: 24))
-                            .foregroundColor(FitTheme.textPrimary)
+                    if restActive {
+                        RestTimerCard(
+                            remaining: restRemaining,
+                            onSkip: stopRestTimer,
+                            onAdjust: adjustRestTimer
+                        )
                             .padding(.horizontal, 20)
-
-                        VStack(spacing: 12) {
-                            ForEach(exercises.indices, id: \.self) { index in
-                                ExerciseRowSummary(
-                                    index: index + 1,
-                                    exercise: exercises[index],
-                                    tag: exerciseTags[exercises[index].id],
-                                    tagDetail: tagDetail(for: exercises[index]),
-                                    supersetIndicator: supersetIndicator(for: index),
-                                    onOpen: {
-                                        insertionIndex = index
-                                        selectedExerciseIndex = index
-                                        isExerciseSheetPresented = true
-                                    },
-                                    onEdit: {
-                                        insertionIndex = index
-                                        taggingExerciseIndex = index
-                                        openExerciseEditor()
-                                    },
-                                    onCreateSuperset: {
-                                        insertionIndex = index
-                                        taggingExerciseIndex = index
-                                        beginTagging(.superset)
-                                    },
-                                    onCreateDropSet: {
-                                        insertionIndex = index
-                                        taggingExerciseIndex = index
-                                        beginTagging(.dropSet)
-                                    },
-                                    onClearTag: {
-                                        clearTag(for: index)
-                                    },
-                                    onDelete: {
-                                        withAnimation(.spring(response: 0.3)) {
-                                            exercises.remove(at: index)
-                                        }
-                                        Haptics.medium()
-                                    }
-                                )
-                            }
-                        }
-                        .padding(.horizontal, 20)
-
-                        Button(action: { showExercisePicker = true }) {
-                            Label("Add Exercise", systemImage: "plus")
-                                .font(FitFont.body(size: 14, weight: .semibold))
-                                .foregroundColor(FitTheme.textPrimary)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 12)
-                                .background(FitTheme.cardHighlight)
-                                .clipShape(RoundedRectangle(cornerRadius: 16))
-                        }
-                        .padding(.horizontal, 20)
-
-                        if showCardio {
-                            CardioRecommendationCard(
-                                recommendations: cardioRecommendations,
-                                selectedId: selectedCardioId,
-                                onSelect: { recommendation in
-                                    selectedCardioId = recommendation.id
-                                    editingCardio = recommendation
-                                },
-                                onDismiss: { showCardio = false }
-                            )
-                            .padding(.horizontal, 20)
-                        }
-
-                        Button(action: { showFinishAlert = true }) {
-                            Text(isCompleting ? "Finishing…" : "Finish Workout")
-                                .font(FitFont.body(size: 18))
-                                .fontWeight(.semibold)
-                                .foregroundColor(FitTheme.buttonText)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 16)
-                                .background(canFinish ? FitTheme.accent : FitTheme.cardHighlight)
-                                .clipShape(RoundedRectangle(cornerRadius: 18))
-                        }
-                        .disabled(isCompleting || !canFinish)
-                        .padding(.horizontal, 20)
-                        .padding(.bottom, 24)
                     }
+
+                    Text(sessionTitle.isEmpty ? title : sessionTitle)
+                        .font(FitFont.heading(size: 24))
+                        .foregroundColor(FitTheme.textPrimary)
+                        .padding(.horizontal, 20)
+
+                    VStack(spacing: 12) {
+                        ForEach(exercises.indices, id: \.self) { index in
+                            ExerciseRowSummary(
+                                index: index + 1,
+                                exercise: exercises[index],
+                                tag: exerciseTags[exercises[index].id],
+                                tagDetail: tagDetail(for: exercises[index]),
+                                supersetIndicator: supersetIndicator(for: index),
+                                onOpen: {
+                                    insertionIndex = index
+                                    selectedExerciseIndex = index
+                                    isExerciseSheetPresented = true
+                                },
+                                onEdit: {
+                                    insertionIndex = index
+                                    taggingExerciseIndex = index
+                                    openExerciseEditor()
+                                },
+                                onCreateSuperset: {
+                                    insertionIndex = index
+                                    taggingExerciseIndex = index
+                                    beginTagging(.superset)
+                                },
+                                onCreateDropSet: {
+                                    insertionIndex = index
+                                    taggingExerciseIndex = index
+                                    beginTagging(.dropSet)
+                                },
+                                onClearTag: {
+                                    clearTag(for: index)
+                                },
+                                onDelete: {
+                                    withAnimation(.spring(response: 0.3)) {
+                                        exercises.remove(at: index)
+                                    }
+                                    Haptics.medium()
+                                }
+                            )
+                        }
+                    }
+                    .padding(.horizontal, 20)
+
+                    Button(action: { showExercisePicker = true }) {
+                        Label("Add Exercise", systemImage: "plus")
+                            .font(FitFont.body(size: 14, weight: .semibold))
+                            .foregroundColor(FitTheme.textPrimary)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                            .background(FitTheme.cardHighlight)
+                            .clipShape(RoundedRectangle(cornerRadius: 16))
+                    }
+                    .padding(.horizontal, 20)
+
+                    if showCardio {
+                        CardioRecommendationCard(
+                            recommendations: cardioRecommendations,
+                            selectedId: selectedCardioId,
+                            onSelect: { recommendation in
+                                selectedCardioId = recommendation.id
+                                editingCardio = recommendation
+                            },
+                            onDismiss: { showCardio = false }
+                        )
+                        .padding(.horizontal, 20)
+                    }
+
+                    Button(action: { showFinishAlert = true }) {
+                        Text(isCompleting ? "Finishing…" : "Finish Workout")
+                            .font(FitFont.body(size: 18))
+                            .fontWeight(.semibold)
+                            .foregroundColor(FitTheme.buttonText)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 16)
+                            .background(canFinish ? FitTheme.accent : FitTheme.cardHighlight)
+                            .clipShape(RoundedRectangle(cornerRadius: 18))
+                    }
+                    .disabled(isCompleting || !canFinish)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 24)
                 }
             }
         }
@@ -803,6 +817,14 @@ struct WorkoutSessionView: View {
                 }
                 // Initial save when session starts
                 saveSessionState()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .fitAIRestTimerSkip)) { _ in
+                guard restActive else { return }
+                stopRestTimer()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .fitAIRestTimerAdd30)) { _ in
+                guard restActive else { return }
+                adjustRestTimer(by: 30)
             }
             .onChange(of: scenePhase) { newPhase in
                 if newPhase == .background || newPhase == .inactive {
@@ -1096,27 +1118,45 @@ struct WorkoutSessionView: View {
         WorkoutSessionStore.clear()
     }
 
-    private func logSetIfNeeded(exerciseName: String, setEntry: WorkoutSetEntry, unit: WeightUnit) {
-        guard !setEntry.isWarmup else { return }
+    private func logSetIfNeeded(
+        exerciseName: String,
+        setEntry: WorkoutSetEntry,
+        setIndex: Int,
+        unit: WeightUnit
+    ) {
+        if loggedSetIds.contains(setEntry.id) { return }
         let reps = Int(setEntry.reps) ?? 0
         let rawWeight = Double(setEntry.weight) ?? 0
         let weight = unit == .kg ? rawWeight * 2.20462 : rawWeight
         
         // Check for PR
-        Task {
-            await checkAndCelebratePR(exerciseName: exerciseName, weight: weight, reps: reps)
+        if !setEntry.isWarmup {
+            Task {
+                await checkAndCelebratePR(exerciseName: exerciseName, weight: weight, reps: reps)
+            }
         }
         
         if let sessionId {
             Task {
-                try? await WorkoutAPIService.shared.logExerciseSet(
-                    sessionId: sessionId,
-                    exerciseName: exerciseName,
-                    sets: 1,
-                    reps: reps,
-                    weight: weight,
-                    notes: nil
-                )
+                do {
+                    try await WorkoutAPIService.shared.logExerciseSet(
+                        sessionId: sessionId,
+                        exerciseName: exerciseName,
+                        sets: 1,
+                        reps: reps,
+                        weight: weight,
+                        notes: nil,
+                        setIndex: setIndex,
+                        isWarmup: setEntry.isWarmup,
+                        durationSeconds: nil
+                    )
+                    await MainActor.run {
+                        loggedSetIds.insert(setEntry.id)
+                    }
+                } catch {
+                    print("❌ Workout log write failed:", error)
+                    print("sessionId=\(sessionId) exercise=\(exerciseName) reps=\(reps) weight=\(weight)")
+                }
             }
         } else {
             savePendingLog(
@@ -1126,6 +1166,9 @@ struct WorkoutSessionView: View {
                     reps: reps,
                     weight: weight,
                     durationMinutes: nil,
+                    durationSeconds: nil,
+                    isWarmup: setEntry.isWarmup,
+                    setIndex: setIndex,
                     createdAt: Date()
                 )
             )
@@ -1190,12 +1233,19 @@ struct WorkoutSessionView: View {
         let name = "Cardio - \(recommendation.title)"
         if let sessionId {
             Task {
-                try? await WorkoutAPIService.shared.logCardioDuration(
-                    sessionId: sessionId,
-                    exerciseName: name,
-                    durationMinutes: recommendation.durationMinutes,
-                    notes: "Intensity: \(recommendation.intensity)"
-                )
+                do {
+                    try await WorkoutAPIService.shared.logCardioDuration(
+                        sessionId: sessionId,
+                        exerciseName: name,
+                        durationMinutes: recommendation.durationMinutes,
+                        notes: "Intensity: \(recommendation.intensity)"
+                    )
+                    await MainActor.run {
+                        loggedCardioExerciseNames.insert(name)
+                    }
+                } catch {
+                    // Ignore logging failures during workout
+                }
             }
         } else {
             savePendingLog(
@@ -1205,6 +1255,9 @@ struct WorkoutSessionView: View {
                     reps: 0,
                     weight: 0,
                     durationMinutes: recommendation.durationMinutes,
+                    durationSeconds: recommendation.durationMinutes * 60,
+                    isWarmup: false,
+                    setIndex: 1,
                     createdAt: Date()
                 )
             )
@@ -1247,6 +1300,7 @@ struct WorkoutSessionView: View {
         }
         isCompleting = true
         do {
+            await logUnloggedSetsIfNeeded(sessionId: sessionId)
             let summary = try await WorkoutAPIService.shared.completeSession(
                 sessionId: sessionId,
                 durationSeconds: workoutElapsed
@@ -1270,6 +1324,73 @@ struct WorkoutSessionView: View {
                 finishMessage = "Unable to complete workout."
                 showFinishMessage = true
                 isCompleting = false
+            }
+        }
+    }
+
+    private func logUnloggedSetsIfNeeded(sessionId: String) async {
+        let exerciseSnapshot = await MainActor.run { exercises }
+
+        for exercise in exerciseSnapshot {
+            let exerciseName = exercise.name
+            let isCardio = exerciseName.lowercased().hasPrefix("cardio -")
+            if isCardio {
+                let alreadyLogged = await MainActor.run { loggedCardioExerciseNames.contains(exerciseName) }
+                if alreadyLogged {
+                    continue
+                }
+                let durationMinutes = exercise.sets.first.flatMap { Int($0.reps.trimmingCharacters(in: .whitespacesAndNewlines)) } ?? 0
+                guard durationMinutes > 0 else { continue }
+                do {
+                    try await WorkoutAPIService.shared.logCardioDuration(
+                        sessionId: sessionId,
+                        exerciseName: exerciseName,
+                        durationMinutes: durationMinutes,
+                        notes: exercise.notes.isEmpty ? nil : exercise.notes
+                    )
+                    await MainActor.run {
+                        loggedCardioExerciseNames.insert(exerciseName)
+                    }
+                } catch {
+                    print("❌ Workout log write failed:", error)
+                    print("sessionId=\(sessionId) exercise=\(exerciseName) durationMinutes=\(durationMinutes)")
+                }
+                continue
+            }
+
+            for (offset, setEntry) in exercise.sets.enumerated() {
+                let alreadyLogged = await MainActor.run { loggedSetIds.contains(setEntry.id) }
+                if alreadyLogged {
+                    continue
+                }
+                let repsText = setEntry.reps.trimmingCharacters(in: .whitespacesAndNewlines)
+                let weightText = setEntry.weight.trimmingCharacters(in: .whitespacesAndNewlines)
+                let reps = Int(repsText) ?? 0
+                let rawWeight = Double(weightText) ?? 0
+                let hasUserInput = setEntry.isComplete || rawWeight > 0 || (reps > 0 && repsText != "10")
+                if !hasUserInput {
+                    continue
+                }
+                let weight = exercise.unit == .kg ? rawWeight * 2.20462 : rawWeight
+                do {
+                    try await WorkoutAPIService.shared.logExerciseSet(
+                        sessionId: sessionId,
+                        exerciseName: exerciseName,
+                        sets: 1,
+                        reps: reps,
+                        weight: weight,
+                        notes: exercise.notes.isEmpty ? nil : exercise.notes,
+                        setIndex: offset + 1,
+                        isWarmup: setEntry.isWarmup,
+                        durationSeconds: nil
+                    )
+                    await MainActor.run {
+                        loggedSetIds.insert(setEntry.id)
+                    }
+                } catch {
+                    print("❌ Workout log write failed:", error)
+                    print("sessionId=\(sessionId) exercise=\(exerciseName) reps=\(reps) weight=\(weight)")
+                }
             }
         }
     }
@@ -1504,9 +1625,11 @@ struct WorkoutSessionView: View {
 
     private func handleSetCompletion(for index: Int, restSeconds: Int, setEntry: WorkoutSetEntry) {
         guard exercises.indices.contains(index) else { return }
+        let setIndex = exercises[index].sets.firstIndex(where: { $0.id == setEntry.id }).map { $0 + 1 } ?? 1
         logSetIfNeeded(
             exerciseName: exercises[index].name,
             setEntry: setEntry,
+            setIndex: setIndex,
             unit: exercises[index].unit
         )
         if setEntry.isWarmup {
@@ -1704,6 +1827,17 @@ private struct WorkoutCompletionSheet: View {
     @State private var step: CompletionStep
     @State private var animatedStreak = 0
     @State private var streakPulse = false
+    
+    // PR Animation States
+    @State private var trophyScale: CGFloat = 0.5
+    @State private var trophyRotation: Double = -15
+    @State private var prTextScale: CGFloat = 0.5
+    @State private var prTextOpacity: Double = 0
+    @State private var weightScale: CGFloat = 0.3
+    @State private var weightOpacity: Double = 0
+    @State private var confettiTrigger = false
+    @State private var glowIntensity: CGFloat = 0
+    @State private var sparkleRotation: Double = 0
 
     init(summary: WorkoutSessionCompleteResponse, streakCount: Int, onDone: @escaping () -> Void) {
         self.summary = summary
@@ -1723,93 +1857,220 @@ private struct WorkoutCompletionSheet: View {
                     .frame(width: 48, height: 5)
                     .padding(.top, 12)
 
-                if step == .pr {
-                    prView
-                } else {
-                    congratsView
+                Group {
+                    if step == .pr {
+                        prView
+                    } else {
+                        congratsView
+                    }
                 }
-
-                Spacer()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(.bottom, 24)
             }
         }
     }
 
     private var prView: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "trophy.fill")
-                .font(.system(size: 40, weight: .semibold))
-                .foregroundColor(FitTheme.accent)
-
-            Text("PR!")
-                .font(FitFont.heading(size: 26))
-                .foregroundColor(FitTheme.textPrimary)
-
-            TabView {
-                ForEach(summary.prs) { pr in
-                    VStack(spacing: 8) {
-                        Text(pr.exerciseName)
-                            .font(FitFont.body(size: 18))
-                            .foregroundColor(FitTheme.textPrimary)
-                        Text("\(Int(pr.value)) lb")
-                            .font(FitFont.heading(size: 30))
-                            .foregroundColor(FitTheme.textPrimary)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
-                }
+        ZStack {
+            // Confetti Particles
+            ForEach(0..<30, id: \.self) { i in
+                ConfettiParticle(index: i, trigger: confettiTrigger)
             }
-            .tabViewStyle(.page(indexDisplayMode: .automatic))
-            .frame(height: 120)
-
-            CompletionActionButton(title: "Continue") {
-                withAnimation(.easeInOut(duration: 0.25)) {
-                    step = .congrats
+            
+            VStack(spacing: 16) {
+                // Animated Trophy with Sparkle Ring
+                ZStack {
+                    // Rotating sparkle ring
+                    Circle()
+                        .stroke(
+                            AngularGradient(
+                                colors: [
+                                    FitTheme.accent.opacity(0),
+                                    FitTheme.accent.opacity(0.6),
+                                    FitTheme.accent.opacity(0),
+                                ],
+                                center: .center,
+                                startAngle: .degrees(0),
+                                endAngle: .degrees(360)
+                            ),
+                            lineWidth: 3
+                        )
+                        .frame(width: 100, height: 100)
+                        .rotationEffect(.degrees(sparkleRotation))
+                    
+                    // Glowing circle behind trophy
+                    Circle()
+                        .fill(FitTheme.accent.opacity(0.2))
+                        .frame(width: 80, height: 80)
+                        .blur(radius: 20)
+                        .scaleEffect(glowIntensity)
+                    
+                    // Trophy
+                    Image(systemName: "trophy.fill")
+                        .font(.system(size: 50, weight: .semibold))
+                        .foregroundStyle(
+                            LinearGradient(
+                                colors: [
+                                    FitTheme.accent,
+                                    FitTheme.accent.opacity(0.7),
+                                    FitTheme.accent
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .scaleEffect(trophyScale)
+                        .rotationEffect(.degrees(trophyRotation))
+                        .shadow(color: FitTheme.accent.opacity(0.5), radius: 20, x: 0, y: 10)
                 }
+                .padding(.top, 20)
+
+                // Animated "PR!" Text
+                Text("PR!")
+                    .font(FitFont.heading(size: 38))
+                    .fontWeight(.black)
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [FitTheme.accent, FitTheme.accent.opacity(0.8)],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .scaleEffect(prTextScale)
+                    .opacity(prTextOpacity)
+                    .shadow(color: FitTheme.accent.opacity(0.4), radius: 10, x: 0, y: 5)
+
+                // Animated PR Details
+                TabView {
+                    ForEach(summary.prs) { pr in
+                        VStack(spacing: 12) {
+                            Text(pr.exerciseName)
+                                .font(FitFont.body(size: 18))
+                                .foregroundColor(FitTheme.textSecondary)
+                            
+                            Text("\(Int(pr.value)) lb")
+                                .font(FitFont.heading(size: 48))
+                                .fontWeight(.heavy)
+                                .foregroundColor(FitTheme.textPrimary)
+                                .scaleEffect(weightScale)
+                                .opacity(weightOpacity)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                    }
+                }
+                .tabViewStyle(.page(indexDisplayMode: .automatic))
+                .frame(height: 140)
+
+                CompletionActionButton(title: "Continue") {
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        step = .congrats
+                    }
+                }
+                .padding(.horizontal, 20)
             }
             .padding(.horizontal, 20)
         }
-        .padding(.horizontal, 20)
+        .onAppear {
+            // Trigger haptic
+            let impactHeavy = UIImpactFeedbackGenerator(style: .heavy)
+            impactHeavy.impactOccurred()
+            
+            // Trophy entrance animation
+            withAnimation(.spring(response: 0.6, dampingFraction: 0.5)) {
+                trophyScale = 1.2
+                trophyRotation = 0
+            }
+            
+            // Trophy bounce back
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                withAnimation(.spring(response: 0.4, dampingFraction: 0.6)) {
+                    trophyScale = 1.0
+                }
+            }
+            
+            // PR text animation
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                withAnimation(.spring(response: 0.5, dampingFraction: 0.6)) {
+                    prTextScale = 1.0
+                    prTextOpacity = 1.0
+                }
+                
+                // Second haptic
+                let impactMedium = UIImpactFeedbackGenerator(style: .medium)
+                impactMedium.impactOccurred()
+            }
+            
+            // Weight animation
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                withAnimation(.spring(response: 0.6, dampingFraction: 0.5)) {
+                    weightScale = 1.0
+                    weightOpacity = 1.0
+                }
+                
+                // Third haptic
+                let impactLight = UIImpactFeedbackGenerator(style: .light)
+                impactLight.impactOccurred()
+            }
+            
+            // Confetti animation
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                confettiTrigger = true
+            }
+            
+            // Continuous glow pulse
+            withAnimation(.easeInOut(duration: 1.5).repeatForever(autoreverses: true)) {
+                glowIntensity = 1.3
+            }
+            
+            // Continuous sparkle rotation
+            withAnimation(.linear(duration: 3.0).repeatForever(autoreverses: false)) {
+                sparkleRotation = 360
+            }
+        }
     }
 
     private var congratsView: some View {
-        VStack(spacing: 14) {
-            CoachCharacterView(size: 120, showBackground: false, pose: .celebration)
-                .padding(.top, 6)
+        VStack(spacing: 22) {
+            Spacer(minLength: 8)
+
+            CoachCharacterView(size: 180, showBackground: false, pose: .celebration)
 
             Text("Workout complete")
-                .font(FitFont.heading(size: 24))
+                .font(FitFont.heading(size: 34))
                 .foregroundColor(FitTheme.textPrimary)
 
             Text("Quick win, solid effort. Keep it rolling.")
-                .font(FitFont.body(size: 14))
+                .font(FitFont.body(size: 18))
                 .foregroundColor(FitTheme.textSecondary)
 
-            VStack(spacing: 6) {
-                HStack(spacing: 8) {
+            VStack(spacing: 10) {
+                HStack(spacing: 12) {
                     Image(systemName: "flame.fill")
+                        .font(.system(size: 38, weight: .semibold))
                         .foregroundColor(FitTheme.accent)
                     Text("\(animatedStreak)")
-                        .font(FitFont.heading(size: 28))
+                        .font(FitFont.heading(size: 46))
                         .foregroundColor(FitTheme.textPrimary)
                 }
                 .scaleEffect(streakPulse ? 1.08 : 1.0)
 
                 Text("day streak")
-                    .font(FitFont.body(size: 13))
+                    .font(FitFont.body(size: 18))
                     .foregroundColor(FitTheme.textSecondary)
             }
-            .padding(.top, 6)
 
             Text("Duration · \(formatDuration(summary.durationSeconds))")
-                .font(FitFont.body(size: 12))
+                .font(FitFont.body(size: 16))
                 .foregroundColor(FitTheme.textSecondary)
 
             CompletionActionButton(title: "Done", action: onDone)
                 .padding(.horizontal, 20)
-                .padding(.top, 6)
+
+            Spacer(minLength: 12)
         }
-        .frame(maxWidth: .infinity)
-        .padding(.horizontal, 20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.horizontal, 24)
         .onAppear {
             let startValue = max(streakCount - 1, 0)
             animatedStreak = startValue
@@ -1853,8 +2114,118 @@ private struct CompletionActionButton: View {
                 .padding(.horizontal, 18)
                 .background(FitTheme.primaryGradient)
                 .clipShape(Capsule())
+                .contentShape(Capsule())
                 .shadow(color: FitTheme.buttonShadow, radius: 10, x: 0, y: 6)
         }
+    }
+}
+
+// MARK: - Confetti Particle Animation
+private struct ConfettiParticle: View {
+    let index: Int
+    let trigger: Bool
+    
+    @State private var yOffset: CGFloat = 0
+    @State private var xOffset: CGFloat = 0
+    @State private var rotation: Double = 0
+    @State private var opacity: Double = 0
+    @State private var scale: CGFloat = 0
+    
+    private var randomColor: Color {
+        let colors: [Color] = [
+            FitTheme.accent,
+            .blue,
+            .purple,
+            .pink,
+            .yellow,
+            .orange,
+            .green
+        ]
+        return colors[index % colors.count]
+    }
+    
+    private var randomShape: some View {
+        Group {
+            if index % 3 == 0 {
+                Circle()
+                    .fill(randomColor)
+                    .frame(width: CGFloat.random(in: 6...12), height: CGFloat.random(in: 6...12))
+            } else if index % 3 == 1 {
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(randomColor)
+                    .frame(width: CGFloat.random(in: 6...10), height: CGFloat.random(in: 6...10))
+            } else {
+                Diamond()
+                    .fill(randomColor)
+                    .frame(width: CGFloat.random(in: 8...12), height: CGFloat.random(in: 8...12))
+            }
+        }
+    }
+    
+    var body: some View {
+        randomShape
+            .offset(x: xOffset, y: yOffset)
+            .rotationEffect(.degrees(rotation))
+            .opacity(opacity)
+            .scaleEffect(scale)
+            .onChange(of: trigger) { newValue in
+                if newValue {
+                    startAnimation()
+                }
+            }
+    }
+    
+    private func startAnimation() {
+        // Random starting position near center
+        let startX = CGFloat.random(in: -50...50)
+        let startY = CGFloat.random(in: -100...0)
+        
+        // Random end position (spread out)
+        let endX = CGFloat.random(in: -180...180)
+        let endY = CGFloat.random(in: 300...600)
+        
+        // Random rotation
+        let endRotation = Double.random(in: 360...720)
+        
+        // Staggered delay
+        let delay = Double(index) * 0.02
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            // Fade in and scale up quickly
+            withAnimation(.easeOut(duration: 0.2)) {
+                opacity = 1.0
+                scale = 1.0
+                xOffset = startX
+                yOffset = startY
+            }
+            
+            // Fall and fade out
+            withAnimation(.easeIn(duration: Double.random(in: 1.2...2.0))) {
+                xOffset = endX
+                yOffset = endY
+                rotation = endRotation
+            }
+            
+            // Fade out near the end
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                withAnimation(.easeIn(duration: 0.6)) {
+                    opacity = 0
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Diamond Shape for Confetti
+private struct Diamond: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        path.move(to: CGPoint(x: rect.midX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.midY))
+        path.addLine(to: CGPoint(x: rect.midX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.midY))
+        path.closeSubpath()
+        return path
     }
 }
 
@@ -1864,6 +2235,9 @@ private struct PendingExerciseLog: Codable {
     let reps: Int
     let weight: Double
     let durationMinutes: Int?
+    let durationSeconds: Int?
+    let isWarmup: Bool?
+    let setIndex: Int?
     let createdAt: Date
 }
 
@@ -2837,6 +3211,7 @@ private struct WorkoutExerciseLoggingSheet: View {
     @State private var isLoadingRecommendation = false
     @State private var showSetAddedFeedback = false
     @State private var isKeyboardVisible = false
+    @State private var activeSetId: UUID?
 
     var body: some View {
         let base = loggingBase
@@ -2867,15 +3242,17 @@ private struct WorkoutExerciseLoggingSheet: View {
                     if !warmupIndices.isEmpty {
                         sectionTitle("Warm-up Sets")
                         ForEach(Array(warmupIndices.enumerated()), id: \.element) { index, setIndex in
-                            WorkoutSetRow(
-                                index: index + 1,
-                                unit: exercise.unit,
-                                setEntry: $exercise.sets[setIndex],
-                                onComplete: { isComplete in
-                                    guard isComplete else { return }
-                                    onCompleteSet(exercise.warmupRestSeconds, exercise.sets[setIndex])
-                                },
-                                onDelete: { removeSet(id: exercise.sets[setIndex].id) }
+                        WorkoutSetRow(
+                            index: index + 1,
+                            unit: exercise.unit,
+                            setEntry: $exercise.sets[setIndex],
+                            activeSetId: $activeSetId,
+                            isKeyboardVisible: isKeyboardVisible,
+                            onComplete: { isComplete in
+                                guard isComplete else { return }
+                                onCompleteSet(exercise.warmupRestSeconds, exercise.sets[setIndex])
+                            },
+                            onDelete: { removeSet(id: exercise.sets[setIndex].id) }
                             )
                         }
                         warmupSetActions
@@ -2887,6 +3264,8 @@ private struct WorkoutExerciseLoggingSheet: View {
                             index: index + 1,
                             unit: exercise.unit,
                             setEntry: $exercise.sets[setIndex],
+                            activeSetId: $activeSetId,
+                            isKeyboardVisible: isKeyboardVisible,
                             onComplete: { isComplete in
                                 guard isComplete else { return }
                                 // Auto-fill remaining sets when first working set is completed
@@ -2945,8 +3324,7 @@ private struct WorkoutExerciseLoggingSheet: View {
                         guard !isKeyboardVisible else { return }
                         let isVertical = abs(value.translation.width) < 80
                         let isDownward = value.translation.height > 120
-                        let isFromTop = value.startLocation.y < 140
-                        if isVertical && isDownward && isFromTop {
+                        if isVertical && isDownward {
                             dismiss()
                         }
                     }
@@ -2962,20 +3340,43 @@ private struct WorkoutExerciseLoggingSheet: View {
                         .padding(.horizontal, 20)
                     }
 
-                    // Changed from "Done" to "Back" since X button is now in header
-                    Button("Back to Workout") {
-                        dismiss()
+                    // Primary action: log next set, then "Done" when finished.
+                    let allSetsLogged = !hasIncompleteSets
+                    Button {
+                        if allSetsLogged {
+                            dismiss()
+                        } else {
+                            logNextSet()
+                        }
+                    } label: {
+                        Text(allSetsLogged ? "Done" : "Log Set")
+                            .font(FitFont.body(size: 16, weight: .semibold))
+                            .foregroundColor(FitTheme.buttonText)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 14)
+                            .background {
+                                if allSetsLogged {
+                                    FitTheme.success
+                                } else {
+                                    FitTheme.primaryGradient
+                                }
+                            }
+                            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                            .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                     }
-                    .font(FitFont.body(size: 16, weight: .semibold))
-                    .foregroundColor(FitTheme.buttonText)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
-                    .background(FitTheme.primaryGradient)
-                    .clipShape(RoundedRectangle(cornerRadius: 18))
                     .shadow(color: FitTheme.buttonShadow, radius: 12, x: 0, y: 8)
                     .padding(.horizontal, 20)
                 }
                 .padding(.bottom, 10)
+            }
+            .toolbar {
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Done") {
+                        dismissKeyboard()
+                    }
+                    .foregroundColor(FitTheme.accent)
+                }
             }
     }
 
@@ -3486,6 +3887,38 @@ private struct WorkoutExerciseLoggingSheet: View {
         exercise.sets.indices.filter { !exercise.sets[$0].isWarmup }
     }
 
+    private var hasIncompleteSets: Bool {
+        exercise.sets.contains { !$0.isComplete }
+    }
+
+    private func logNextSet() {
+        if let activeSetId,
+           let activeIndex = exercise.sets.firstIndex(where: { $0.id == activeSetId }),
+           !exercise.sets[activeIndex].isComplete {
+            logSet(at: activeIndex)
+            return
+        }
+
+        guard let nextIndex = exercise.sets.firstIndex(where: { !$0.isComplete }) else { return }
+        logSet(at: nextIndex)
+    }
+
+    private func logSet(at index: Int) {
+        guard exercise.sets.indices.contains(index) else { return }
+        guard !exercise.sets[index].isComplete else { return }
+
+        if !exercise.sets[index].isWarmup,
+           let firstWorkingIndex = workingIndices.first,
+           index == firstWorkingIndex {
+            autoFillRemainingSets(from: index)
+        }
+
+        exercise.sets[index].isComplete = true
+        let restSeconds = exercise.sets[index].isWarmup ? exercise.warmupRestSeconds : exercise.restSeconds
+        onCompleteSet(restSeconds, exercise.sets[index])
+        Haptics.light()
+    }
+
     private func formatRest(_ seconds: Int) -> String {
         let minutes = seconds / 60
         let remainder = seconds % 60
@@ -3690,16 +4123,19 @@ private struct RestTimePickerSheet: View {
                 .frame(maxWidth: .infinity)
                 .colorScheme(.light)
 
-                Button("Done") {
+                Button {
                     restSeconds = selection
                     dismiss()
+                } label: {
+                    Text("Done")
+                        .font(FitFont.body(size: 16, weight: .semibold))
+                        .foregroundColor(FitTheme.buttonText)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(FitTheme.primaryGradient)
+                        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                 }
-                .font(FitFont.body(size: 16, weight: .semibold))
-                .foregroundColor(FitTheme.buttonText)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 14)
-                .background(FitTheme.primaryGradient)
-                .clipShape(RoundedRectangle(cornerRadius: 18))
                 .shadow(color: FitTheme.buttonShadow, radius: 12, x: 0, y: 8)
                 .padding(.horizontal, 20)
                 .padding(.bottom, 12)
@@ -4037,6 +4473,8 @@ private struct WorkoutSetRow: View {
     let index: Int
     let unit: WeightUnit
     @Binding var setEntry: WorkoutSetEntry
+    @Binding var activeSetId: UUID?
+    let isKeyboardVisible: Bool
     let onComplete: (Bool) -> Void
     let onDelete: () -> Void
     @FocusState private var focusedField: Field?
@@ -4081,13 +4519,17 @@ private struct WorkoutSetRow: View {
         max(rowWidth - maxLogSwipePadding, logThreshold + 20)
     }
 
-    private var logFillWidth: CGFloat {
-        max(0, min(swipeOffset, rowWidth))
-    }
+	    private var logFillWidth: CGFloat {
+	        max(0, min(swipeOffset, rowWidth))
+	    }
 
-    private var canLog: Bool {
-        !isComplete
-    }
+	    private var swipeToggleLabel: String {
+	        isComplete ? "UNLOG" : "LOG"
+	    }
+
+	    private var swipeToggleColor: Color {
+	        isComplete ? FitTheme.accentMuted : FitTheme.success
+	    }
 
     private var rowBase: some View {
         ZStack(alignment: .leading) {
@@ -4097,18 +4539,18 @@ private struct WorkoutSetRow: View {
         }
     }
 
-    @ViewBuilder
-    private var logBackground: some View {
-        if swipeOffset > 0 {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(FitTheme.success)
-                .frame(width: logFillWidth)
-                .overlay(
-                    Text("LOG")
-                        .font(FitFont.body(size: 13, weight: .bold))
-                        .foregroundColor(.white)
-                        .opacity(min(1, logFillWidth / 60))
-                        .padding(.leading, 16),
+	    @ViewBuilder
+	    private var logBackground: some View {
+	        if swipeOffset > 0 {
+	            RoundedRectangle(cornerRadius: 16, style: .continuous)
+	                .fill(swipeToggleColor)
+	                .frame(width: logFillWidth)
+	                .overlay(
+	                    Text(swipeToggleLabel)
+	                        .font(FitFont.body(size: 13, weight: .bold))
+	                        .foregroundColor(.white)
+	                        .opacity(min(1, logFillWidth / 60))
+	                        .padding(.leading, 16),
                     alignment: .leading
                 )
         }
@@ -4139,7 +4581,11 @@ private struct WorkoutSetRow: View {
         }
     }
 
-    private var rowContent: some View {
+    private var isSwipeGestureEnabled: Bool {
+        !isKeyboardVisible && focusedField == nil
+    }
+
+    private var rowContentBase: some View {
         HStack(spacing: 0) {
             setNumber
             setMeta
@@ -4149,22 +4595,6 @@ private struct WorkoutSetRow: View {
             setFieldModern(title: "Reps", value: $setEntry.reps, field: .reps, isComplete: isComplete)
                 .padding(.trailing, 8)
             setFieldModern(title: unit.label.uppercased(), value: $setEntry.weight, field: .weight, isComplete: isComplete)
-
-            Button(action: { setCompletion(!isComplete) }) {
-                ZStack {
-                    Circle()
-                        .fill(isComplete ? FitTheme.success : FitTheme.cardStroke)
-                        .frame(width: 36, height: 36)
-
-                    if isComplete {
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 14, weight: .bold))
-                            .foregroundColor(.white)
-                    }
-                }
-            }
-            .buttonStyle(.plain)
-            .padding(.leading, 12)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
@@ -4177,7 +4607,20 @@ private struct WorkoutSetRow: View {
         )
         .offset(x: swipeOffset)
         .background(rowWidthReader)
-        .simultaneousGesture(swipeGesture)
+        .onChange(of: focusedField) { newValue in
+            guard newValue != nil else { return }
+            activeSetId = setEntry.id
+        }
+    }
+
+    @ViewBuilder
+    private var rowContent: some View {
+        if isSwipeGestureEnabled {
+            rowContentBase
+                .simultaneousGesture(swipeGesture, including: .gesture)
+        } else {
+            rowContentBase
+        }
     }
 
     private var setNumber: some View {
@@ -4230,7 +4673,9 @@ private struct WorkoutSetRow: View {
         DragGesture()
             .onChanged { value in
                 if dragAxis == nil {
-                    let isHorizontal = abs(value.translation.width) > abs(value.translation.height)
+                    let horizontal = abs(value.translation.width)
+                    let vertical = abs(value.translation.height)
+                    let isHorizontal = horizontal > max(vertical * 1.2, 12)
                     dragAxis = isHorizontal ? .horizontal : .vertical
                 }
                 guard dragAxis == .horizontal else { return }
@@ -4241,24 +4686,19 @@ private struct WorkoutSetRow: View {
                     }
                     return
                 }
-                if translation < 0 {
-                    swipeOffset = max(translation, -deleteButtonWidth - 20)
-                    didTriggerLogHaptic = false
-                } else if translation > 0 {
-                    guard canLog else {
-                        swipeOffset = 0
-                        didTriggerLogHaptic = false
-                        return
-                    }
-                    swipeOffset = min(translation, maxLogSwipe)
-                    let reachedThreshold = swipeOffset >= logThreshold
-                    if reachedThreshold && !didTriggerLogHaptic {
-                        Haptics.success()
-                        didTriggerLogHaptic = true
-                    } else if !reachedThreshold {
-                        didTriggerLogHaptic = false
-                    }
-                }
+	                if translation < 0 {
+	                    swipeOffset = max(translation, -deleteButtonWidth - 20)
+	                    didTriggerLogHaptic = false
+	                } else if translation > 0 {
+	                    swipeOffset = min(translation, maxLogSwipe)
+	                    let reachedThreshold = swipeOffset >= logThreshold
+	                    if reachedThreshold && !didTriggerLogHaptic {
+	                        isComplete ? Haptics.warning() : Haptics.success()
+	                        didTriggerLogHaptic = true
+	                    } else if !reachedThreshold {
+	                        didTriggerLogHaptic = false
+	                    }
+	                }
             }
             .onEnded { value in
                 defer { dragAxis = nil }
@@ -4268,18 +4708,18 @@ private struct WorkoutSetRow: View {
                         swipeOffset = 0
                         showDeleteButton = false
                         didTriggerLogHaptic = false
-                    } else if value.translation.width < -40 {
-                        swipeOffset = -deleteButtonWidth
-                        showDeleteButton = true
-                    } else if value.translation.width >= logThreshold && canLog {
-                        swipeOffset = 0
-                        showDeleteButton = false
-                        didTriggerLogHaptic = false
-                        setCompletion(true, triggerHaptics: false)
-                    } else {
-                        swipeOffset = 0
-                        showDeleteButton = false
-                        didTriggerLogHaptic = false
+	                    } else if value.translation.width < -40 {
+	                        swipeOffset = -deleteButtonWidth
+	                        showDeleteButton = true
+	                    } else if value.translation.width >= logThreshold {
+	                        swipeOffset = 0
+	                        showDeleteButton = false
+	                        didTriggerLogHaptic = false
+	                        setCompletion(!isComplete, triggerHaptics: false)
+	                    } else {
+	                        swipeOffset = 0
+	                        showDeleteButton = false
+	                        didTriggerLogHaptic = false
                     }
                 }
             }
@@ -4308,28 +4748,20 @@ private struct WorkoutSetRow: View {
         return FitTheme.cardWorkoutAccent.opacity(0.15)
     }
 
-    private func setField(title: String, value: Binding<String>, field: Field) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(title)
-                .font(FitFont.body(size: 10))
+	    private func setField(title: String, value: Binding<String>, field: Field) -> some View {
+	        VStack(alignment: .leading, spacing: 2) {
+	            Text(title)
+	                .font(FitFont.body(size: 10))
                 .foregroundColor(FitTheme.textSecondary)
-            TextField("0", text: value)
-                .keyboardType(.numberPad)
-                .font(FitFont.body(size: 13))
-                .foregroundColor(FitTheme.textPrimary)
-                .focused($focusedField, equals: field)
-                .submitLabel(.done)
-                .toolbar {
-                    ToolbarItemGroup(placement: .keyboard) {
-                        Spacer()
-                        Button("Done") {
-                            focusedField = nil
-                        }
-                    }
-                }
-        }
-        .frame(width: 70)
-    }
+	            TextField("0", text: value)
+	                .keyboardType(.numberPad)
+	                .font(FitFont.body(size: 13))
+	                .foregroundColor(FitTheme.textPrimary)
+	                .focused($focusedField, equals: field)
+	                .submitLabel(.done)
+	        }
+	        .frame(width: 70)
+	    }
     
     private func setFieldModern(title: String, value: Binding<String>, field: Field, isComplete: Bool) -> some View {
         VStack(alignment: .center, spacing: 4) {
@@ -4337,41 +4769,32 @@ private struct WorkoutSetRow: View {
                 .font(FitFont.body(size: 10, weight: .medium))
                 .foregroundColor(FitTheme.textSecondary.opacity(0.7))
             
-            TextField("—", text: value)
-                .keyboardType(.numberPad)
-                .font(FitFont.heading(size: 18))
-                .foregroundColor(isComplete ? FitTheme.success : FitTheme.textPrimary)
-                .multilineTextAlignment(.center)
-                .focused($focusedField, equals: field)
-                .submitLabel(.done)
-                .frame(width: 55)
-                .padding(.vertical, 6)
-                .padding(.horizontal, 8)
-                .background(isComplete ? FitTheme.success.opacity(0.08) : FitTheme.cardHighlight)
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .toolbar {
-                    ToolbarItemGroup(placement: .keyboard) {
-                        Spacer()
-                        Button("Done") {
-                            focusedField = nil
-                        }
-                        .foregroundColor(FitTheme.accent)
-                    }
-                }
-        }
-    }
+	            TextField("—", text: value)
+	                .keyboardType(.numberPad)
+	                .font(FitFont.heading(size: 18))
+	                .foregroundColor(isComplete ? FitTheme.success : FitTheme.textPrimary)
+	                .multilineTextAlignment(.center)
+	                .focused($focusedField, equals: field)
+	                .submitLabel(.done)
+	                .frame(width: 55)
+	                .padding(.vertical, 6)
+	                .padding(.horizontal, 8)
+	                .background(isComplete ? FitTheme.success.opacity(0.08) : FitTheme.cardHighlight)
+	                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+	        }
+	    }
 
-    private func setCompletion(_ value: Bool, triggerHaptics: Bool = true) {
-        guard setEntry.isComplete != value else { return }
-        // Dismiss keyboard when completing a set
-        focusedField = nil
-        setEntry.isComplete = value
-        onComplete(value)
-        if value && triggerHaptics {
-            Haptics.light()
-        }
-    }
-}
+	    private func setCompletion(_ value: Bool, triggerHaptics: Bool = true) {
+	        guard setEntry.isComplete != value else { return }
+	        // Dismiss keyboard when completing a set
+	        focusedField = nil
+	        setEntry.isComplete = value
+	        onComplete(value)
+	        if triggerHaptics {
+	            value ? Haptics.light() : Haptics.selection()
+	        }
+	    }
+	}
 
 struct ExerciseDetailView: View {
     let userId: String
