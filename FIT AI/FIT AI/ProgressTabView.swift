@@ -3985,6 +3985,12 @@ private struct CheckinFlowView: View {
             "steps": stepsChoice.rawValue,
             "mood": moodChoice.rawValue,
         ]
+
+        let analyticsBase: [String: Any] = [
+            "check_in_type": "weekly",
+            "photo_count": selectedImages.count,
+            "photo_retention": photoRetentionChoice.apiValue
+        ]
         isSubmitting = true
         defer { isSubmitting = false }
 
@@ -3995,6 +4001,12 @@ private struct CheckinFlowView: View {
             } catch OnboardingAPIError.serverError(let statusCode, _) where statusCode == 404 {
                 uploadedPhotos = []
             } catch {
+                var props = analyticsBase
+                props["result"] = "failure"
+                props["stage"] = "photo_upload"
+                props["error_type"] = String(describing: type(of: error))
+                PostHogAnalytics.featureUsed(.checkIn, action: "submit", properties: props)
+
                 errorMessage = checkinErrorMessage(for: error)
                 return
             }
@@ -4006,9 +4018,20 @@ private struct CheckinFlowView: View {
                 photoRetention: photoRetentionChoice.apiValue
             )
             await onSubmitSuccess(response)
+
+            var props = analyticsBase
+            props["result"] = "success"
+            PostHogAnalytics.featureUsed(.checkIn, action: "submit", properties: props)
+
             Haptics.success()
             dismiss()
         } catch {
+            var props = analyticsBase
+            props["result"] = "failure"
+            props["stage"] = "submit"
+            props["error_type"] = String(describing: type(of: error))
+            PostHogAnalytics.featureUsed(.checkIn, action: "submit", properties: props)
+
             errorMessage = checkinErrorMessage(for: error)
         }
     }
@@ -4808,19 +4831,19 @@ private struct BodyScanFlowView: View {
         }
     }
 
-    private var header: some View {
-        HStack(alignment: .top, spacing: 12) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Body Scan")
-                    .font(FitFont.heading(size: 30))
-                    .foregroundColor(.white)
-                Text(step.title)
-                    .font(FitFont.body(size: 14, weight: .semibold))
-                    .foregroundColor(Color.white.opacity(0.86))
-                Text("Step \(step.rawValue + 1) of \(Step.allCases.count)")
-                    .font(FitFont.mono(size: 11, weight: .semibold))
-                    .foregroundColor(Color.white.opacity(0.68))
-            }
+	    private var header: some View {
+	        HStack(alignment: .top, spacing: 12) {
+	            VStack(alignment: .leading, spacing: 6) {
+	                Text("Body Scan")
+	                    .font(FitFont.heading(size: 30))
+	                    .foregroundColor(FitTheme.textPrimary)
+	                Text(step.title)
+	                    .font(FitFont.body(size: 14, weight: .semibold))
+	                    .foregroundColor(FitTheme.textSecondary)
+	                Text("Step \(step.rawValue + 1) of \(Step.allCases.count)")
+	                    .font(FitFont.mono(size: 11, weight: .semibold))
+	                    .foregroundColor(FitTheme.textSecondary.opacity(0.85))
+	            }
 
             Spacer()
 
@@ -4858,50 +4881,54 @@ private struct BodyScanFlowView: View {
         }
     }
 
-    private var progressTrack: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            GeometryReader { proxy in
-                let width = max(20, proxy.size.width * stepProgress)
-                ZStack(alignment: .leading) {
-                    Capsule()
-                        .fill(Color.white.opacity(0.15))
-                        .frame(height: 8)
-                    Capsule()
-                        .fill(BodyScanPalette.actionGradient)
-                        .frame(width: width, height: 8)
-                }
-            }
+	    private var progressTrack: some View {
+	        VStack(alignment: .leading, spacing: 12) {
+	            GeometryReader { proxy in
+	                let width = max(20, proxy.size.width * stepProgress)
+	                ZStack(alignment: .leading) {
+	                    Capsule()
+	                        .fill(FitTheme.textPrimary.opacity(0.12))
+	                        .frame(height: 8)
+	                    Capsule()
+	                        .fill(BodyScanPalette.actionGradient)
+	                        .frame(width: width, height: 8)
+	                }
+	            }
             .frame(height: 8)
 
             HStack(spacing: 0) {
-                ForEach(Step.allCases, id: \.rawValue) { item in
-                    VStack(spacing: 4) {
-                        Circle()
-                            .fill(step.rawValue >= item.rawValue ? Color.white : Color.white.opacity(0.35))
-                            .frame(width: 6, height: 6)
-                        Text(item.shortLabel)
-                            .font(FitFont.mono(size: 9, weight: .semibold))
-                            .foregroundColor(
-                                step.rawValue >= item.rawValue
-                                    ? Color.white.opacity(0.94)
-                                    : Color.white.opacity(0.52)
-                            )
-                            .lineLimit(1)
-                    }
-                    .frame(maxWidth: .infinity)
-                }
+	                ForEach(Step.allCases, id: \.rawValue) { item in
+	                    VStack(spacing: 4) {
+	                        Circle()
+	                            .fill(
+	                                step.rawValue >= item.rawValue
+	                                    ? FitTheme.textPrimary
+	                                    : FitTheme.textSecondary.opacity(0.38)
+	                            )
+	                            .frame(width: 6, height: 6)
+	                        Text(item.shortLabel)
+	                            .font(FitFont.mono(size: 9, weight: .semibold))
+	                            .foregroundColor(
+	                                step.rawValue >= item.rawValue
+	                                    ? FitTheme.textPrimary.opacity(0.92)
+	                                    : FitTheme.textSecondary.opacity(0.78)
+	                            )
+	                            .lineLimit(1)
+	                    }
+	                    .frame(maxWidth: .infinity)
+	                }
             }
         }
         .padding(14)
         .background(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(BodyScanPalette.glassGradient)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(Color.white.opacity(0.2), lineWidth: 1)
-        )
-    }
+	        )
+	        .overlay(
+	            RoundedRectangle(cornerRadius: 16, style: .continuous)
+	                .stroke(FitTheme.textPrimary.opacity(0.16), lineWidth: 1)
+	        )
+	    }
 
     private var stepProgress: CGFloat {
         CGFloat(step.rawValue + 1) / CGFloat(Step.allCases.count)
@@ -5751,10 +5778,25 @@ private struct BodyScanFlowView: View {
         step = .analyzing
         analyzingStageIndex = 0
 
+        PostHogAnalytics.featureUsed(
+            .bodyScan,
+            action: "analyze_start",
+            properties: [
+                "photo_count": 2
+            ]
+        )
+
         let generated = buildResult()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.7) {
             if let generated {
                 result = generated
+                PostHogAnalytics.featureUsed(
+                    .bodyScan,
+                    action: "analyze_complete",
+                    properties: [
+                        "result": "success"
+                    ]
+                )
                 if let frontImage, let data = frontImage.jpegData(compressionQuality: 0.85) {
                     _ = ProgressPhotoLocalStore.save(
                         imageData: data,
@@ -5779,6 +5821,13 @@ private struct BodyScanFlowView: View {
                 Haptics.success()
                 step = .results
             } else {
+                PostHogAnalytics.featureUsed(
+                    .bodyScan,
+                    action: "analyze_complete",
+                    properties: [
+                        "result": "failure"
+                    ]
+                )
                 errorMessage = "Check inputs and try again."
                 step = .review
             }

@@ -579,6 +579,16 @@ struct OnboardingReplicaView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.top, 6)
+
+            Button {
+                viewModel.showLogin = true
+            } label: {
+                Text("Already have an account? **Sign in**")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundColor(onboardingPrimaryText.opacity(0.68))
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 6)
         }
         .frame(maxWidth: .infinity)
     }

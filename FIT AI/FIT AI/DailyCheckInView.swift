@@ -397,7 +397,7 @@ final class DailyCheckInViewModel: ObservableObject {
     }
     
     func submitCheckIn() async {
-        guard isComplete else { return }
+        guard let hitMacros, let trainingStatus, let sleepQuality else { return }
         
         isSubmitting = true
         
@@ -417,6 +417,16 @@ final class DailyCheckInViewModel: ObservableObject {
         )
         
         // Complete the check-in
+        PostHogAnalytics.featureUsed(
+            .checkIn,
+            action: "submit",
+            properties: [
+                "check_in_type": "daily",
+                "hit_macros": hitMacros,
+                "training_status": trainingStatus.rawValue,
+                "sleep_quality": sleepQuality.rawValue
+            ]
+        )
         StreakStore.shared.completeCheckIn(checkInData)
         
         isSubmitting = false
@@ -479,4 +489,3 @@ final class DailyCheckInViewModel: ObservableObject {
 #Preview {
     DailyCheckInView(onComplete: {})
 }
-

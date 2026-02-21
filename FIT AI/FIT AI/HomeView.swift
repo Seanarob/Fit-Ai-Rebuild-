@@ -578,6 +578,16 @@ struct HomeView: View {
             isLaunchingWorkoutFromHome = false
         }
 
+        var analyticsProps: [String: Any] = [
+            "source": launchPlan.source.rawValue,
+            "exercise_count": launchPlan.exercises.count,
+            "has_template": launchPlan.templateId != nil
+        ]
+        if let templateId = launchPlan.templateId {
+            analyticsProps["template_id"] = templateId
+        }
+        PostHogAnalytics.featureUsed(.workoutTracking, action: "start", properties: analyticsProps)
+
         TodayTrainingStore.save(
             title: launchPlan.title,
             exercises: launchPlan.exercises.map(\.name),

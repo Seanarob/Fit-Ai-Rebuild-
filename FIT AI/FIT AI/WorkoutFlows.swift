@@ -817,6 +817,16 @@ struct WorkoutSessionView: View {
                 }
                 // Initial save when session starts
                 saveSessionState()
+
+                let now = Date()
+                let restEndDate = restActive ? now.addingTimeInterval(TimeInterval(restRemaining)) : nil
+                await WorkoutLiveActivityManager.startIfNeeded(
+                    startDate: now.addingTimeInterval(-TimeInterval(workoutElapsed)),
+                    sessionTitle: sessionTitle.isEmpty ? title : sessionTitle,
+                    isPaused: isPaused,
+                    restEndDate: restEndDate,
+                    restTotalSeconds: restActive ? restRemaining : nil
+                )
             }
             .onReceive(NotificationCenter.default.publisher(for: .fitAIRestTimerSkip)) { _ in
                 guard restActive else { return }
@@ -825,6 +835,32 @@ struct WorkoutSessionView: View {
             .onReceive(NotificationCenter.default.publisher(for: .fitAIRestTimerAdd30)) { _ in
                 guard restActive else { return }
                 adjustRestTimer(by: 30)
+            }
+            .onChange(of: isPaused) { _ in
+                saveSessionState()
+                let now = Date()
+                let restEndDate = restActive ? now.addingTimeInterval(TimeInterval(restRemaining)) : nil
+                Task {
+                    await WorkoutLiveActivityManager.update(
+                        sessionTitle: sessionTitle.isEmpty ? title : sessionTitle,
+                        isPaused: isPaused,
+                        restEndDate: restEndDate,
+                        restTotalSeconds: restActive ? restRemaining : nil
+                    )
+                }
+            }
+            .onChange(of: sessionTitle) { _ in
+                saveSessionState()
+                let now = Date()
+                let restEndDate = restActive ? now.addingTimeInterval(TimeInterval(restRemaining)) : nil
+                Task {
+                    await WorkoutLiveActivityManager.update(
+                        sessionTitle: sessionTitle.isEmpty ? title : sessionTitle,
+                        isPaused: isPaused,
+                        restEndDate: restEndDate,
+                        restTotalSeconds: restActive ? restRemaining : nil
+                    )
+                }
             }
             .onChange(of: scenePhase) { newPhase in
                 if newPhase == .background || newPhase == .inactive {
@@ -1014,12 +1050,32 @@ struct WorkoutSessionView: View {
         if restActive {
             scheduleRestNotification(seconds: restRemaining)
         }
+        saveSessionState()
+        Task {
+            let now = Date()
+            let restEndDate = restActive ? now.addingTimeInterval(TimeInterval(restRemaining)) : nil
+            await WorkoutLiveActivityManager.update(
+                sessionTitle: sessionTitle.isEmpty ? title : sessionTitle,
+                isPaused: isPaused,
+                restEndDate: restEndDate,
+                restTotalSeconds: restActive ? restRemaining : nil
+            )
+        }
     }
 
     private func stopRestTimer() {
         restActive = false
         restRemaining = 0
         cancelRestNotification()
+        saveSessionState()
+        Task {
+            await WorkoutLiveActivityManager.update(
+                sessionTitle: sessionTitle.isEmpty ? title : sessionTitle,
+                isPaused: isPaused,
+                restEndDate: nil,
+                restTotalSeconds: nil
+            )
+        }
     }
 
     private func adjustRestTimer(by delta: Int) {
@@ -1030,6 +1086,17 @@ struct WorkoutSessionView: View {
         if restActive {
             scheduleRestNotification(seconds: restRemaining)
         }
+        saveSessionState()
+        Task {
+            let now = Date()
+            let restEndDate = restActive ? now.addingTimeInterval(TimeInterval(restRemaining)) : nil
+            await WorkoutLiveActivityManager.update(
+                sessionTitle: sessionTitle.isEmpty ? title : sessionTitle,
+                isPaused: isPaused,
+                restEndDate: restEndDate,
+                restTotalSeconds: restActive ? restRemaining : nil
+            )
+        }
     }
 
     private func completeRestTimer() {
@@ -1037,6 +1104,15 @@ struct WorkoutSessionView: View {
         restRemaining = 0
         Haptics.success()
         SoundEffects.restComplete()
+        saveSessionState()
+        Task {
+            await WorkoutLiveActivityManager.update(
+                sessionTitle: sessionTitle.isEmpty ? title : sessionTitle,
+                isPaused: isPaused,
+                restEndDate: nil,
+                restTotalSeconds: nil
+            )
+        }
     }
 
     private func scheduleRestNotification(seconds: Int) {
@@ -1111,11 +1187,27 @@ struct WorkoutSessionView: View {
             restRemaining: restRemaining,
             restActive: restActive
         )
+
+        let now = Date()
+        WorkoutWidgetStateStore.save(
+            WorkoutWidgetState(
+                sessionTitle: sessionTitle.isEmpty ? title : sessionTitle,
+                startDate: now.addingTimeInterval(-TimeInterval(workoutElapsed)),
+                isPaused: isPaused,
+                restEndDate: restActive ? now.addingTimeInterval(TimeInterval(restRemaining)) : nil,
+                lastUpdated: now,
+                isActive: true
+            )
+        )
     }
 
     /// Clear saved session state (called on completion or discard)
     private func clearSessionState() {
         WorkoutSessionStore.clear()
+        WorkoutWidgetStateStore.clear()
+        Task {
+            await WorkoutLiveActivityManager.endAll()
+        }
     }
 
     private func logSetIfNeeded(
@@ -1277,6 +1369,12 @@ struct WorkoutSessionView: View {
     private func finishWorkout() async {
         // Clear saved session state since we're completing the workout
         clearSessionState()
+
+        let baseProps: [String: Any] = [
+            "duration_sec": workoutElapsed,
+            "exercise_count": exercises.count,
+            "has_server_session": sessionId != nil
+        ]
         
         guard let sessionId else {
             let summary = WorkoutSessionCompleteResponse(
@@ -1296,6 +1394,10 @@ struct WorkoutSessionView: View {
             showCompletionSheet = true
             WorkoutCompletionStore.markCompleted(exercises: exercises.map(\.name))
             Haptics.success()
+
+            var props = baseProps
+            props["result"] = "success_local"
+            PostHogAnalytics.featureUsed(.workoutTracking, action: "complete", properties: props)
             return
         }
         isCompleting = true
@@ -1305,6 +1407,12 @@ struct WorkoutSessionView: View {
                 sessionId: sessionId,
                 durationSeconds: workoutElapsed
             )
+
+            var props = baseProps
+            props["result"] = "success"
+            props["prs_count"] = summary.prs.count
+            PostHogAnalytics.featureUsed(.workoutTracking, action: "complete", properties: props)
+
             let updatedStreak = WorkoutStreakStore.update()
             NotificationCenter.default.post(
                 name: .fitAIWorkoutStreakUpdated,
@@ -1325,6 +1433,11 @@ struct WorkoutSessionView: View {
                 showFinishMessage = true
                 isCompleting = false
             }
+
+            var props = baseProps
+            props["result"] = "failure"
+            props["error_type"] = String(describing: type(of: error))
+            PostHogAnalytics.featureUsed(.workoutTracking, action: "complete", properties: props)
         }
     }
 

@@ -1891,6 +1891,17 @@ struct WorkoutView: View {
         refreshSplitSnapshot()
         hasSplitPreferences = true
         selectedWeeklyDay = nil
+
+        PostHogAnalytics.featureUsed(
+            .splitSetup,
+            action: "save",
+            properties: [
+                "mode": mode.rawValue,
+                "days_per_week": clampedDays,
+                "split_type": splitType.rawValue,
+                "has_focus": !focus.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ]
+        )
     }
 
     private func preparedSplitDayPlans(
@@ -2501,6 +2512,17 @@ struct WorkoutView: View {
             }
             return .custom
         }()
+
+        var analyticsProps: [String: Any] = [
+            "source": source.rawValue,
+            "exercise_count": resolvedExercises.count,
+            "has_template": templateId != nil
+        ]
+        if let templateId {
+            analyticsProps["template_id"] = templateId
+        }
+        PostHogAnalytics.featureUsed(.workoutTracking, action: "start", properties: analyticsProps)
+
         TodayTrainingStore.save(
             title: title,
             exercises: resolvedExercises.map { $0.name },
@@ -3758,6 +3780,18 @@ struct WorkoutView: View {
                     source: .generated
                 )
             }
+            PostHogAnalytics.featureUsed(
+                .workoutGeneration,
+                action: "generate",
+                properties: [
+                    "result": adjustedExercises.isEmpty ? "empty" : "success",
+                    "duration_minutes": selectedDurationMinutes,
+                    "muscle_groups_count": selectedMuscleGroups.count,
+                    "equipment_count": selectedEquipment.count,
+                    "exercise_count": adjustedExercises.count,
+                    "server_used": true
+                ]
+            )
             return !adjustedExercises.isEmpty
         } catch {
             let fallback = adjustExercisesToDuration(
@@ -3783,6 +3817,18 @@ struct WorkoutView: View {
                     source: .generated
                 )
             }
+            PostHogAnalytics.featureUsed(
+                .workoutGeneration,
+                action: "generate",
+                properties: [
+                    "result": fallback.isEmpty ? "failure" : "fallback",
+                    "duration_minutes": selectedDurationMinutes,
+                    "muscle_groups_count": selectedMuscleGroups.count,
+                    "equipment_count": selectedEquipment.count,
+                    "exercise_count": fallback.count,
+                    "server_used": false
+                ]
+            )
             return !fallback.isEmpty
         }
     }

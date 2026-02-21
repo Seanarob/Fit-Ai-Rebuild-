@@ -55,6 +55,15 @@ final class NutritionViewModel: ObservableObject {
     func logManualItem(item: LoggedFoodItem, mealType: MealType, date: Date = Date()) async -> Bool {
         guard !userId.isEmpty else { return false }
         applyLocalLog(item, mealType: mealType, date: date)
+
+        var analyticsProps: [String: Any] = [
+            "meal_type": mealType.rawValue
+        ]
+        if let source = item.source, !source.isEmpty {
+            analyticsProps["source"] = source
+        }
+        PostHogAnalytics.featureUsed(.foodLogging, action: "log", properties: analyticsProps)
+
         errorMessage = nil
         Haptics.success()
         postNutritionLoggedNotification(for: date)

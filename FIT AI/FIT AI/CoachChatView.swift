@@ -591,6 +591,18 @@ final class CoachChatViewModel: ObservableObject {
         let wantsActionExecution = Self.isActionExecutionIntent(text)
         let isWorkoutRequest = Self.isWorkoutRequest(text)
 
+        var analyticsProps: [String: Any] = [
+            "chat_type": "coach",
+            "thread_id": thread.id,
+            "message_length": text.count,
+            "is_workout_request": isWorkoutRequest,
+            "wants_action_execution": wantsActionExecution
+        ]
+        if let requestedActionType {
+            analyticsProps["requested_action_type"] = requestedActionType.rawValue
+        }
+        PostHogAnalytics.featureUsed(.aiChat, action: "message_sent", properties: analyticsProps)
+
         let userMessage = CoachChatMessage(
             id: UUID().uuidString,
             role: .user,
