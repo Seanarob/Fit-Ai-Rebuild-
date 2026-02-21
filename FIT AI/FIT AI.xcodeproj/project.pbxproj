@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		ABCDEF0123456789ABCDEF05 /* PostHog in Frameworks */ = {isa = PBXBuildFile; productRef = ABCDEF0123456789ABCDEF04 /* PostHog */; };
 		E81A81602F0F2BAD002A678B /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = ABCDEF0123456789ABCDEF02 /* Supabase */; };
 /* End PBXBuildFile section */
 
@@ -33,6 +34,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				E81A81602F0F2BAD002A678B /* Supabase in Frameworks */,
+				ABCDEF0123456789ABCDEF05 /* PostHog in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -78,6 +80,7 @@
 			name = "FIT AI";
 			packageProductDependencies = (
 				ABCDEF0123456789ABCDEF02 /* Supabase */,
+				ABCDEF0123456789ABCDEF04 /* PostHog */,
 			);
 			productName = "FIT AI";
 			productReference = E8BBD50D2F0E01FE00C4B8DA /* FIT AI.app */;
@@ -109,6 +112,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				ABCDEF0123456789ABCDEF01 /* XCRemoteSwiftPackageReference "supabase-swift" */,
+				ABCDEF0123456789ABCDEF03 /* XCRemoteSwiftPackageReference "posthog-ios" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = E8BBD50E2F0E01FE00C4B8DA /* Products */;
@@ -374,6 +378,14 @@
 				minimumVersion = 1.0.0;
 			};
 		};
+		ABCDEF0123456789ABCDEF03 /* XCRemoteSwiftPackageReference "posthog-ios" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/PostHog/posthog-ios.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 3.0.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -381,6 +393,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = ABCDEF0123456789ABCDEF01 /* XCRemoteSwiftPackageReference "supabase-swift" */;
 			productName = Supabase;
+		};
+		ABCDEF0123456789ABCDEF04 /* PostHog */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = ABCDEF0123456789ABCDEF03 /* XCRemoteSwiftPackageReference "posthog-ios" */;
+			productName = PostHog;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

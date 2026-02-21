@@ -8,8 +8,19 @@
 import SwiftUI
 import UIKit
 import UserNotifications
+import PostHog
 
 final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
+    private func configurePostHog() {
+        guard let apiKey = PostHogSettings.apiKey, !apiKey.isEmpty else {
+            assertionFailure("PostHog is not configured. Set POSTHOG_API_KEY in PostHog.plist.")
+            return
+        }
+
+        let config = PostHogConfig(apiKey: apiKey, host: PostHogSettings.host)
+        PostHogSDK.shared.setup(config)
+    }
+
     private func configureAppearance() {
         let chrome = UIColor { trait in
             if trait.userInterfaceStyle == .dark {
@@ -106,6 +117,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
+        configurePostHog()
         configureAppearance()
         UNUserNotificationCenter.current().delegate = self
         
