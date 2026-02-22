@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>UILaunchScreen</key>
+	<dict/>
+	<key>NSHealthShareUsageDescription</key>
+	<string>FIT AI reads your health data to sync workouts, activity, and progress so your coach can give you personalized guidance.</string>
+	<key>NSHealthUpdateUsageDescription</key>
+	<string>FIT AI saves your workouts and activity to Health so your progress is in one place and stays in sync with your device.</string>
+</dict>
+</plist>
