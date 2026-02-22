@@ -3391,40 +3391,56 @@ private struct WorkoutExerciseLoggingSheet: View {
                     if !warmupIndices.isEmpty {
                         sectionTitle("Warm-up Sets")
                         ForEach(Array(warmupIndices.enumerated()), id: \.element) { index, setIndex in
-                        WorkoutSetRow(
-                            index: index + 1,
-                            unit: exercise.unit,
-                            setEntry: $exercise.sets[setIndex],
-                            activeSetId: $activeSetId,
-                            isKeyboardVisible: isKeyboardVisible,
-                            onComplete: { isComplete in
-                                guard isComplete else { return }
-                                onCompleteSet(exercise.warmupRestSeconds, exercise.sets[setIndex])
-                            },
-                            onDelete: { removeSet(id: exercise.sets[setIndex].id) }
-                            )
+                            if let binding = bindingForSet(at: setIndex) {
+                                WorkoutSetRow(
+                                    index: index + 1,
+                                    unit: exercise.unit,
+                                    setEntry: binding,
+                                    activeSetId: $activeSetId,
+                                    isKeyboardVisible: isKeyboardVisible,
+                                    onComplete: { isComplete in
+                                        guard isComplete else { return }
+                                        if let set = exercise.sets[safe: setIndex] {
+                                            onCompleteSet(exercise.warmupRestSeconds, set)
+                                        }
+                                    },
+                                    onDelete: {
+                                        if let id = exercise.sets[safe: setIndex]?.id {
+                                            removeSet(id: id)
+                                        }
+                                    }
+                                )
+                            }
                         }
                         warmupSetActions
                     }
 
                     sectionTitle("Working Sets")
                     ForEach(Array(workingIndices.enumerated()), id: \.element) { index, setIndex in
-                        WorkoutSetRow(
-                            index: index + 1,
-                            unit: exercise.unit,
-                            setEntry: $exercise.sets[setIndex],
-                            activeSetId: $activeSetId,
-                            isKeyboardVisible: isKeyboardVisible,
-                            onComplete: { isComplete in
-                                guard isComplete else { return }
-                                // Auto-fill remaining sets when first working set is completed
-                                if index == 0 {
-                                    autoFillRemainingSets(from: setIndex)
+                        if let binding = bindingForSet(at: setIndex) {
+                            WorkoutSetRow(
+                                index: index + 1,
+                                unit: exercise.unit,
+                                setEntry: binding,
+                                activeSetId: $activeSetId,
+                                isKeyboardVisible: isKeyboardVisible,
+                                onComplete: { isComplete in
+                                    guard isComplete else { return }
+                                    // Auto-fill remaining sets when first working set is completed
+                                    if index == 0 {
+                                        autoFillRemainingSets(from: setIndex)
+                                    }
+                                    if let set = exercise.sets[safe: setIndex] {
+                                        onCompleteSet(exercise.restSeconds, set)
+                                    }
+                                },
+                                onDelete: {
+                                    if let id = exercise.sets[safe: setIndex]?.id {
+                                        removeSet(id: id)
+                                    }
                                 }
-                                onCompleteSet(exercise.restSeconds, exercise.sets[setIndex])
-                            },
-                            onDelete: { removeSet(id: exercise.sets[setIndex].id) }
-                        )
+                            )
+                        }
                     }
 
                     setActions
@@ -4034,6 +4050,14 @@ private struct WorkoutExerciseLoggingSheet: View {
 
     private var workingIndices: [Int] {
         exercise.sets.indices.filter { !exercise.sets[$0].isWarmup }
+    }
+
+    private func bindingForSet(at index: Int) -> Binding<WorkoutSetEntry>? {
+        guard exercise.sets.indices.contains(index) else { return nil }
+        return Binding(
+            get: { exercise.sets[index] },
+            set: { exercise.sets[index] = $0 }
+        )
     }
 
     private var hasIncompleteSets: Bool {
@@ -5200,5 +5224,11 @@ private struct WorkoutDetailCard<Content: View>: View {
                     .stroke(FitTheme.cardStroke, lineWidth: 1)
             )
             .shadow(color: FitTheme.shadow, radius: 12, x: 0, y: 6)
+    }
+}
+
+private extension Array {
+    subscript(safe index: Index) -> Element? {
+        indices.contains(index) ? self[index] : nil
     }
 }
