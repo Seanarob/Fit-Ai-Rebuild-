@@ -580,6 +580,7 @@ struct WorkoutSessionView: View {
     @State private var isCompleting = false
     @State private var completionSummary: WorkoutSessionCompleteResponse?
     @State private var completionStreak = 0
+    @State private var shareData: WorkoutShareData?
     @State private var showCompletionSheet = false
     @State private var showCoachChat = false
     @State private var showDiscardAlert = false
@@ -936,14 +937,29 @@ struct WorkoutSessionView: View {
         view
             .sheet(isPresented: $showCompletionSheet) {
                 if let summary = completionSummary {
-                    WorkoutCompletionSheet(summary: summary, streakCount: completionStreak) {
-                        showCompletionSheet = false
-                        dismiss()
-                    }
+                    WorkoutCompletionSheet(
+                        summary: summary,
+                        streakCount: completionStreak,
+                        onShare: {
+                            showCompletionSheet = false
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                                shareData = shareData ?? makeShareData(summary: summary, streak: completionStreak)
+                            }
+                        },
+                        onDone: {
+                            showCompletionSheet = false
+                            dismiss()
+                        }
+                    )
                 }
             }
             .sheet(isPresented: $showCoachChat) {
                 CoachChatView(userId: userId)
+            }
+            .sheet(item: $shareData) { data in
+                WorkoutShareComposer(data: data) {
+                    shareData = nil
+                }
             }
             .fullScreenCover(isPresented: $showNewPRCelebration) {
                 PRCelebrationView(
@@ -1176,6 +1192,19 @@ struct WorkoutSessionView: View {
         return String(format: "%d:%02d:%02d", hours, minutes, remaining)
     }
 
+    private func makeShareData(summary: WorkoutSessionCompleteResponse, streak: Int) -> WorkoutShareData {
+        let name = sessionTitle.isEmpty ? title : sessionTitle
+        let weeklyWin = StreakStore.shared.weeklyWin.currentWinStreak
+        return WorkoutShareBuilder.makeShareData(
+            title: name,
+            exercises: exercises,
+            durationSeconds: summary.durationSeconds,
+            prCount: summary.prs.count,
+            weeklyStreak: weeklyWin > 0 ? weeklyWin : streak,
+            date: Date()
+        )
+    }
+
     /// Save current workout session state to persistent storage for crash recovery
     private func saveSessionState() {
         WorkoutSessionStore.save(
@@ -1391,6 +1420,7 @@ struct WorkoutSessionView: View {
             )
             completionSummary = summary
             completionStreak = updatedStreak
+            shareData = makeShareData(summary: summary, streak: updatedStreak)
             showCompletionSheet = true
             WorkoutCompletionStore.markCompleted(exercises: exercises.map(\.name))
             Haptics.success()
@@ -1422,6 +1452,7 @@ struct WorkoutSessionView: View {
             await MainActor.run {
                 completionSummary = summary
                 completionStreak = updatedStreak
+                shareData = makeShareData(summary: summary, streak: updatedStreak)
                 showCompletionSheet = true
                 isCompleting = false
                 WorkoutCompletionStore.markCompleted(exercises: exercises.map(\.name))
@@ -1935,6 +1966,7 @@ private struct PRCelebrationView: View {
 private struct WorkoutCompletionSheet: View {
     let summary: WorkoutSessionCompleteResponse
     let streakCount: Int
+    let onShare: () -> Void
     let onDone: () -> Void
 
     @State private var step: CompletionStep
@@ -1952,9 +1984,10 @@ private struct WorkoutCompletionSheet: View {
     @State private var glowIntensity: CGFloat = 0
     @State private var sparkleRotation: Double = 0
 
-    init(summary: WorkoutSessionCompleteResponse, streakCount: Int, onDone: @escaping () -> Void) {
+    init(summary: WorkoutSessionCompleteResponse, streakCount: Int, onShare: @escaping () -> Void, onDone: @escaping () -> Void) {
         self.summary = summary
         self.streakCount = streakCount
+        self.onShare = onShare
         self.onDone = onDone
         _step = State(initialValue: summary.prs.isEmpty ? .congrats : .pr)
     }
@@ -2176,6 +2209,9 @@ private struct WorkoutCompletionSheet: View {
             Text("Duration · \(formatDuration(summary.durationSeconds))")
                 .font(FitFont.body(size: 16))
                 .foregroundColor(FitTheme.textSecondary)
+
+            CompletionActionButton(title: "Share", action: onShare)
+                .padding(.horizontal, 20)
 
             CompletionActionButton(title: "Done", action: onDone)
                 .padding(.horizontal, 20)
